@@ -1,0 +1,49 @@
+# photopipe.example.toml — copy to ~/.config/photopipe/photopipe.toml and adjust
+# All values shown are the compiled-in defaults; omitting any key uses the default.
+
+[catalog]
+db_path          = "~/.local/share/photopipe/catalog.duckdb"
+cache_dir        = "~/.cache/photopipe"
+write_batch_size = 64
+enable_vss       = false   # DuckDB vss (HNSW) extension — experimental
+
+[ingest]
+extensions            = ["arw","cr3","cr2","nef","raf","rw2","dng","jpg","jpeg"]
+follow_symlinks       = false
+threads               = 0        # 0 = all logical cores
+sidecar_jpg           = "prefer" # "prefer" | "ignore" | "require"
+preview_max_long_edge = 2048
+preview_quality       = 85       # WebP quality (0–100)
+
+[models]
+device    = "auto"        # "auto" | "coreml" | "cuda" | "tensorrt" | "cpu"
+embedder  = "dinov2-base" # "dinov2-small" | "dinov2-base"
+iqa       = "clip-iqa"   # "clip-iqa"
+detector  = "rt-detr-l"  # "rt-detr-l" | "rt-detr-xl"
+model_dir = "./models"
+
+[defect.blur]
+enable                 = true
+subject_min_area_ratio = 0.02  # ignore detected subjects smaller than this fraction
+fallback_center_crop   = 0.4   # center-crop fraction when no subject detected
+iqa_second_opinion     = true
+percentile_threshold   = 0.10  # bottom 10% of sharpness within lens bucket
+min_samples_for_bucket = 30    # fall back to global threshold below this count
+
+[defect.exposure]
+enable                        = true
+clipped_highlights_threshold  = 0.05  # > 5 % pixels at ≥ 0.99 → overexposed flag
+clipped_shadows_threshold     = 0.10  # > 10 % pixels at ≤ 0.01 → underexposed flag
+
+[dedupe]
+enable                         = true
+time_window_seconds            = 60
+cosine_threshold_within_window = 0.92
+cosine_threshold_global        = 0.97
+knn_k                          = 10
+min_group_size                 = 2
+
+[output]
+review_tree     = "<library>/_review" # <library> is substituted with the scan root
+link_type       = "symlink"           # "symlink" | "hardlink"
+keeper_strategy = "iqa"              # "iqa" | "sharpness" | "iqa_then_sharpness"
