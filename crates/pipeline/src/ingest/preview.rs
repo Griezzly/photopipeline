@@ -54,27 +54,11 @@ pub fn extract_preview_jpg(
     Ok(resize_to_long_edge(img, max_long_edge))
 }
 
-/// Encode `img` as a lossless WebP byte buffer.
-///
-/// Note: `image` 0.25.x only supports lossless WebP encoding; the `quality`
-/// parameter is accepted for API compatibility but is not forwarded to the
-/// encoder.
-pub fn encode_webp(img: &DynamicImage, _quality: u8) -> Result<Vec<u8>, String> {
-    use image::codecs::webp::WebPEncoder;
-    use image::ImageEncoder;
-
+/// Encode `img` as a lossy WebP byte buffer at the given quality (0–100).
+pub fn encode_webp(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
     let rgb = img.to_rgb8();
-    let mut buf = Vec::new();
-    let encoder = WebPEncoder::new_lossless(&mut buf);
-    encoder
-        .write_image(
-            rgb.as_raw(),
-            rgb.width(),
-            rgb.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(buf)
+    let encoder = webp::Encoder::from_rgb(rgb.as_raw(), rgb.width(), rgb.height());
+    Ok(encoder.encode(quality as f32).to_vec())
 }
 
 /// Resize `img` so its longest edge is at most `max_long_edge` pixels.

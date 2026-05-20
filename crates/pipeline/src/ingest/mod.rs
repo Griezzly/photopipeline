@@ -143,7 +143,15 @@ pub fn ingest_directory(
                     let to_flush = std::mem::take(&mut *b);
                     drop(b); // release lock before I/O
                     if let Err(e) = catalog.flush_batch(&to_flush) {
-                        tracing::warn!(error = %e, "catalog flush failed");
+                        let n = to_flush.len() as u64;
+                        tracing::warn!(
+                            error = %e,
+                            first_file = %to_flush[0].0.path.display(),
+                            batch_size = n,
+                            "catalog flush failed; batch counted as errored"
+                        );
+                        processed.fetch_sub(n, Ordering::Relaxed);
+                        errored.fetch_add(n, Ordering::Relaxed);
                     }
                 }
             }
@@ -157,9 +165,17 @@ pub fn ingest_directory(
     // ── flush remaining batch ─────────────────────────────────────────────────
     let remaining = batch.into_inner().unwrap();
     if !remaining.is_empty() {
-        catalog
-            .flush_batch(&remaining)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        if let Err(e) = catalog.flush_batch(&remaining) {
+            let n = remaining.len() as u64;
+            tracing::warn!(
+                error = %e,
+                first_file = %remaining[0].0.path.display(),
+                batch_size = n,
+                "final catalog flush failed; batch counted as errored"
+            );
+            processed.fetch_sub(n, Ordering::Relaxed);
+            errored.fetch_add(n, Ordering::Relaxed);
+        }
     }
 
     Ok(IngestReport {

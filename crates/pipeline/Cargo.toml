@@ -16,6 +16,8 @@ image        = { workspace = true }
 walkdir      = { workspace = true }
 xxhash-rust  = { workspace = true }
 rayon        = { workspace = true }
+webp         = { workspace = true }
 
 [dev-dependencies]
 tempfile     = { workspace = true }
+duckdb       = { workspace = true }

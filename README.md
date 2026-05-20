@@ -62,7 +62,7 @@ Default data locations:
 
 1. `photopipe scan <dir>` walks the directory tree (via `walkdir`) in parallel (via `rayon`).
 2. Each file is stat'd and checked against the catalog `(path, mtime_ns, size_bytes)`. Unchanged files are skipped — zero work on repeat runs.
-3. New or changed files are hashed with xxh3-128, EXIF is read (rawler for RAW formats, kamadak-exif for JPEG), and a preview is extracted and encoded as lossless WebP into the content-addressable cache.
+3. New or changed files are hashed with xxh3-128, EXIF is read (rawler for RAW formats, kamadak-exif for JPEG), and a preview is extracted and encoded as lossy WebP (at `preview_quality`) into the content-addressable cache.
 4. Results are written to the DuckDB catalog in batches (one transaction per batch of 64 files).
 
 ## Implementation notes and known deviations from spec
@@ -80,10 +80,6 @@ CREATE TABLE files (
 ```
 
 The behaviour is identical. This can be migrated to the identity syntax once the bundled DuckDB version is updated.
-
-### WebP encoding is lossless
-
-The `image` crate 0.25.x `WebPEncoder` only exposes a lossless encoder (`new_lossless()`). The `preview_quality` config value is accepted and stored for forward compatibility but is currently ignored — all previews are written as lossless WebP. Lossy encoding at the configured quality level will require either a newer `image` release that exposes quality-based WebP or switching to the dedicated `webp` crate.
 
 ## Supported RAW formats
 
