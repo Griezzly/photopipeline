@@ -13,7 +13,7 @@ follow_symlinks       = false
 threads               = 0        # 0 = all logical cores
 sidecar_jpg           = "prefer" # "prefer" | "ignore" | "require"
 preview_max_long_edge = 2048
-preview_quality       = 85       # WebP quality (0–100)
+preview_quality       = 85       # WebP quality (0–100) — reserved; currently ignored (lossless only)
 
 [models]
 device    = "auto"        # "auto" | "coreml" | "cuda" | "tensorrt" | "cpu"
