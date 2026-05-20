@@ -76,9 +76,7 @@ enum Command {
     },
 
     /// Print all catalog data for a single file as JSON.
-    Info {
-        file: PathBuf,
-    },
+    Info { file: PathBuf },
 
     /// Print catalog summary statistics.
     Stats,
@@ -94,25 +92,27 @@ fn main() -> Result<()> {
 
     init_tracing(&cli.log_level, &cli.log_format)?;
 
-    let config_path = cli
-        .config
-        .unwrap_or_else(config::default_config_path);
+    let config_path = cli.config.unwrap_or_else(config::default_config_path);
 
     let cfg = config::load(&config_path)?;
     tracing::debug!(path = %config_path.display(), "config loaded");
 
     match cli.command {
-        Command::Scan { paths, no_models, reprocess } => {
-            cmd_scan(paths, no_models, reprocess, &cfg)
-        }
+        Command::Scan {
+            paths,
+            no_models,
+            reprocess,
+        } => cmd_scan(paths, no_models, reprocess, &cfg),
         Command::Calibrate => cmd_calibrate(&cfg),
-        Command::Dedupe    => cmd_dedupe(&cfg),
-        Command::ReviewTree { output, include, regenerate } => {
-            cmd_review_tree(output, include, regenerate, &cfg)
-        }
+        Command::Dedupe => cmd_dedupe(&cfg),
+        Command::ReviewTree {
+            output,
+            include,
+            regenerate,
+        } => cmd_review_tree(output, include, regenerate, &cfg),
         Command::Info { file } => cmd_info(file, &cfg),
-        Command::Stats        => cmd_stats(&cfg),
-        Command::Doctor       => cmd_doctor(&config_path, &cfg),
+        Command::Stats => cmd_stats(&cfg),
+        Command::Doctor => cmd_doctor(&config_path, &cfg),
     }
 }
 
@@ -122,10 +122,24 @@ fn cmd_scan(
     paths: Vec<PathBuf>,
     _no_models: bool,
     _reprocess: bool,
-    _cfg: &config::Config,
+    cfg: &config::Config,
 ) -> Result<()> {
-    tracing::info!(?paths, "scan — not yet implemented");
-    eprintln!("photopipe scan: not yet implemented (Phase 1)");
+    use pipeline::{cache::Cache, catalog::Catalog, ingest::ingest_directory};
+
+    let db_path = &cfg.catalog.db_path;
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let catalog = Catalog::open(db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+    let cache =
+        Cache::open(cfg.catalog.cache_dir.clone()).map_err(|e| anyhow::anyhow!("cache: {}", e))?;
+
+    let report = ingest_directory(&paths, &catalog, &cache, &cfg.ingest)?;
+
+    println!("Scan complete:");
+    println!("  Processed : {}", report.processed);
+    println!("  Skipped   : {}", report.skipped);
+    println!("  Errored   : {}", report.errored);
     Ok(())
 }
 
@@ -168,7 +182,11 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     println!("PhotoPipe Doctor");
     println!("================");
     println!();
-    println!("OS:           {} ({})", std::env::consts::OS, std::env::consts::ARCH);
+    println!(
+        "OS:           {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     println!("Family:       {}", std::env::consts::FAMILY);
     println!("Config file:  {}", config_path.display());
     println!("Exists:       {}", config_path.exists());
