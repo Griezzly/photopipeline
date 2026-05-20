@@ -4,28 +4,15 @@ use serde::{Deserialize, Serialize};
 
 // ── top-level ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub catalog: CatalogConfig,
-    pub ingest:  IngestConfig,
-    pub models:  ModelsConfig,
-    pub defect:  DefectConfig,
-    pub dedupe:  DedupeConfig,
-    pub output:  OutputConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            catalog: CatalogConfig::default(),
-            ingest:  IngestConfig::default(),
-            models:  ModelsConfig::default(),
-            defect:  DefectConfig::default(),
-            dedupe:  DedupeConfig::default(),
-            output:  OutputConfig::default(),
-        }
-    }
+    pub ingest: IngestConfig,
+    pub models: ModelsConfig,
+    pub defect: DefectConfig,
+    pub dedupe: DedupeConfig,
+    pub output: OutputConfig,
 }
 
 // ── catalog ───────────────────────────────────────────────────────────────────
@@ -33,19 +20,19 @@ impl Default for Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CatalogConfig {
-    pub db_path:          PathBuf,
-    pub cache_dir:        PathBuf,
+    pub db_path: PathBuf,
+    pub cache_dir: PathBuf,
     pub write_batch_size: usize,
-    pub enable_vss:       bool,
+    pub enable_vss: bool,
 }
 
 impl Default for CatalogConfig {
     fn default() -> Self {
         Self {
-            db_path:          xdg_data_home().join("photopipe/catalog.duckdb"),
-            cache_dir:        xdg_cache_home().join("photopipe"),
+            db_path: xdg_data_home().join("photopipe/catalog.duckdb"),
+            cache_dir: xdg_cache_home().join("photopipe"),
             write_batch_size: 64,
-            enable_vss:       false,
+            enable_vss: false,
         }
     }
 }
@@ -55,27 +42,34 @@ impl Default for CatalogConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IngestConfig {
-    pub extensions:           Vec<String>,
-    pub follow_symlinks:      bool,
+    pub extensions: Vec<String>,
+    pub follow_symlinks: bool,
     /// 0 = use all logical cores
-    pub threads:              usize,
-    pub sidecar_jpg:          SidecarJpgMode,
+    pub threads: usize,
+    pub sidecar_jpg: SidecarJpgMode,
     pub preview_max_long_edge: u32,
-    pub preview_quality:      u8,
+    pub preview_quality: u8,
 }
 
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             extensions: vec![
-                "arw".into(), "cr3".into(), "cr2".into(), "nef".into(),
-                "raf".into(), "rw2".into(), "dng".into(), "jpg".into(), "jpeg".into(),
+                "arw".into(),
+                "cr3".into(),
+                "cr2".into(),
+                "nef".into(),
+                "raf".into(),
+                "rw2".into(),
+                "dng".into(),
+                "jpg".into(),
+                "jpeg".into(),
             ],
-            follow_symlinks:       false,
-            threads:               0,
-            sidecar_jpg:           SidecarJpgMode::Prefer,
+            follow_symlinks: false,
+            threads: 0,
+            sidecar_jpg: SidecarJpgMode::Prefer,
             preview_max_long_edge: 2048,
-            preview_quality:       85,
+            preview_quality: 85,
         }
     }
 }
@@ -93,20 +87,20 @@ pub enum SidecarJpgMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
-    pub device:    DeviceChoice,
-    pub embedder:  String,
-    pub iqa:       String,
-    pub detector:  String,
+    pub device: DeviceChoice,
+    pub embedder: String,
+    pub iqa: String,
+    pub detector: String,
     pub model_dir: PathBuf,
 }
 
 impl Default for ModelsConfig {
     fn default() -> Self {
         Self {
-            device:    DeviceChoice::Auto,
-            embedder:  "dinov2-base".into(),
-            iqa:       "clip-iqa".into(),
-            detector:  "rt-detr-l".into(),
+            device: DeviceChoice::Auto,
+            embedder: "dinov2-base".into(),
+            iqa: "clip-iqa".into(),
+            detector: "rt-detr-l".into(),
             model_dir: PathBuf::from("./models"),
         }
     }
@@ -127,29 +121,29 @@ pub enum DeviceChoice {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct DefectConfig {
-    pub blur:     BlurConfig,
+    pub blur: BlurConfig,
     pub exposure: ExposureConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BlurConfig {
-    pub enable:                  bool,
-    pub subject_min_area_ratio:  f32,
-    pub fallback_center_crop:    f32,
-    pub iqa_second_opinion:      bool,
-    pub percentile_threshold:    f32,
-    pub min_samples_for_bucket:  usize,
+    pub enable: bool,
+    pub subject_min_area_ratio: f32,
+    pub fallback_center_crop: f32,
+    pub iqa_second_opinion: bool,
+    pub percentile_threshold: f32,
+    pub min_samples_for_bucket: usize,
 }
 
 impl Default for BlurConfig {
     fn default() -> Self {
         Self {
-            enable:                 true,
+            enable: true,
             subject_min_area_ratio: 0.02,
-            fallback_center_crop:   0.4,
-            iqa_second_opinion:     true,
-            percentile_threshold:   0.10,
+            fallback_center_crop: 0.4,
+            iqa_second_opinion: true,
+            percentile_threshold: 0.10,
             min_samples_for_bucket: 30,
         }
     }
@@ -158,17 +152,17 @@ impl Default for BlurConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExposureConfig {
-    pub enable:                       bool,
+    pub enable: bool,
     pub clipped_highlights_threshold: f32,
-    pub clipped_shadows_threshold:    f32,
+    pub clipped_shadows_threshold: f32,
 }
 
 impl Default for ExposureConfig {
     fn default() -> Self {
         Self {
-            enable:                       true,
+            enable: true,
             clipped_highlights_threshold: 0.05,
-            clipped_shadows_threshold:    0.10,
+            clipped_shadows_threshold: 0.10,
         }
     }
 }
@@ -178,23 +172,23 @@ impl Default for ExposureConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DedupeConfig {
-    pub enable:                          bool,
-    pub time_window_seconds:             u64,
-    pub cosine_threshold_within_window:  f32,
-    pub cosine_threshold_global:         f32,
-    pub knn_k:                           usize,
-    pub min_group_size:                  usize,
+    pub enable: bool,
+    pub time_window_seconds: u64,
+    pub cosine_threshold_within_window: f32,
+    pub cosine_threshold_global: f32,
+    pub knn_k: usize,
+    pub min_group_size: usize,
 }
 
 impl Default for DedupeConfig {
     fn default() -> Self {
         Self {
-            enable:                         true,
-            time_window_seconds:            60,
+            enable: true,
+            time_window_seconds: 60,
             cosine_threshold_within_window: 0.92,
-            cosine_threshold_global:        0.97,
-            knn_k:                          10,
-            min_group_size:                 2,
+            cosine_threshold_global: 0.97,
+            knn_k: 10,
+            min_group_size: 2,
         }
     }
 }
@@ -205,16 +199,16 @@ impl Default for DedupeConfig {
 #[serde(default)]
 pub struct OutputConfig {
     /// Literal `<library>` is substituted with the scan root at runtime.
-    pub review_tree:     String,
-    pub link_type:       LinkType,
+    pub review_tree: String,
+    pub link_type: LinkType,
     pub keeper_strategy: KeeperStrategy,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
-            review_tree:     "<library>/_review".into(),
-            link_type:       LinkType::Symlink,
+            review_tree: "<library>/_review".into(),
+            link_type: LinkType::Symlink,
             keeper_strategy: KeeperStrategy::Iqa,
         }
     }
@@ -276,21 +270,33 @@ fn xdg_config_home() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from("~")).join(".config"))
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("~"))
+                .join(".config")
+        })
 }
 
 fn xdg_data_home() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from("~")).join(".local/share"))
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("~"))
+                .join(".local/share")
+        })
 }
 
 fn xdg_cache_home() -> PathBuf {
     std::env::var("XDG_CACHE_HOME")
         .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from("~")).join(".cache"))
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("~"))
+                .join(".cache")
+        })
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
