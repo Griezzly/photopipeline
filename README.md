@@ -32,12 +32,16 @@ photopipe stats
 
 ## Configuration
 
-Default config path (auto-created if absent): `<OS config dir>/photopipe/photopipe.toml`
+Default config path: `$XDG_CONFIG_HOME/photopipe/photopipe.toml` (falls back to `~/.config/photopipe/photopipe.toml`).
 
-- macOS: `~/Library/Application Support/photopipe/photopipe.toml`
-- Linux: `~/.config/photopipe/photopipe.toml`
+The file is optional — all settings have sensible defaults. Copy `photopipe.example.toml` as a starting point. Override the path with `--config <path>`.
 
-Copy `photopipe.example.toml` as a starting point.  Override with `--config <path>`.
+Default data locations:
+
+| Purpose | Path |
+|---------|------|
+| Catalog DB | `$XDG_DATA_HOME/photopipe/catalog.duckdb` |
+| Preview cache | `$XDG_CACHE_HOME/photopipe/` |
 
 ## Development
 
@@ -46,5 +50,3 @@ cargo fmt
 cargo clippy -- -D warnings
 cargo test
 ```
-
-See [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) for the full architecture and phase plan.
