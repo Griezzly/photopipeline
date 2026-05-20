@@ -3,11 +3,21 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum IngestError {
     #[error("IO error for {path}: {source}")]
-    Io { path: std::path::PathBuf, #[source] source: std::io::Error },
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("EXIF parse error for {path}: {reason}")]
-    Exif { path: std::path::PathBuf, reason: String },
+    Exif {
+        path: std::path::PathBuf,
+        reason: String,
+    },
     #[error("preview extraction failed for {path}: {reason}")]
-    Preview { path: std::path::PathBuf, reason: String },
+    Preview {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Error)]
