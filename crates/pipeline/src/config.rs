@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 // ── top-level ─────────────────────────────────────────────────────────────────
@@ -42,16 +41,9 @@ pub struct CatalogConfig {
 
 impl Default for CatalogConfig {
     fn default() -> Self {
-        let dirs = project_dirs();
         Self {
-            db_path:          dirs
-                .as_ref()
-                .map(|d| d.data_dir().join("catalog.duckdb"))
-                .unwrap_or_else(|| PathBuf::from("~/.local/share/photopipe/catalog.duckdb")),
-            cache_dir:        dirs
-                .as_ref()
-                .map(|d| d.cache_dir().to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("~/.cache/photopipe")),
+            db_path:          xdg_data_home().join("photopipe/catalog.duckdb"),
+            cache_dir:        xdg_cache_home().join("photopipe"),
             write_batch_size: 64,
             enable_vss:       false,
         }
@@ -245,11 +237,9 @@ pub enum KeeperStrategy {
 
 // ── loading ───────────────────────────────────────────────────────────────────
 
-/// Default config-file path, OS-appropriate.
+/// Default config-file path: `$XDG_CONFIG_HOME/photopipe/photopipe.toml`.
 pub fn default_config_path() -> PathBuf {
-    project_dirs()
-        .map(|d| d.config_dir().join("photopipe.toml"))
-        .unwrap_or_else(|| PathBuf::from("~/.config/photopipe/photopipe.toml"))
+    xdg_config_home().join("photopipe/photopipe.toml")
 }
 
 /// Load config from `path`, falling back to built-in defaults if the file
@@ -267,23 +257,40 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from("", "", "photopipe")
-}
-
 /// Expand a leading `~/` to the real home directory.
 pub fn expand_tilde(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = dirs_home() {
+        if let Some(home) = home_dir() {
             return home.join(rest);
         }
     }
     p.to_path_buf()
 }
 
-fn dirs_home() -> Option<PathBuf> {
+fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn xdg_config_home() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from("~")).join(".config"))
+}
+
+fn xdg_data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from("~")).join(".local/share"))
+}
+
+fn xdg_cache_home() -> PathBuf {
+    std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from("~")).join(".cache"))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

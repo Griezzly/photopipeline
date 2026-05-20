@@ -2,8 +2,8 @@
 # All values shown are the compiled-in defaults; omitting any key uses the default.
 
 [catalog]
-db_path          = "~/.local/share/photopipe/catalog.duckdb"
-cache_dir        = "~/.cache/photopipe"
+db_path          = "~/.local/share/photopipe/catalog.duckdb"   # $XDG_DATA_HOME/photopipe/catalog.duckdb
+cache_dir        = "~/.cache/photopipe"                          # $XDG_CACHE_HOME/photopipe
 write_batch_size = 64
 enable_vss       = false   # DuckDB vss (HNSW) extension — experimental
 
