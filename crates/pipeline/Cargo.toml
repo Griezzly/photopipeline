@@ -4,8 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow    = { workspace = true }
-thiserror = { workspace = true }
-serde     = { workspace = true }
-toml      = { workspace = true }
-tracing   = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+serde        = { workspace = true }
+toml         = { workspace = true }
+tracing      = { workspace = true }
+duckdb       = { workspace = true }
+rawler       = { workspace = true }
+kamadak-exif = { workspace = true }
+image        = { workspace = true }
+walkdir      = { workspace = true }
+xxhash-rust  = { workspace = true }
+rayon        = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }

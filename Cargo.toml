@@ -10,3 +10,11 @@ toml        = "0.8"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 clap        = { version = "4", features = ["derive"] }
+duckdb      = { version = "1", features = ["bundled"] }
+rawler      = "0.7"
+kamadak-exif = "0.6"
+image       = { version = "0.25", features = ["webp"] }
+walkdir     = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rayon       = "1"
+tempfile    = "3"
