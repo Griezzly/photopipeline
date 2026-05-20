@@ -9,4 +9,5 @@ pub mod ingest;
 pub mod models;
 pub mod output;
 
+pub use defect::analyze_defects;
 pub use ingest::ingest_directory;

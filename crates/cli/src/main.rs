@@ -124,7 +124,7 @@ fn cmd_scan(
     _reprocess: bool,
     cfg: &config::Config,
 ) -> Result<()> {
-    use pipeline::{cache::Cache, catalog::Catalog, ingest::ingest_directory};
+    use pipeline::{analyze_defects, cache::Cache, catalog::Catalog, ingest::ingest_directory};
 
     let db_path = &cfg.catalog.db_path;
     if let Some(parent) = db_path.parent() {
@@ -140,6 +140,19 @@ fn cmd_scan(
     println!("  Processed : {}", report.processed);
     println!("  Skipped   : {}", report.skipped);
     println!("  Errored   : {}", report.errored);
+
+    let defect_report = analyze_defects(&catalog, &cache, &cfg.defect)?;
+    println!("Defect analysis:");
+    println!("  Analyzed          : {}", defect_report.analyzed);
+    println!("  Errored           : {}", defect_report.errored);
+    println!(
+        "  Flagged overexposed : {}",
+        defect_report.flagged_overexposed
+    );
+    println!(
+        "  Flagged underexposed: {}",
+        defect_report.flagged_underexposed
+    );
     Ok(())
 }
 
