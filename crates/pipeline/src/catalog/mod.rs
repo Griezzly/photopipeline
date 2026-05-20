@@ -9,6 +9,8 @@ pub mod schema;
 
 pub struct Catalog {
     conn: Mutex<Connection>,
+    #[doc(hidden)]
+    inject_flush_error: std::sync::atomic::AtomicBool,
 }
 
 impl Catalog {
@@ -52,7 +54,18 @@ impl Catalog {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            inject_flush_error: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Enable flush-error injection for integration tests.
+    ///
+    /// After calling this, every subsequent `flush_batch` call on this
+    /// `Catalog` instance will return `Err` without touching the database.
+    #[doc(hidden)]
+    pub fn simulate_flush_error(&self) {
+        self.inject_flush_error
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Returns `true` if the file at `path` needs (re-)processing.
@@ -173,6 +186,15 @@ impl Catalog {
         &self,
         batch: &[(crate::ingest::IngestedFile, Option<crate::ingest::ExifData>)],
     ) -> Result<Vec<i64>, CatalogError> {
+        if self
+            .inject_flush_error
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(CatalogError::Db(
+                "simulated flush error (test injection)".into(),
+            ));
+        }
+
         if batch.is_empty() {
             return Ok(Vec::new());
         }
@@ -278,6 +300,46 @@ impl Catalog {
 
         tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(file_ids)
+    }
+
+    /// Return the EXIF row for the file at `path`, or `None` if not present.
+    pub fn get_exif_by_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<crate::ingest::ExifData>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let result = conn.query_row(
+            "SELECT e.captured_at, e.camera_make, e.camera_model, e.lens_model,
+                    e.focal_length_mm, e.aperture, e.iso, e.shutter_seconds,
+                    e.width, e.height, e.orientation
+             FROM exif e
+             JOIN files f ON f.id = e.file_id
+             WHERE f.path = ?",
+            duckdb::params![path.to_string_lossy().as_ref()],
+            |row| {
+                Ok(crate::ingest::ExifData {
+                    captured_at: row.get(0)?,
+                    camera_make: row.get(1)?,
+                    camera_model: row.get(2)?,
+                    lens_model: row.get(3)?,
+                    focal_length_mm: row.get(4)?,
+                    aperture: row.get(5)?,
+                    iso: row.get::<_, Option<i32>>(6)?.map(|v| v as u32),
+                    shutter_seconds: row.get(7)?,
+                    width: row.get::<_, Option<i32>>(8)?.map(|v| v as u32),
+                    height: row.get::<_, Option<i32>>(9)?.map(|v| v as u32),
+                    orientation: row.get::<_, Option<i16>>(10)?.map(|v| v as u16),
+                })
+            },
+        );
+        match result {
+            Ok(exif) => Ok(Some(exif)),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(CatalogError::Db(e.to_string())),
+        }
     }
 
     /// Count the total number of file rows in the catalog.
