@@ -3,6 +3,14 @@ name    = "pipeline"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default  = []
+# Enable TensorRT execution provider (Linux only).
+# Requires the TensorRT SDK at link time AND ort compiled with tensorrt feature.
+# Build with: cargo build --features pipeline/tensorrt
+# See models/README.md for details.
+tensorrt = []
+
 [dependencies]
 anyhow       = { workspace = true }
 thiserror    = { workspace = true }
@@ -17,6 +25,16 @@ walkdir      = { workspace = true }
 xxhash-rust  = { workspace = true }
 rayon        = { workspace = true }
 webp         = { workspace = true }
+ndarray      = { workspace = true }
+
+# ORT execution providers are platform-conditional.
+# On macOS: CoreML EP is available.
+# On all other targets: CUDA EP is available (TensorRT via --features tensorrt).
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["coreml"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
 
 [dev-dependencies]
 tempfile     = { workspace = true }

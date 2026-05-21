@@ -1,36 +1,36 @@
 use crate::config::BlurConfig;
-use crate::defect::BBox;
+use crate::models::BBox;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SharpnessResult {
     pub s_global: f32,
     pub s_subject: Option<f32>,
     pub s_background: Option<f32>,
     pub subject_ratio: Option<f32>,
-    pub detector_used: &'static str,
+    pub detector_used: String,
 }
 
 /// Compute Laplacian-based sharpness metrics for an image.
 ///
-/// Returns a [`SharpnessResult`] with global variance and optional
-/// subject/background split based on provided ROIs or a center-crop fallback.
+/// `detector_name` is recorded in `SharpnessResult::detector_used` when
+/// qualifying ROIs are present; pass `None` when no detector was used.
 pub fn compute_sharpness(
     preview: &image::DynamicImage,
     subject_rois: Option<&[BBox]>,
+    detector_name: Option<&str>,
     cfg: &BlurConfig,
 ) -> SharpnessResult {
     let gray = preview.to_luma8();
     let width = gray.width() as usize;
     let height = gray.height() as usize;
 
-    // Degenerate images: return zeros.
     if width <= 2 || height <= 2 {
         return SharpnessResult {
             s_global: 0.0,
             s_subject: None,
             s_background: None,
             subject_ratio: None,
-            detector_used: "center-crop-fallback",
+            detector_used: "center-crop-fallback".into(),
         };
     }
 
@@ -134,7 +134,7 @@ pub fn compute_sharpness(
             s_subject,
             s_background,
             subject_ratio,
-            detector_used: "rt-detr-l",
+            detector_used: detector_name.unwrap_or("unknown-detector").into(),
         }
     } else {
         // Fallback center-crop branch.
@@ -219,7 +219,7 @@ pub fn compute_sharpness(
             s_subject,
             s_background,
             subject_ratio,
-            detector_used: "center-crop-fallback",
+            detector_used: "center-crop-fallback".into(),
         }
     }
 }
@@ -237,7 +237,7 @@ mod tests {
     fn uniform_grey_variance_near_zero() {
         let img: ImageBuffer<Luma<u8>, _> = ImageBuffer::from_fn(64, 64, |_, _| Luma([128u8]));
         let dyn_img = DynamicImage::ImageLuma8(img);
-        let result = compute_sharpness(&dyn_img, None, &default_cfg());
+        let result = compute_sharpness(&dyn_img, None, None, &default_cfg());
         assert!(
             result.s_global < 1.0,
             "expected s_global < 1.0 for uniform grey, got {}",
@@ -255,7 +255,7 @@ mod tests {
             }
         });
         let dyn_img = DynamicImage::ImageLuma8(img);
-        let result = compute_sharpness(&dyn_img, None, &default_cfg());
+        let result = compute_sharpness(&dyn_img, None, None, &default_cfg());
         assert!(
             result.s_global > 1000.0,
             "expected s_global > 1000.0 for checkerboard, got {}",
@@ -275,8 +275,8 @@ mod tests {
         let sharp_dyn = DynamicImage::ImageRgb8(sharp_img);
         let blurred_dyn = DynamicImage::ImageRgb8(image::imageops::blur(&sharp_dyn.to_rgb8(), 3.0));
 
-        let sharp_result = compute_sharpness(&sharp_dyn, None, &default_cfg());
-        let blurred_result = compute_sharpness(&blurred_dyn, None, &default_cfg());
+        let sharp_result = compute_sharpness(&sharp_dyn, None, None, &default_cfg());
+        let blurred_result = compute_sharpness(&blurred_dyn, None, None, &default_cfg());
 
         assert!(
             blurred_result.s_global < sharp_result.s_global / 4.0,
@@ -294,7 +294,7 @@ mod tests {
         });
         let dyn_img = DynamicImage::ImageRgb8(img);
         let cfg = default_cfg();
-        let result = compute_sharpness(&dyn_img, None, &cfg);
+        let result = compute_sharpness(&dyn_img, None, None, &cfg);
         let expected = cfg.fallback_center_crop * cfg.fallback_center_crop;
         let actual = result.subject_ratio.expect("subject_ratio should be Some");
         assert!(

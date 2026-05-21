@@ -1,12 +1,4 @@
-/// Axis-aligned bounding box, normalized to [0.0, 1.0].
-/// Phase 3 (subject detection) will populate it; Phase 2 passes None.
-#[derive(Debug, Clone, Copy)]
-pub struct BBox {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
+pub use crate::models::BBox;
 
 pub mod blur;
 pub mod exposure;
@@ -74,7 +66,7 @@ pub fn analyze_defects(
             }
         };
 
-        let sharpness = compute_sharpness(&img, None, &cfg.blur);
+        let sharpness = compute_sharpness(&img, None, None, &cfg.blur);
         let exposure = compute_exposure(&img);
 
         let mut flags = Vec::new();

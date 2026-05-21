@@ -678,7 +678,7 @@ mod tests {
             s_subject: Some(55.0),
             s_background: Some(30.0),
             subject_ratio: Some(0.16),
-            detector_used: "center-crop-fallback",
+            detector_used: "center-crop-fallback".into(),
         };
         catalog.upsert_sharpness(file_id, &sharpness).unwrap();
 
@@ -725,7 +725,7 @@ mod tests {
             s_subject: None,
             s_background: None,
             subject_ratio: None,
-            detector_used: "center-crop-fallback",
+            detector_used: "center-crop-fallback".into(),
         };
         catalog.upsert_sharpness(ids[0], &sharpness).unwrap();
         catalog.upsert_sharpness(ids[1], &sharpness).unwrap();

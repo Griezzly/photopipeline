@@ -19,3 +19,4 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rayon       = "1"
 tempfile    = "3"
 webp        = "0.3"
+ndarray     = "0.17"
