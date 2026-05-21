@@ -31,10 +31,10 @@ ndarray      = { workspace = true }
 # On macOS: CoreML EP is available.
 # On all other targets: CUDA EP is available (TensorRT via --features tensorrt).
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "2.0.0-rc.12", features = ["coreml"] }
+ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+ort = { version = "=2.0.0-rc.12", features = ["cuda"] }
 
 [dev-dependencies]
 tempfile     = { workspace = true }

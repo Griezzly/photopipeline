@@ -179,20 +179,29 @@ fn detect_provider(device: crate::config::DeviceChoice) -> String {
         }
     }
 
+    // CoreML EP is disabled in build_session (see note there); report CPU on macOS.
     #[cfg(target_os = "macos")]
-    {
-        use ort::ep::ExecutionProvider;
-        if ort::ep::CoreML::default().is_available().unwrap_or(false) {
-            return "CoreMLExecutionProvider".into();
-        }
-    }
+    let _ = ();  // nothing to probe
 
     "CPUExecutionProvider".into()
 }
 
 /// Build an ORT session for `path` using the best available execution provider.
+///
+/// CoreML EP is intentionally excluded on macOS: ort rc.12's CoreML integration
+/// crashes (SIGSEGV) or panics ("model_path must not be empty") when the model
+/// uses the ONNX external-data format (.onnx + .onnx.data).  CPU fallback works
+/// correctly on all platforms.
+#[allow(clippy::vec_init_then_push)] // conditional #[cfg] pushes can't use vec![]
 pub(crate) fn build_session(path: &std::path::Path) -> Result<ort::session::Session> {
     use ort::ep::ExecutionProviderDispatch;
+
+    // Canonicalize to eliminate `..` components.  ORT's C++ layer derives the
+    // external-data directory from the model path; unresolved `..` can produce
+    // an empty parent, triggering "model_path must not be empty".
+    let path = path
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot canonicalize model path {}: {e}", path.display()))?;
 
     let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
 
@@ -201,9 +210,6 @@ pub(crate) fn build_session(path: &std::path::Path) -> Result<ort::session::Sess
 
     #[cfg(not(target_os = "macos"))]
     eps.push(ort::ep::CUDA::default().build());
-
-    #[cfg(target_os = "macos")]
-    eps.push(ort::ep::CoreML::default().build());
 
     eps.push(ort::ep::CPU::default().build());
 
@@ -215,7 +221,7 @@ pub(crate) fn build_session(path: &std::path::Path) -> Result<ort::session::Sess
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     builder
-        .commit_from_file(path)
+        .commit_from_file(&path)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
