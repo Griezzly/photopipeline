@@ -1,3 +1,5 @@
 /target/
 *.duckdb
 *.duckdb.wal
+models/*.onnx
+models/*.onnx.data
