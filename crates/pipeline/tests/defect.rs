@@ -43,7 +43,8 @@ fn exposure_flags_correctly() {
         &ingest_cfg,
     )
     .unwrap();
-    analyze_defects(&catalog, &cache, &defect_cfg).unwrap();
+    let hub = pipeline::models::ModelHub::empty();
+    analyze_defects(&catalog, &cache, &hub, &defect_cfg).unwrap();
 
     assert_eq!(
         catalog.count_defect_flags("overexposed").unwrap(),
@@ -82,7 +83,8 @@ fn sharpness_rows_written_for_all_files() {
         &ingest_cfg,
     )
     .unwrap();
-    let report = analyze_defects(&catalog, &cache, &defect_cfg).unwrap();
+    let hub = pipeline::models::ModelHub::empty();
+    let report = analyze_defects(&catalog, &cache, &hub, &defect_cfg).unwrap();
 
     assert_eq!(
         catalog.sharpness_count().unwrap(),
@@ -113,12 +115,14 @@ fn analyze_defects_idempotent() {
     )
     .unwrap();
 
+    let hub = pipeline::models::ModelHub::empty();
+
     // First run.
-    let report1 = analyze_defects(&catalog, &cache, &defect_cfg).unwrap();
+    let report1 = analyze_defects(&catalog, &cache, &hub, &defect_cfg).unwrap();
     assert_eq!(report1.analyzed, 2, "first run should analyze 2 files");
 
     // Second run: no new work.
-    let report2 = analyze_defects(&catalog, &cache, &defect_cfg).unwrap();
+    let report2 = analyze_defects(&catalog, &cache, &hub, &defect_cfg).unwrap();
     assert_eq!(
         report2.analyzed, 0,
         "second run should analyze 0 files (idempotent)"

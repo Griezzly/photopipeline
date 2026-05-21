@@ -37,6 +37,21 @@ python export_clip_iqa.py   # → ../models/clip_iqa.onnx   (~340 MB)
 
 Or run `models/download.sh` once pre-exported files are published.
 
+## CoreML execution provider (macOS) — disabled
+
+CoreML EP is **disabled** in ort rc.12 when models use the ONNX external-data
+format (`.onnx` graph + `.onnx.data` weights).  The failure mode is either a
+SIGSEGV inside CoreML or an assertion `"model_path must not be empty"` in ORT's
+graph optimizer.  Both DinoV2 and CLIP-IQA use external-data format.
+
+**Consequence:** macOS uses the CPU provider.  On Apple Silicon (M-series) this
+puts DinoV2 + CLIP-IQA in the 200–400 ms/image range; a 10k-photo library takes
+~30–60 minutes for the ML phase.  The CUDA path (Linux/Windows) is unaffected.
+
+**To re-enable CoreML:** uncomment the `eps.push(ort::ep::CoreML...)` line in
+`build_session` (crates/pipeline/src/models/mod.rs) and remove the note, then
+verify the model tests pass.  Revisit when `ort ≥ 2.0.0` stable releases.
+
 ## Execution providers
 
 At runtime `ModelHub::from_config` probes providers in this order:
@@ -44,7 +59,7 @@ At runtime `ModelHub::from_config` probes providers in this order:
 1. **TensorRT** — Linux only, requires `--features tensorrt` at build time plus
    the TensorRT SDK at link time.
 2. **CUDA** — Linux/Windows; compiled in by default on non-macOS targets.
-3. **CoreML** — macOS only; compiled in by default on macOS targets.
+3. **CoreML** — macOS only; disabled pending ort stable (see note above).
 4. **CPU** — always available, final fallback.
 
 `photopipe doctor` shows which provider was selected and which models loaded.

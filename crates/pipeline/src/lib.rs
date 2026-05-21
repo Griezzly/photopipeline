@@ -6,8 +6,10 @@ pub mod dedupe;
 pub mod defect;
 pub mod error;
 pub mod ingest;
+pub mod ml;
 pub mod models;
 pub mod output;
 
 pub use defect::analyze_defects;
 pub use ingest::ingest_directory;
+pub use ml::analyze_ml;

@@ -74,6 +74,14 @@ impl ModelHub {
         let provider = detect_provider(cfg.device);
         tracing::info!(provider = %provider, "ORT execution provider selected");
 
+        // CoreML is disabled in build_session on macOS (ort rc.12 bug with external-data
+        // models).  Log once at startup so the user knows they're on CPU.
+        #[cfg(target_os = "macos")]
+        tracing::info!(
+            "CoreML EP disabled on macOS (ort rc.12 incompatibility with external-data models); \
+             using CPU — revisit when ort ≥ 2.0.0 stable"
+        );
+
         let embedder: Option<Arc<dyn Embedder>> = {
             let path = cfg.model_dir.join("dinov2_base.onnx");
             if path.exists() {
@@ -140,6 +148,16 @@ impl ModelHub {
             detector,
             provider,
         })
+    }
+
+    /// An empty hub with no models loaded; useful for tests and no-models paths.
+    pub fn empty() -> Self {
+        Self {
+            embedder: None,
+            iqa: None,
+            detector: None,
+            provider: "CPUExecutionProvider".into(),
+        }
     }
 
     /// Returns `true` when no model slot is loaded.

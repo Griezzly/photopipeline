@@ -7,6 +7,15 @@ use crate::error::CatalogError;
 pub mod queries;
 pub mod schema;
 
+/// One row of ML output ready to be persisted.
+pub struct MlRow {
+    pub file_id: i64,
+    /// `(model_name, embedding_vector)` — `None` when embedder was skipped.
+    pub embedding: Option<(String, Vec<f32>)>,
+    /// `(model_name, score)` — `None` when IQA scorer was skipped.
+    pub iqa_score: Option<(String, f32)>,
+}
+
 pub struct Catalog {
     conn: Mutex<Connection>,
     #[doc(hidden)]
@@ -603,6 +612,149 @@ impl Catalog {
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM sharpness", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(count)
+    }
+
+    /// Files that have no embedding row yet.  Returns `(file_id, path, hash)`.
+    pub fn files_needing_embedding(
+        &self,
+    ) -> Result<Vec<(i64, std::path::PathBuf, u128)>, CatalogError> {
+        self.files_missing_ml_row("embeddings")
+    }
+
+    /// Files that have no IQA row yet.  Returns `(file_id, path, hash)`.
+    pub fn files_needing_iqa(
+        &self,
+    ) -> Result<Vec<(i64, std::path::PathBuf, u128)>, CatalogError> {
+        self.files_missing_ml_row("iqa")
+    }
+
+    fn files_missing_ml_row(
+        &self,
+        table: &str,
+    ) -> Result<Vec<(i64, std::path::PathBuf, u128)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let sql = format!(
+            "SELECT f.id, f.path, f.content_hash
+             FROM files f
+             LEFT JOIN {table} t ON t.file_id = f.id
+             WHERE t.file_id IS NULL"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let path_str: String = row.get(1)?;
+                let hash_hex: String = row.get(2)?;
+                Ok((id, path_str, hash_hex))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, path_str, hash_hex) = row.map_err(|e| CatalogError::Db(e.to_string()))?;
+            let path = std::path::PathBuf::from(path_str);
+            let hash = u128::from_str_radix(&hash_hex, 16).unwrap_or(0);
+            result.push((id, path, hash));
+        }
+        Ok(result)
+    }
+
+    /// Bulk-upsert a batch of ML rows (embeddings + IQA scores) in one transaction.
+    pub fn flush_ml_batch(&self, rows: &[MlRow]) -> Result<(), CatalogError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        {
+            // DuckDB's Rust crate does not implement ToSql for Value::List, so we
+            // serialize the vector as a JSON array string and use CAST to FLOAT[].
+            let mut emb_stmt = tx
+                .prepare(
+                    "INSERT INTO embeddings (file_id, model, vector)
+                     VALUES (?, ?, CAST(? AS FLOAT[]))
+                     ON CONFLICT (file_id) DO UPDATE SET
+                         model  = excluded.model,
+                         vector = excluded.vector",
+                )
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+            for row in rows {
+                if let Some((model, vec)) = &row.embedding {
+                    use std::fmt::Write as _;
+                    let mut json = String::with_capacity(vec.len() * 12 + 2);
+                    json.push('[');
+                    for (i, v) in vec.iter().enumerate() {
+                        if i > 0 {
+                            json.push(',');
+                        }
+                        write!(json, "{v}").unwrap();
+                    }
+                    json.push(']');
+                    emb_stmt
+                        .execute(duckdb::params![row.file_id, model, json])
+                        .map_err(|e| CatalogError::Db(e.to_string()))?;
+                }
+            }
+        }
+
+        {
+            let mut iqa_stmt = tx
+                .prepare(
+                    "INSERT INTO iqa (file_id, model, score)
+                     VALUES (?, ?, ?)
+                     ON CONFLICT (file_id) DO UPDATE SET
+                         model = excluded.model,
+                         score = excluded.score",
+                )
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+            for row in rows {
+                if let Some((model, score)) = &row.iqa_score {
+                    iqa_stmt
+                        .execute(duckdb::params![row.file_id, model, score])
+                        .map_err(|e| CatalogError::Db(e.to_string()))?;
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Count the total number of embedding rows.
+    pub fn embedding_count(&self) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(count)
+    }
+
+    /// Count the total number of IQA rows.
+    pub fn iqa_count(&self) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM iqa", [], |r| r.get(0))
             .map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(count)
     }

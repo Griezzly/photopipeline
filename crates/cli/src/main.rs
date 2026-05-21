@@ -120,11 +120,14 @@ fn main() -> Result<()> {
 
 fn cmd_scan(
     paths: Vec<PathBuf>,
-    _no_models: bool,
+    no_models: bool,
     _reprocess: bool,
     cfg: &config::Config,
 ) -> Result<()> {
-    use pipeline::{analyze_defects, cache::Cache, catalog::Catalog, ingest::ingest_directory};
+    use pipeline::{
+        analyze_defects, analyze_ml, cache::Cache, catalog::Catalog, ingest::ingest_directory,
+        models::ModelHub,
+    };
 
     let db_path = &cfg.catalog.db_path;
     if let Some(parent) = db_path.parent() {
@@ -134,25 +137,34 @@ fn cmd_scan(
     let cache =
         Cache::open(cfg.catalog.cache_dir.clone()).map_err(|e| anyhow::anyhow!("cache: {}", e))?;
 
-    let report = ingest_directory(&paths, &catalog, &cache, &cfg.ingest)?;
+    let hub = if no_models {
+        tracing::info!("--no-models: skipping model loading");
+        ModelHub::empty()
+    } else {
+        ModelHub::from_config(&cfg.models).map_err(|e| anyhow::anyhow!("models: {}", e))?
+    };
 
+    let report = ingest_directory(&paths, &catalog, &cache, &cfg.ingest)?;
     println!("Scan complete:");
     println!("  Processed : {}", report.processed);
     println!("  Skipped   : {}", report.skipped);
     println!("  Errored   : {}", report.errored);
 
-    let defect_report = analyze_defects(&catalog, &cache, &cfg.defect)?;
+    let defect_report = analyze_defects(&catalog, &cache, &hub, &cfg.defect)?;
     println!("Defect analysis:");
-    println!("  Analyzed          : {}", defect_report.analyzed);
-    println!("  Errored           : {}", defect_report.errored);
-    println!(
-        "  Flagged overexposed : {}",
-        defect_report.flagged_overexposed
-    );
-    println!(
-        "  Flagged underexposed: {}",
-        defect_report.flagged_underexposed
-    );
+    println!("  Analyzed             : {}", defect_report.analyzed);
+    println!("  Errored              : {}", defect_report.errored);
+    println!("  Flagged overexposed  : {}", defect_report.flagged_overexposed);
+    println!("  Flagged underexposed : {}", defect_report.flagged_underexposed);
+
+    let ml_report = analyze_ml(&catalog, &cache, &hub, cfg.catalog.write_batch_size)?;
+    if !hub.is_empty() {
+        println!("ML analysis:");
+        println!("  Embedded   : {}", ml_report.embedded);
+        println!("  IQA scored : {}", ml_report.iqa_scored);
+        println!("  Errored    : {}", ml_report.errored);
+    }
+
     Ok(())
 }
 
@@ -195,19 +207,69 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     println!("PhotoPipe Doctor");
     println!("================");
     println!();
-    println!(
-        "OS:           {} ({})",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
+    println!("OS:           {} ({})", std::env::consts::OS, std::env::consts::ARCH);
     println!("Family:       {}", std::env::consts::FAMILY);
     println!("Config file:  {}", config_path.display());
     println!("Exists:       {}", config_path.exists());
     println!();
+
+    println!("Models");
+    println!("------");
+    println!("Model dir : {}", cfg.models.model_dir.display());
+
+    // Show the provider that would be selected (without actually loading models).
+    let provider = doctor_provider(cfg.models.device);
+    println!("Provider  : {provider}");
+
+    #[cfg(target_os = "macos")]
+    println!(
+        "  [macOS] CoreML EP disabled (ort rc.12 incompatibility with external-data models); \
+         using CPU — revisit when ort ≥ 2.0.0 stable"
+    );
+
+    println!();
+    doctor_model_file("dinov2_base.onnx",  &cfg.models.model_dir, "embedder");
+    doctor_model_file("clip_iqa.onnx",     &cfg.models.model_dir, "iqa");
+    println!("  rt_detr_l.onnx  — deferred (ORT Cos(int64) not implemented; see models/README.md)");
+    println!();
+
     println!("Effective configuration:");
     println!("------------------------");
     println!("{}", toml::to_string_pretty(cfg)?);
     Ok(())
+}
+
+fn doctor_model_file(filename: &str, model_dir: &std::path::Path, role: &str) {
+    let path = model_dir.join(filename);
+    let data_path = model_dir.join(format!("{filename}.data"));
+    if path.exists() {
+        let graph_kb = std::fs::metadata(&path).map(|m| m.len() / 1024).unwrap_or(0);
+        let data_mb = if data_path.exists() {
+            std::fs::metadata(&data_path)
+                .map(|m| format!(" + {:.0} MB data", m.len() as f64 / 1_048_576.0))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        println!("  {filename}  [{role}] ✓ present ({graph_kb} KB{data_mb})");
+    } else {
+        println!("  {filename}  [{role}] ✗ not found — run tools/export_{role}.py");
+    }
+}
+
+fn doctor_provider(device: config::DeviceChoice) -> &'static str {
+    match device {
+        config::DeviceChoice::Cpu     => "CPUExecutionProvider",
+        config::DeviceChoice::CoreMl  => "CoreMLExecutionProvider (overridden → CPU on macOS)",
+        config::DeviceChoice::Cuda    => "CUDAExecutionProvider",
+        config::DeviceChoice::TensorRt => "TensorRtExecutionProvider",
+        config::DeviceChoice::Auto    => {
+            #[cfg(target_os = "macos")]
+            return "CPUExecutionProvider (auto; CoreML disabled in ort rc.12)";
+            #[cfg(not(target_os = "macos"))]
+            return "CUDAExecutionProvider (if available) else CPUExecutionProvider";
+        }
+    }
 }
 
 // ── tracing setup ─────────────────────────────────────────────────────────────

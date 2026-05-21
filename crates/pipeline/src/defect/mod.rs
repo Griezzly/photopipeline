@@ -31,6 +31,9 @@ pub struct DefectReport {
 pub fn analyze_defects(
     catalog: &crate::catalog::Catalog,
     cache: &crate::cache::Cache,
+    // Hub accepted for future detector integration.  Detector slot is currently
+    // None (deferred); sharpness falls back to center-crop ROI as before.
+    _hub: &crate::models::ModelHub,
     cfg: &crate::config::DefectConfig,
 ) -> anyhow::Result<DefectReport> {
     use rayon::prelude::*;
