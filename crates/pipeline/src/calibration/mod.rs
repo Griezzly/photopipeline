@@ -85,7 +85,7 @@ pub fn run_calibration(catalog: &Catalog, cfg: &DefectConfig) -> anyhow::Result<
         if s_subject < threshold {
             let confidence = ((threshold - s_subject) / threshold).clamp(0.01, 1.0);
             let s_bg = row.s_background.unwrap_or(s_subject);
-            if s_bg > s_subject * 2.0 {
+            if s_subject > 0.0 && s_bg > s_subject * 2.0 {
                 batch.push(BlurFlagRow {
                     file_id: row.file_id,
                     flag_type: "back_focus",

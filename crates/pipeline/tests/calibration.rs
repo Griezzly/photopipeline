@@ -254,6 +254,35 @@ fn falls_back_to_global() {
 }
 
 #[test]
+fn zero_sharpness_flagged_as_blur() {
+    // Regression: s_subject == 0.0, s_background == 50.0.
+    // With the bug, `s_bg > 0.0 * 2.0` (i.e., `50.0 > 0.0`) is trivially true,
+    // so the file was misclassified as back_focus instead of blur.
+    // After the fix (`s_subject > 0.0 && …`), it must land in blur.
+    let (catalog, _dir) = make_catalog();
+    insert_sharp_population(&catalog);
+    let zero = SharpnessResult {
+        s_global: 0.0,
+        s_subject: Some(0.0),
+        s_background: Some(50.0),
+        subject_ratio: Some(0.16),
+        detector_used: "center-crop-fallback".into(),
+    };
+    let zero_id = insert(&catalog, 100, &zero);
+
+    pipeline::run_calibration(&catalog, &test_cfg()).unwrap();
+
+    assert!(
+        has_flag(&catalog, zero_id, "blur"),
+        "zero-sharpness file must be flagged as blur"
+    );
+    assert!(
+        !has_flag(&catalog, zero_id, "back_focus"),
+        "zero-sharpness file must NOT be flagged as back_focus"
+    );
+}
+
+#[test]
 fn calibrate_is_idempotent() {
     let (catalog, _dir) = make_catalog();
     let pop = insert_sharp_population(&catalog);
