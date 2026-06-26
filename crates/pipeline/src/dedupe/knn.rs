@@ -22,6 +22,7 @@ pub fn l2_normalize(v: &mut [f32]) {
 /// Cosine similarity of two already-L2-normalized vectors (a dot product).
 /// Iterates over `min(len)` so mismatched dims don't panic.
 pub fn cosine_normalized(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len(), "cosine: dimension mismatch");
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -40,6 +41,16 @@ pub struct BruteForceKnn {
 impl BruteForceKnn {
     /// `normalized` must already be L2-normalized (see [`l2_normalize`]).
     pub fn new(normalized: Vec<Vec<f32>>) -> Self {
+        #[cfg(debug_assertions)]
+        for v in &normalized {
+            if !v.is_empty() {
+                let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+                debug_assert!(
+                    (norm_sq - 1.0).abs() < 1e-4,
+                    "BruteForceKnn::new: vectors must be L2-normalized (norm²={norm_sq})"
+                );
+            }
+        }
         Self { normalized }
     }
 
@@ -66,11 +77,9 @@ impl KnnIndex for BruteForceKnn {
             .map(|i| (i, cosine_normalized(q, &self.normalized[i])))
             .collect();
         // Sort descending by cosine; tie-break by index for determinism.
-        sims.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
+        // Use total_cmp (stable since Rust 1.62) for a true total order — NaN
+        // is ordered rather than silently collapsed to Equal.
+        sims.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         sims.truncate(k);
         sims
     }
