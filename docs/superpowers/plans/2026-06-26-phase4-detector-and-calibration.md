@@ -1792,32 +1792,16 @@ fn insert_sharp_population(catalog: &Catalog) -> Vec<i64> {
     (0..5).map(|i| insert(catalog, i, &s)).collect()
 }
 
+/// Per-file flag presence, via the public `Catalog::count_file_flag` helper.
+/// (The `Catalog` connection is private and DuckDB is single-writer, so a test
+/// cannot open a second connection to the same DB — hence a catalog method,
+/// added in Step 2 below.)
 fn has_flag(catalog: &Catalog, file_id: i64, flag_type: &str) -> bool {
-    // count_defect_flags is global; query per-file directly.
-    let cat2 = catalog; // borrow for clarity
-    let conn = cat2_conn(cat2);
-    let n: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM defect_flags WHERE file_id = ? AND flag_type = ?",
-            duckdb::params![file_id, flag_type],
-            |r| r.get(0),
-        )
-        .unwrap();
-    n > 0
-}
-
-// The Catalog connection is private; expose a query path through a tiny SQL file
-// API would be cleaner, but for tests we reopen the same DB read-only is not
-// possible (single-writer). Instead, add a public count-by-file helper is
-// overkill — use the public count_defect_flags for global asserts and a direct
-// per-file SQL via a fresh connection is blocked by the file lock. So we rely on
-// per-file assertions through a small public helper added below.
-fn cat2_conn(_c: &Catalog) -> duckdb::Connection {
-    unreachable!("replaced by Catalog::count_file_flag in Step 2")
+    catalog.count_file_flag(file_id, flag_type).unwrap() > 0
 }
 ```
 
-> **Step-1 note:** the `has_flag` / `cat2_conn` scaffold above is intentionally broken — the `Catalog` connection is private and the DB is single-writer, so tests cannot open a second connection. Step 2 adds a tiny public helper `Catalog::count_file_flag` and Step 3 rewrites `has_flag` to use it. Do not try to compile Step 1 as-is.
+> **Note:** `has_flag` calls `Catalog::count_file_flag`, which Step 2 adds to the catalog. The test file needs no `duckdb` import.
 
 - [ ] **Step 2: Add a public per-file flag-count helper to the catalog**
 
@@ -1841,17 +1825,14 @@ In `crates/pipeline/src/catalog/mod.rs`, add to `impl Catalog` (next to `count_d
     }
 ```
 
-- [ ] **Step 3: Replace the broken `has_flag`/`cat2_conn`/imports in the test file**
+- [ ] **Step 3: Confirm the test file compiles against the new catalog helper**
 
-In `crates/pipeline/tests/calibration.rs`, delete the `has_flag`, `cat2_conn` functions and the trailing note, and remove the `MlRow` import only if unused so far (it is used by Test 6 — keep it). Replace with:
-
-```rust
-fn has_flag(catalog: &Catalog, file_id: i64, flag_type: &str) -> bool {
-    catalog.count_file_flag(file_id, flag_type).unwrap() > 0
-}
+```bash
+source ~/.cargo/env
+cargo test -p pipeline --test calibration --no-run
 ```
 
-(`duckdb` is no longer referenced by the test file after this — remove any `use duckdb` if you added one.)
+Expected: compiles cleanly (no tests run yet — the six tests are added in Step 4). If you see `no method named count_file_flag`, Step 2 was skipped. The test file should not reference `duckdb` directly; keep the `MlRow` import (Test 6 uses it).
 
 - [ ] **Step 4: Add the six tests to `crates/pipeline/tests/calibration.rs`**
 

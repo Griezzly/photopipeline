@@ -5,3 +5,6 @@ models/*.onnx
 models/*.onnx.data
 # subagent-driven-development scratch
 .superpowers/
+
+# python bytecode cache (tools/ export scripts)
+__pycache__/
