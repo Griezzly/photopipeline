@@ -758,6 +758,44 @@ impl Catalog {
             .map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(count)
     }
+
+    /// Delete all blur-related defect flags (`blur`, `back_focus`, `low_iqa`),
+    /// leaving exposure flags untouched. Returns the number of rows deleted.
+    pub fn clear_blur_related_flags(&self) -> Result<usize, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let n = conn
+            .execute(
+                "DELETE FROM defect_flags
+                 WHERE flag_type IN ('blur', 'back_focus', 'low_iqa')",
+                [],
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// Global 10th-percentile IQA score across the whole `iqa` table.
+    /// Returns `None` when the table is empty.
+    pub fn iqa_global_p10(&self) -> Result<Option<f32>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM iqa", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        if count == 0 {
+            return Ok(None);
+        }
+        let p10: f64 = conn
+            .query_row("SELECT quantile_cont(score, 0.10) FROM iqa", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(Some(p10 as f32))
+    }
 }
 
 #[cfg(test)]
@@ -886,5 +924,81 @@ mod tests {
         let needing = catalog.files_needing_defect_analysis().unwrap();
         assert_eq!(needing.len(), 1, "expected exactly 1 file needing analysis");
         assert_eq!(needing[0].0, ids[2], "expected file_id of the third file");
+    }
+
+    #[test]
+    fn clear_blur_related_flags_only_removes_blur_kinds() {
+        use crate::defect::DefectFlag;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+        let file = IngestedFile {
+            path: PathBuf::from("/c/clear.jpg"),
+            content_hash: 1,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let id = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap()[0];
+
+        for ft in [
+            "overexposed",
+            "underexposed",
+            "blur",
+            "back_focus",
+            "low_iqa",
+        ] {
+            catalog
+                .upsert_defect_flag(
+                    id,
+                    &DefectFlag {
+                        flag_type: ft.to_string(),
+                        confidence: 0.5,
+                        reason: "t".into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let deleted = catalog.clear_blur_related_flags().unwrap();
+        assert_eq!(deleted, 3, "should delete blur/back_focus/low_iqa only");
+        assert_eq!(catalog.count_defect_flags("overexposed").unwrap(), 1);
+        assert_eq!(catalog.count_defect_flags("underexposed").unwrap(), 1);
+        assert_eq!(catalog.count_defect_flags("blur").unwrap(), 0);
+        assert_eq!(catalog.count_defect_flags("back_focus").unwrap(), 0);
+        assert_eq!(catalog.count_defect_flags("low_iqa").unwrap(), 0);
+    }
+
+    #[test]
+    fn iqa_global_p10_none_when_empty_some_when_populated() {
+        use crate::catalog::MlRow;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+        assert!(catalog.iqa_global_p10().unwrap().is_none(), "empty → None");
+
+        // Insert 10 files with iqa scores 0.0..=0.9.
+        for i in 0..10i64 {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/iqa/{i}.jpg")),
+                content_hash: i as u128,
+                size: 1,
+                mtime_ns: i,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            let id = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap()[0];
+            catalog
+                .flush_ml_batch(&[MlRow {
+                    file_id: id,
+                    embedding: None,
+                    iqa_score: Some(("clip-iqa".into(), i as f32 / 10.0)),
+                }])
+                .unwrap();
+        }
+        let p10 = catalog.iqa_global_p10().unwrap().expect("should be Some");
+        // quantile_cont(0.10) over 0.0..0.9 is ~0.09.
+        assert!((0.0..=0.2).contains(&p10), "p10 {p10} out of expected band");
     }
 }
