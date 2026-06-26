@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use pipeline::catalog::{Catalog, MlRow};
 use pipeline::config::DedupeConfig;
 use pipeline::ingest::{ExifData, FileFormat, IngestedFile};
+use pipeline::run_dedupe;
 use tempfile::TempDir;
 
 fn make_catalog() -> (Catalog, TempDir) {
@@ -76,8 +77,6 @@ fn test_cfg() -> DedupeConfig {
     }
 }
 
-use pipeline::run_dedupe;
-
 /// De-risk: embeddings written via the JSON CAST path read back intact and
 /// drive a dedupe run end to end.
 #[test]
@@ -131,6 +130,14 @@ fn near_identical_within_window_group_orthogonal_stays_out() {
     // The keeper is c (highest IQA, no defects).
     let conn_check = catalog.duplicate_member_count().unwrap();
     assert_eq!(conn_check, 3);
+
+    // Assert the SPECIFIC keeper is c (highest-IQA member), not a or b.
+    let keeper_ids = catalog.suggested_keeper_ids().unwrap();
+    assert_eq!(
+        keeper_ids,
+        vec![c],
+        "c must be the suggested keeper (highest IQA 0.95); got {keeper_ids:?}"
+    );
 }
 
 /// Running dedupe twice yields identical group/member/keeper counts.
@@ -146,7 +153,9 @@ fn dedupe_is_idempotent() {
 
     let cfg = test_cfg();
     let first = run_dedupe(&catalog, &cfg).unwrap();
+    let keepers_after_first = catalog.suggested_keeper_ids().unwrap();
     let second = run_dedupe(&catalog, &cfg).unwrap();
+    let keepers_after_second = catalog.suggested_keeper_ids().unwrap();
 
     assert_eq!(first, second, "two runs must produce identical reports");
     assert_eq!(
@@ -156,6 +165,10 @@ fn dedupe_is_idempotent() {
     assert_eq!(
         catalog.duplicate_member_count().unwrap(),
         first.members as i64
+    );
+    assert_eq!(
+        keepers_after_first, keepers_after_second,
+        "suggested keeper must be stable across idempotent runs"
     );
 }
 

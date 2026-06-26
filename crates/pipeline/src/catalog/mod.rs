@@ -1092,6 +1092,30 @@ impl Catalog {
         Ok(count)
     }
 
+    /// All file_ids currently marked as the suggested keeper of their duplicate group.
+    ///
+    /// Returns file ids ordered by `file_id ASC`. An empty vec means no groups
+    /// exist or none have a keeper marked yet.
+    pub fn suggested_keeper_ids(&self) -> Result<Vec<i64>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_id FROM duplicate_members WHERE is_suggested_keeper = true ORDER BY file_id",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(ids)
+    }
+
     /// Count the total number of IQA rows.
     pub fn iqa_count(&self) -> Result<i64, CatalogError> {
         let conn = self
@@ -2046,6 +2070,59 @@ mod tests {
         catalog.clear_duplicate_groups().unwrap();
         assert_eq!(catalog.duplicate_group_count().unwrap(), 0);
         assert_eq!(catalog.duplicate_member_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn suggested_keeper_ids_returns_marked_keeper() {
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+
+        // Insert three files.
+        let mut ids = Vec::new();
+        for i in 0..3i64 {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/sk/file{i}.jpg")),
+                content_hash: 400 + i as u128,
+                size: 10 + i as u64,
+                mtime_ns: i,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            let batch_ids = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap();
+            ids.push(batch_ids[0]);
+        }
+
+        // No groups yet → empty.
+        assert_eq!(catalog.suggested_keeper_ids().unwrap(), vec![]);
+
+        // Insert a group; mark ids[1] as keeper.
+        let gid = catalog.insert_duplicate_group("time+embed", 99999).unwrap();
+        catalog
+            .insert_duplicate_members(
+                gid,
+                &[
+                    DuplicateMember {
+                        file_id: ids[0],
+                        is_suggested_keeper: false,
+                        quality_score: 0.4,
+                    },
+                    DuplicateMember {
+                        file_id: ids[1],
+                        is_suggested_keeper: true,
+                        quality_score: 0.9,
+                    },
+                    DuplicateMember {
+                        file_id: ids[2],
+                        is_suggested_keeper: false,
+                        quality_score: 0.3,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let keepers = catalog.suggested_keeper_ids().unwrap();
+        assert_eq!(keepers, vec![ids[1]], "only ids[1] should be the keeper");
     }
 
     #[test]
