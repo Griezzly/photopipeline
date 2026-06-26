@@ -1,1 +1,2 @@
-// placeholder — implemented in a later phase
+// Phase 5: KNN neighbor search
+pub mod knn;
