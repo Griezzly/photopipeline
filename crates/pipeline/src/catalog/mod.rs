@@ -16,6 +16,27 @@ pub struct MlRow {
     pub iqa_score: Option<(String, f32)>,
 }
 
+/// One file's sharpness + raw EXIF + optional IQA score, for the reflag pass.
+/// Buckets are computed in Rust (`calibration::buckets`) at the call site.
+pub struct SharpnessReflagRow {
+    pub file_id: i64,
+    pub s_subject: Option<f32>,
+    pub s_background: Option<f32>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub focal_length_mm: Option<f32>,
+    pub aperture: Option<f32>,
+    pub iqa_score: Option<f32>,
+}
+
+/// Summary of a `rebuild_sharpness_baselines` run.
+pub struct RebuildReport {
+    /// Count of non-global (per-bucket) baseline rows written.
+    pub buckets_built: usize,
+    /// Total sample count backing the global fallback row.
+    pub global_n_samples: usize,
+}
+
 pub struct Catalog {
     conn: Mutex<Connection>,
     #[doc(hidden)]
@@ -796,6 +817,225 @@ impl Catalog {
             .map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(Some(p10 as f32))
     }
+
+    /// One row per file that has a sharpness record, joined to EXIF (raw,
+    /// un-bucketed) and the optional IQA score. Used by the reflag pass to
+    /// avoid N+1 queries.
+    pub fn iter_sharpness_for_reflag(&self) -> Result<Vec<SharpnessReflagRow>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.file_id, s.s_subject, s.s_background,
+                        e.camera_model, e.lens_model, e.focal_length_mm, e.aperture,
+                        i.score
+                 FROM sharpness s
+                 LEFT JOIN exif e ON e.file_id = s.file_id
+                 LEFT JOIN iqa  i ON i.file_id = s.file_id",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SharpnessReflagRow {
+                    file_id: row.get(0)?,
+                    s_subject: row.get(1)?,
+                    s_background: row.get(2)?,
+                    camera_model: row.get(3)?,
+                    lens_model: row.get(4)?,
+                    focal_length_mm: row.get(5)?,
+                    aperture: row.get(6)?,
+                    iqa_score: row.get(7)?,
+                })
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Rebuild `sharpness_baseline` from current `sharpness`+`exif` data.
+    ///
+    /// Buckets are computed in Rust (no DuckDB UDF). Per-bucket rows are written
+    /// only when the bucket has `>= min_samples` samples; a global sentinel row
+    /// `('*','*',0,0.0)` is always written (when any sample exists) with the
+    /// total population's percentiles. All writes happen in one transaction;
+    /// the table is fully replaced (old rows deleted first) for idempotency.
+    pub fn rebuild_sharpness_baselines(
+        &self,
+        min_samples: usize,
+    ) -> Result<RebuildReport, CatalogError> {
+        use crate::calibration::buckets::{aperture_bucket, focal_bucket};
+        use std::collections::HashMap;
+
+        // Phase 1: read qualifying raw samples (lock released before the write tx).
+        struct Raw {
+            camera: String,
+            lens: String,
+            focal: f32,
+            aperture: f32,
+            s_subject: f32,
+        }
+        let raws: Vec<Raw> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT e.camera_model, e.lens_model, e.focal_length_mm, e.aperture,
+                            s.s_subject
+                     FROM sharpness s
+                     JOIN exif e ON e.file_id = s.file_id
+                     WHERE s.s_subject IS NOT NULL
+                       AND e.camera_model IS NOT NULL
+                       AND e.lens_model IS NOT NULL
+                       AND e.focal_length_mm IS NOT NULL
+                       AND e.aperture IS NOT NULL",
+                )
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(Raw {
+                        camera: row.get::<_, String>(0)?,
+                        lens: row.get::<_, String>(1)?,
+                        focal: row.get::<_, f32>(2)?,
+                        aperture: row.get::<_, f32>(3)?,
+                        s_subject: row.get::<_, f32>(4)?,
+                    })
+                })
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+            }
+            v
+        };
+
+        // Group by (camera, lens, focal_bucket, aperture_bucket-as-bits) in Rust.
+        let mut groups: HashMap<(String, String, i32, u32), Vec<f32>> = HashMap::new();
+        let mut global: Vec<f32> = Vec::with_capacity(raws.len());
+        for r in &raws {
+            global.push(r.s_subject);
+            let fb = focal_bucket(r.focal);
+            let ab = aperture_bucket(r.aperture);
+            groups
+                .entry((r.camera.clone(), r.lens.clone(), fb, ab.to_bits()))
+                .or_default()
+                .push(r.s_subject);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let global_n = global.len();
+
+        // Phase 2: write everything in one transaction (delete + reinsert).
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        tx.execute("DELETE FROM sharpness_baseline", [])
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut buckets_built = 0usize;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO sharpness_baseline
+                        (camera_model, lens_model, focal_bucket, aperture_bucket,
+                         s_subject_p10, s_subject_p50, s_subject_p90, n_samples, last_updated)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT (camera_model, lens_model, focal_bucket, aperture_bucket)
+                     DO UPDATE SET
+                         s_subject_p10 = excluded.s_subject_p10,
+                         s_subject_p50 = excluded.s_subject_p50,
+                         s_subject_p90 = excluded.s_subject_p90,
+                         n_samples     = excluded.n_samples,
+                         last_updated  = excluded.last_updated",
+                )
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+            for ((camera, lens, fb, ab_bits), mut samples) in groups {
+                if samples.len() < min_samples {
+                    continue;
+                }
+                let ab = f32::from_bits(ab_bits);
+                let (p10, p50, p90) = percentiles(&mut samples);
+                stmt.execute(duckdb::params![
+                    camera,
+                    lens,
+                    fb,
+                    ab,
+                    p10,
+                    p50,
+                    p90,
+                    samples.len() as i32,
+                    now,
+                ])
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+                buckets_built += 1;
+            }
+
+            // Global sentinel row (only when there is any sample at all).
+            if global_n > 0 {
+                let mut g = global;
+                let (p10, p50, p90) = percentiles(&mut g);
+                stmt.execute(duckdb::params![
+                    "*",
+                    "*",
+                    0i32,
+                    0.0f32,
+                    p10,
+                    p50,
+                    p90,
+                    global_n as i32,
+                    now,
+                ])
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            }
+        }
+
+        tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        Ok(RebuildReport {
+            buckets_built,
+            global_n_samples: global_n,
+        })
+    }
+}
+
+/// Return (p10, p50, p90) of `samples` using linear interpolation between
+/// order statistics. Sorts `samples` in place. `samples` must be non-empty.
+fn percentiles(samples: &mut [f32]) -> (f32, f32, f32) {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    (
+        percentile_sorted(samples, 0.10),
+        percentile_sorted(samples, 0.50),
+        percentile_sorted(samples, 0.90),
+    )
+}
+
+fn percentile_sorted(sorted: &[f32], q: f32) -> f32 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let rank = q * (n as f32 - 1.0);
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let frac = rank - lo as f32;
+    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
 #[cfg(test)]
@@ -968,6 +1208,123 @@ mod tests {
         assert_eq!(catalog.count_defect_flags("blur").unwrap(), 0);
         assert_eq!(catalog.count_defect_flags("back_focus").unwrap(), 0);
         assert_eq!(catalog.count_defect_flags("low_iqa").unwrap(), 0);
+    }
+
+    #[test]
+    fn rebuild_baselines_builds_bucket_and_global() {
+        use crate::defect::SharpnessResult;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+
+        // 4 files, identical EXIF bucket (TestModel / TestLens / 50mm / f2.8),
+        // s_subject = 10, 20, 30, 40.
+        for (i, s) in [10.0f32, 20.0, 30.0, 40.0].into_iter().enumerate() {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/b/{i}.jpg")),
+                content_hash: i as u128,
+                size: 1,
+                mtime_ns: i as i64,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            let exif = ExifData {
+                captured_at: Some(1000),
+                camera_make: Some("TestMake".into()),
+                camera_model: Some("TestModel".into()),
+                lens_model: Some("TestLens 50mm".into()),
+                focal_length_mm: Some(50.0),
+                aperture: Some(2.8),
+                iso: Some(200),
+                shutter_seconds: Some(0.01),
+                width: Some(64),
+                height: Some(64),
+                orientation: Some(1),
+            };
+            let id = catalog.flush_batch(&[(file, Some(exif))]).unwrap()[0];
+            catalog
+                .upsert_sharpness(
+                    id,
+                    &SharpnessResult {
+                        s_global: s,
+                        s_subject: Some(s),
+                        s_background: Some(s),
+                        subject_ratio: Some(0.16),
+                        detector_used: "rt-detr-l".into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        // min_samples = 3 → the 4-sample bucket qualifies.
+        let report = catalog.rebuild_sharpness_baselines(3).unwrap();
+        assert_eq!(report.buckets_built, 1, "one qualifying bucket");
+        assert_eq!(report.global_n_samples, 4, "global counts all 4 samples");
+
+        // The global sentinel row exists.
+        let conn = catalog.conn.lock().unwrap();
+        let global_n: i64 = conn
+            .query_row(
+                "SELECT n_samples FROM sharpness_baseline
+                 WHERE camera_model = '*' AND lens_model = '*'
+                   AND focal_bucket = 0 AND aperture_bucket = 0.0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(global_n, 4);
+    }
+
+    #[test]
+    fn iter_sharpness_for_reflag_returns_raw_exif() {
+        use crate::defect::SharpnessResult;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+        let file = IngestedFile {
+            path: PathBuf::from("/r/0.jpg"),
+            content_hash: 7,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let exif = ExifData {
+            captured_at: Some(1000),
+            camera_make: Some("TestMake".into()),
+            camera_model: Some("TestModel".into()),
+            lens_model: Some("TestLens 50mm".into()),
+            focal_length_mm: Some(50.0),
+            aperture: Some(2.8),
+            iso: Some(200),
+            shutter_seconds: Some(0.01),
+            width: Some(64),
+            height: Some(64),
+            orientation: Some(1),
+        };
+        let id = catalog.flush_batch(&[(file, Some(exif))]).unwrap()[0];
+        catalog
+            .upsert_sharpness(
+                id,
+                &SharpnessResult {
+                    s_global: 12.0,
+                    s_subject: Some(12.0),
+                    s_background: Some(30.0),
+                    subject_ratio: Some(0.16),
+                    detector_used: "rt-detr-l".into(),
+                },
+            )
+            .unwrap();
+
+        let rows = catalog.iter_sharpness_for_reflag().unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.file_id, id);
+        assert_eq!(r.s_subject, Some(12.0));
+        assert_eq!(r.s_background, Some(30.0));
+        assert_eq!(r.camera_model.as_deref(), Some("TestModel"));
+        assert_eq!(r.focal_length_mm, Some(50.0));
+        assert_eq!(r.aperture, Some(2.8));
     }
 
     #[test]
