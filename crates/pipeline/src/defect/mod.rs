@@ -31,9 +31,7 @@ pub struct DefectReport {
 pub fn analyze_defects(
     catalog: &crate::catalog::Catalog,
     cache: &crate::cache::Cache,
-    // Hub accepted for future detector integration.  Detector slot is currently
-    // None (deferred); sharpness falls back to center-crop ROI as before.
-    _hub: &crate::models::ModelHub,
+    hub: &crate::models::ModelHub,
     cfg: &crate::config::DefectConfig,
 ) -> anyhow::Result<DefectReport> {
     use rayon::prelude::*;
@@ -69,7 +67,23 @@ pub fn analyze_defects(
             }
         };
 
-        let sharpness = compute_sharpness(&img, None, None, &cfg.blur);
+        let (rois, detector_name): (Option<Vec<BBox>>, Option<&str>) =
+            if let Some(det) = hub.detector.as_deref() {
+                match det.detect(&img) {
+                    Ok(subjects) => {
+                        let bboxes: Vec<BBox> = subjects.into_iter().map(|s| s.bbox).collect();
+                        let name = det.name();
+                        (Some(bboxes), Some(name))
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "detector failed, falling back to center-crop");
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+        let sharpness = compute_sharpness(&img, rois.as_deref(), detector_name, &cfg.blur);
         let exposure = compute_exposure(&img);
 
         let mut flags = Vec::new();

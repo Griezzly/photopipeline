@@ -1,0 +1,7 @@
+torch>=2.2
+torchvision>=0.17
+transformers>=4.40
+onnx>=1.16
+onnxruntime>=1.18
+onnxsim>=0.4
+huggingface-hub

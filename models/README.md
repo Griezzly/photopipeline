@@ -7,21 +7,21 @@ These files are gitignored — run the export scripts once to produce them.
 |------|---------|--------|---------------|
 | `dinov2_base.onnx` | Embedder (dedupe, Phase 5) | Ready | `tools/export_dinov2.py` |
 | `clip_iqa.onnx` | Image quality assessment (Phase 3) | Ready | `tools/export_clip_iqa.py` |
-| `rt_detr_l.onnx` | Subject detector (blur ROI, Phase 3) | **Deferred** | `tools/export_rt_detr.py` |
+| `rt_detr_l.onnx` | Subject detector (blur ROI, Phase 4) | Ready | `tools/export_rt_detr.py` |
 
-## RT-DETR deferral
+## RT-DETR subject detector
 
-`rt_detr_l.onnx` is deferred. The ORT CPU kernel does not implement `Cos` for
-`int64` inputs, and the `PekingU/rtdetr_r50vd` positional encodings emit that
-op regardless of whether the legacy or dynamo ONNX exporter is used.  The
-detector slot in `ModelHub` stays as `Option<Arc<dyn SubjectDetector>>`.  When
-`rt_detr_l.onnx` is absent, sharpness analysis falls back to center-crop ROI,
-which is the correct pre-Phase-3 behaviour.
+`rt_detr_l.onnx` is the RT-DETR R50VD detector (Apache-2.0, exported from
+`PekingU/rtdetr_r50vd` — see `tools/export_rt_detr.py`). It loads and runs under
+the pinned `ort` 2.0.0-rc.12 on this project's CUDA/CPU providers; the
+`rtdetr_loads_and_runs` smoke test in `crates/pipeline/src/models/detector.rs`
+verifies the forward pass and prints the ONNX I/O contract.
 
-Possible fixes (tracked separately):
-- Graph surgery to cast the int64 → float32 before the `Cos` node.
-- Switch to a different detector checkpoint that doesn't use the problematic
-  positional encoding variant.
+The export wraps the model to emit exactly two float32 outputs — `logits`
+`[batch, num_queries, 80]` and `pred_boxes` `[batch, num_queries, 4]`
+(cx, cy, w, h, normalized) — which `RtDetrDetector::detect` decodes into
+`DetectedSubject` boxes. When `rt_detr_l.onnx` is absent the detector slot in
+`ModelHub` stays `None` and sharpness analysis falls back to a center-crop ROI.
 
 ## Exporting models
 
@@ -32,7 +32,7 @@ pip install -r requirements.txt
 
 python export_dinov2.py     # → ../models/dinov2_base.onnx (~330 MB)
 python export_clip_iqa.py   # → ../models/clip_iqa.onnx   (~340 MB)
-# python export_rt_detr.py  # deferred — see above
+python export_rt_detr.py    # → ../models/rt_detr_l.onnx (~175 MB)
 ```
 
 Or run `models/download.sh` once pre-exported files are published.

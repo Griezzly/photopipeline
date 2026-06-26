@@ -240,7 +240,7 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     println!();
     doctor_model_file("dinov2_base.onnx", &cfg.models.model_dir, "embedder");
     doctor_model_file("clip_iqa.onnx", &cfg.models.model_dir, "iqa");
-    println!("  rt_detr_l.onnx  — deferred (ORT Cos(int64) not implemented; see models/README.md)");
+    doctor_model_file("rt_detr_l.onnx", &cfg.models.model_dir, "detector");
     println!();
 
     println!("Effective configuration:");
