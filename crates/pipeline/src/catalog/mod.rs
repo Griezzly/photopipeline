@@ -16,6 +16,20 @@ pub struct MlRow {
     pub iqa_score: Option<(String, f32)>,
 }
 
+/// Per-file inputs to the dedupe `quality_score` formula.
+pub struct QualityInputs {
+    /// IQA score (`iqa.score`), or `None` when no IQA row exists.
+    pub iqa_score: Option<f32>,
+    /// True when a `blur` defect flag exists for this file.
+    pub has_blur: bool,
+    /// True when a `back_focus` defect flag exists for this file.
+    pub has_back_focus: bool,
+    /// Fraction of clipped highlights (0.0 when no exposure row).
+    pub clipped_highlights: f32,
+    /// Fraction of clipped shadows (0.0 when no exposure row).
+    pub clipped_shadows: f32,
+}
+
 /// One file's sharpness + raw EXIF + optional IQA score, for the reflag pass.
 /// Buckets are computed in Rust (`calibration::buckets`) at the call site.
 pub struct SharpnessReflagRow {
@@ -853,6 +867,122 @@ impl Catalog {
         Ok(result)
     }
 
+    /// Map every file's `captured_at` (unix epoch seconds), `None` when absent.
+    ///
+    /// Only files that have a row in `files` appear; the value is `None` when
+    /// there is no `exif` row or `captured_at` is NULL.
+    pub fn captured_at_map(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, Option<i64>>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.id, e.captured_at
+                 FROM files f
+                 LEFT JOIN exif e ON e.file_id = f.id",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let captured_at: Option<i64> = row.get(1)?;
+                Ok((id, captured_at))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, captured_at) = row.map_err(|e| CatalogError::Db(e.to_string()))?;
+            map.insert(id, captured_at);
+        }
+        Ok(map)
+    }
+
+    /// Map file_id → IQA score for every file that has an `iqa` row.
+    pub fn iqa_scores_map(&self) -> Result<std::collections::HashMap<i64, f32>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT file_id, score FROM iqa")
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let score: f32 = row.get(1)?;
+                Ok((id, score))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, score) = row.map_err(|e| CatalogError::Db(e.to_string()))?;
+            map.insert(id, score);
+        }
+        Ok(map)
+    }
+
+    /// Map file_id → `QualityInputs` for every file in `files`.
+    ///
+    /// Joins `iqa`, `exposure`, and aggregates `defect_flags` so a single pass
+    /// yields everything the `quality_score` formula needs.  Missing IQA →
+    /// `iqa_score = None`; missing exposure → clip fractions 0.0.
+    pub fn quality_inputs_map(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, QualityInputs>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                     f.id,
+                     i.score,
+                     COALESCE(x.clipped_highlights, 0.0),
+                     COALESCE(x.clipped_shadows, 0.0),
+                     COALESCE(MAX(CASE WHEN d.flag_type = 'blur' THEN 1 ELSE 0 END), 0),
+                     COALESCE(MAX(CASE WHEN d.flag_type = 'back_focus' THEN 1 ELSE 0 END), 0)
+                 FROM files f
+                 LEFT JOIN iqa i        ON i.file_id = f.id
+                 LEFT JOIN exposure x   ON x.file_id = f.id
+                 LEFT JOIN defect_flags d ON d.file_id = f.id
+                 GROUP BY f.id, i.score, x.clipped_highlights, x.clipped_shadows",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let iqa_score: Option<f32> = row.get(1)?;
+                let clipped_highlights: f32 = row.get(2)?;
+                let clipped_shadows: f32 = row.get(3)?;
+                let has_blur: i64 = row.get(4)?;
+                let has_back_focus: i64 = row.get(5)?;
+                Ok((
+                    id,
+                    QualityInputs {
+                        iqa_score,
+                        has_blur: has_blur != 0,
+                        has_back_focus: has_back_focus != 0,
+                        clipped_highlights,
+                        clipped_shadows,
+                    },
+                ))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, qi) = row.map_err(|e| CatalogError::Db(e.to_string()))?;
+            map.insert(id, qi);
+        }
+        Ok(map)
+    }
+
     /// Count the total number of IQA rows.
     pub fn iqa_count(&self) -> Result<i64, CatalogError> {
         let conn = self
@@ -1658,6 +1788,98 @@ mod tests {
         // Vectors round-trip exactly (f32 written, f32 read).
         assert_eq!(loaded[0].1, v0, "first vector mismatch");
         assert_eq!(loaded[1].1, v1, "second vector mismatch");
+    }
+
+    #[test]
+    fn quality_inputs_and_maps_round_trip() {
+        use crate::defect::{DefectFlag, DefectRow, ExposureResult, SharpnessResult};
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+
+        // Two files.
+        let mut ids = Vec::new();
+        for i in 0..2i64 {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/q/file{i}.jpg")),
+                content_hash: 200 + i as u128,
+                size: 10 + i as u64,
+                mtime_ns: i,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            // File 0 gets EXIF with captured_at; file 1 gets none.
+            let exif = if i == 0 {
+                Some(ExifData {
+                    captured_at: Some(1_700_000_000),
+                    camera_make: None,
+                    camera_model: None,
+                    lens_model: None,
+                    focal_length_mm: None,
+                    aperture: None,
+                    iso: None,
+                    shutter_seconds: None,
+                    width: None,
+                    height: None,
+                    orientation: None,
+                })
+            } else {
+                None
+            };
+            let batch_ids = catalog.flush_batch(&[(file, exif)]).unwrap();
+            ids.push(batch_ids[0]);
+        }
+
+        // File 0: IQA 0.8, a blur flag, exposure clips.
+        catalog
+            .flush_ml_batch(&[MlRow {
+                file_id: ids[0],
+                embedding: None,
+                iqa_score: Some(("clip-iqa".to_string(), 0.8)),
+            }])
+            .unwrap();
+        catalog
+            .flush_defect_batch(&[DefectRow {
+                file_id: ids[0],
+                sharpness: SharpnessResult {
+                    s_global: 1.0,
+                    s_subject: None,
+                    s_background: None,
+                    subject_ratio: None,
+                    detector_used: "x".into(),
+                },
+                exposure: ExposureResult {
+                    clipped_highlights: 0.1,
+                    clipped_shadows: 0.4,
+                    mean_luma: 0.5,
+                    histogram_skew: 0.0,
+                },
+                flags: vec![DefectFlag {
+                    flag_type: "blur".into(),
+                    confidence: 0.9,
+                    reason: "test".into(),
+                }],
+            }])
+            .unwrap();
+
+        // captured_at_map: file 0 has Some, file 1 absent or None.
+        let cap = catalog.captured_at_map().unwrap();
+        assert_eq!(cap.get(&ids[0]).copied().flatten(), Some(1_700_000_000));
+        assert!(cap.get(&ids[1]).copied().flatten().is_none());
+
+        // iqa_scores_map: only file 0 present.
+        let iqa = catalog.iqa_scores_map().unwrap();
+        assert!((iqa.get(&ids[0]).copied().unwrap() - 0.8).abs() < 1e-6);
+        assert!(!iqa.contains_key(&ids[1]));
+
+        // quality_inputs_map: file 0 has blur + exposure, no back_focus.
+        let q = catalog.quality_inputs_map().unwrap();
+        let q0 = q.get(&ids[0]).unwrap();
+        assert!((q0.iqa_score.unwrap() - 0.8).abs() < 1e-6);
+        assert!(q0.has_blur);
+        assert!(!q0.has_back_focus);
+        assert!((q0.clipped_highlights - 0.1).abs() < 1e-6);
+        assert!((q0.clipped_shadows - 0.4).abs() < 1e-6);
     }
 
     #[test]
