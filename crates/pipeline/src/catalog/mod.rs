@@ -793,6 +793,54 @@ impl Catalog {
         Ok(count)
     }
 
+    /// Load every embedding vector from the catalog, ordered by `file_id`.
+    ///
+    /// Vectors are stored as DuckDB `FLOAT[]`.  duckdb-rs (v1, bundled) does NOT
+    /// implement `FromSql` for `Vec<f32>` or `Vec<f64>` — only `Vec<u8>` and
+    /// scalar primitives are covered.  Instead we read the column as `duckdb::types::Value`
+    /// (which has a `FromSql` impl) and destructure the `Value::List(Vec<Value>)` variant,
+    /// mapping each `Value::Float(f)` element to `f32`.
+    ///
+    /// LOCKED read-back approach: `row.get::<_, duckdb::types::Value>(1)` →
+    /// `Value::List(Vec<Value>)` with `Value::Float(f32)` elements.
+    /// Confirmed by round-trip test: PRIMARY `Vec<f32>` failed at compile-time
+    /// (no `FromSql`); `Value` extraction is the locked approach.
+    pub fn load_all_embeddings(&self) -> Result<Vec<(i64, Vec<f32>)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT file_id, vector FROM embeddings ORDER BY file_id ASC")
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let raw: duckdb::types::Value = row.get(1)?;
+                // FLOAT[] comes back as Value::List(Vec<Value>) where each element
+                // is Value::Float(f32).  Map each element; non-float items default to 0.0.
+                let vector: Vec<f32> = match raw {
+                    duckdb::types::Value::List(items) | duckdb::types::Value::Array(items) => items
+                        .into_iter()
+                        .map(|v| match v {
+                            duckdb::types::Value::Float(f) => f,
+                            duckdb::types::Value::Double(d) => d as f32,
+                            _ => 0.0_f32,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Ok((id, vector))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(result)
+    }
+
     /// Count the total number of IQA rows.
     pub fn iqa_count(&self) -> Result<i64, CatalogError> {
         let conn = self
@@ -1545,6 +1593,58 @@ mod tests {
             .bucket_baseline_p10("TestModel", "TestLens 50mm", fb, ab, 4)
             .unwrap();
         assert!(none.is_none(), "3 < 4 → None");
+    }
+
+    #[test]
+    fn load_all_embeddings_round_trip() {
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+
+        // Insert two files.
+        let mut ids = Vec::new();
+        for i in 0..2i64 {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/emb/file{i}.jpg")),
+                content_hash: 100 + i as u128,
+                size: 10 + i as u64,
+                mtime_ns: i,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            let batch_ids = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap();
+            ids.push(batch_ids[0]);
+        }
+
+        // Write embeddings via the existing JSON CAST(? AS FLOAT[]) path.
+        let v0 = vec![1.0f32, 2.0, 3.0, 4.0];
+        let v1 = vec![-0.5f32, 0.25, 0.125, 8.0];
+        catalog
+            .flush_ml_batch(&[
+                MlRow {
+                    file_id: ids[0],
+                    embedding: Some(("test-model".to_string(), v0.clone())),
+                    iqa_score: None,
+                },
+                MlRow {
+                    file_id: ids[1],
+                    embedding: Some(("test-model".to_string(), v1.clone())),
+                    iqa_score: None,
+                },
+            ])
+            .unwrap();
+
+        // Read them back.
+        let loaded = catalog.load_all_embeddings().unwrap();
+        assert_eq!(loaded.len(), 2, "expected two embedding rows");
+
+        // Ordered by file_id ASC.
+        assert_eq!(loaded[0].0, ids[0]);
+        assert_eq!(loaded[1].0, ids[1]);
+
+        // Vectors round-trip exactly (f32 written, f32 read).
+        assert_eq!(loaded[0].1, v0, "first vector mismatch");
+        assert_eq!(loaded[1].1, v1, "second vector mismatch");
     }
 
     #[test]
