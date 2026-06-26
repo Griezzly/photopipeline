@@ -156,6 +156,7 @@ pub fn run_calibration(catalog: &Catalog, cfg: &DefectConfig) -> anyhow::Result<
         blur = report.flagged_blur,
         back_focus = report.flagged_back_focus,
         low_iqa = report.flagged_low_iqa,
+        bumped = report.blur_confidence_bumped,
         "calibration complete"
     );
 

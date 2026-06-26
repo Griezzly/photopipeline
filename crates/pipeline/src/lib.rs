@@ -10,6 +10,7 @@ pub mod ml;
 pub mod models;
 pub mod output;
 
+pub use calibration::{run_calibration, CalibrationReport};
 pub use defect::analyze_defects;
 pub use ingest::ingest_directory;
 pub use ml::analyze_ml;
