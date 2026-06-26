@@ -63,6 +63,10 @@ enum Command {
     Calibrate,
 
     /// Rebuild duplicate groups using current embeddings.
+    ///
+    /// Compares DINOv2 embeddings across all scanned files using brute-force KNN
+    /// (the DuckDB vss/HNSW backend is not yet implemented). Run after `scan` to
+    /// assign duplicate-group IDs and elect one keeper per group.
     Dedupe,
 
     /// Generate or update the symlink review tree.
@@ -200,9 +204,26 @@ fn cmd_calibrate(cfg: &config::Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_dedupe(_cfg: &config::Config) -> Result<()> {
-    tracing::info!("dedupe — not yet implemented");
-    eprintln!("photopipe dedupe: not yet implemented (Phase 5)");
+fn cmd_dedupe(cfg: &config::Config) -> Result<()> {
+    use pipeline::{catalog::Catalog, run_dedupe};
+
+    let db_path = &cfg.catalog.db_path;
+    let catalog = Catalog::open(db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+
+    // Brute-force KNN only this phase; surface the vss omission rather than
+    // silently cap, when the user has opted into it via config.
+    if cfg.catalog.enable_vss {
+        tracing::warn!(
+            "catalog.enable_vss = true, but the DuckDB vss/HNSW backend is not \
+             implemented yet — falling back to brute-force KNN"
+        );
+    }
+
+    let report = run_dedupe(&catalog, &cfg.dedupe)?;
+    println!("Dedupe complete:");
+    println!("  Groups  : {}", report.groups);
+    println!("  Members : {}", report.members);
+    println!("  Keepers : {}", report.keepers);
     Ok(())
 }
 
