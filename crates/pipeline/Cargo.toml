@@ -26,6 +26,7 @@ xxhash-rust  = { workspace = true }
 rayon        = { workspace = true }
 webp         = { workspace = true }
 ndarray      = { workspace = true }
+petgraph     = { workspace = true }
 
 # ORT execution providers are platform-conditional.
 # On macOS: CoreML EP is available.
