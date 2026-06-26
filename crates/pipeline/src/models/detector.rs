@@ -33,7 +33,7 @@ impl RtDetrDetector {
 
 impl SubjectDetector for RtDetrDetector {
     fn detect(&self, img: &DynamicImage) -> Result<Vec<DetectedSubject>> {
-        let tensor = preprocess(img);
+        let (tensor, lb) = preprocess(img);
         let ort_tensor =
             ort::value::Tensor::<f32>::from_array(tensor).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -69,13 +69,11 @@ impl SubjectDetector for RtDetrDetector {
             anyhow::bail!("logits/boxes query count mismatch");
         }
 
-        Ok(decode_detections(
-            logit_data,
-            box_data,
-            nq,
-            nc,
-            CONF_THRESHOLD,
-        ))
+        let mut subjects = decode_detections(logit_data, box_data, nq, nc, CONF_THRESHOLD);
+        for s in &mut subjects {
+            s.bbox = unletterbox(s.bbox, &lb);
+        }
+        Ok(subjects)
     }
 
     fn name(&self) -> &str {
@@ -85,9 +83,18 @@ impl SubjectDetector for RtDetrDetector {
 
 // ── preprocessing ─────────────────────────────────────────────────────────────
 
+/// Letterbox geometry returned alongside the preprocessed tensor.
+pub(crate) struct LetterboxParams {
+    pub pad_x: f32,
+    pub pad_y: f32,
+    pub new_w: f32,
+    pub new_h: f32,
+}
+
 /// Letterbox-resize `img` to `INPUT_SIZE`×`INPUT_SIZE`, normalize to [0, 1],
-/// and return a CHW tensor of shape (1, 3, 640, 640).
-pub(crate) fn preprocess(img: &DynamicImage) -> Array4<f32> {
+/// and return a CHW tensor of shape (1, 3, 640, 640) together with the
+/// letterbox geometry needed to map boxes back to original-image fractions.
+pub(crate) fn preprocess(img: &DynamicImage) -> (Array4<f32>, LetterboxParams) {
     let (orig_w, orig_h) = (img.width(), img.height());
     let scale = (INPUT_SIZE as f32 / orig_w as f32).min(INPUT_SIZE as f32 / orig_h as f32);
     let new_w = (orig_w as f32 * scale).round() as u32;
@@ -108,10 +115,29 @@ pub(crate) fn preprocess(img: &DynamicImage) -> Array4<f32> {
             tensor[[0, 2, pad_y + y, pad_x + x]] = p[2] as f32 / 255.0;
         }
     }
-    tensor
+
+    let lb = LetterboxParams {
+        pad_x: pad_x as f32,
+        pad_y: pad_y as f32,
+        new_w: new_w as f32,
+        new_h: new_h as f32,
+    };
+    (tensor, lb)
 }
 
 // ── postprocessing ────────────────────────────────────────────────────────────
+
+/// Map a bbox expressed as fractions of the padded INPUT_SIZE×INPUT_SIZE
+/// letterbox frame back to fractions of the original (pre-letterbox) image.
+pub(crate) fn unletterbox(b: BBox, p: &LetterboxParams) -> BBox {
+    let f = INPUT_SIZE as f32;
+    // frame fractions -> frame pixels -> subtract pad -> divide by scaled dim.
+    let x = ((b.x * f - p.pad_x) / p.new_w).clamp(0.0, 1.0);
+    let y = ((b.y * f - p.pad_y) / p.new_h).clamp(0.0, 1.0);
+    let w = (b.w * f / p.new_w).clamp(0.0, 1.0);
+    let h = (b.h * f / p.new_h).clamp(0.0, 1.0);
+    BBox { x, y, w, h }
+}
 
 /// Per-query argmax decode: for each of `num_queries` queries, pick the class
 /// with the highest logit, apply sigmoid, and emit a `DetectedSubject` if the
@@ -278,13 +304,58 @@ mod tests {
         let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_fn(100, 150, |x, y| {
             Rgb([(x % 256) as u8, (y % 256) as u8, 128])
         });
-        let tensor = preprocess(&DynamicImage::ImageRgb8(img));
+        let (tensor, _lb) = preprocess(&DynamicImage::ImageRgb8(img));
         assert_eq!(tensor.shape(), &[1, 3, 640, 640]);
         let data = tensor.as_slice().unwrap();
         assert!(
             data.iter().all(|&v| (0.0..=1.0).contains(&v)),
             "all pixels should be in [0.0, 1.0]"
         );
+    }
+
+    // ── unletterbox unit test (no model file needed) ──────────────────────────
+
+    #[test]
+    fn unletterbox_inverts_landscape_letterbox() {
+        // 1280x640 (2:1) -> scale 0.5 -> new 640x320 -> pad_x 0, pad_y 160.
+        let p = LetterboxParams {
+            pad_x: 0.0,
+            pad_y: 160.0,
+            new_w: 640.0,
+            new_h: 320.0,
+        };
+        // A frame box covering the whole original image maps to (0,0,1,1).
+        let full = unletterbox(
+            BBox {
+                x: 0.0,
+                y: 160.0 / 640.0,
+                w: 1.0,
+                h: 320.0 / 640.0,
+            },
+            &p,
+        );
+        assert!(
+            (full.x - 0.0).abs() < 1e-5 && (full.y - 0.0).abs() < 1e-5,
+            "full {full:?}"
+        );
+        assert!(
+            (full.w - 1.0).abs() < 1e-5 && (full.h - 1.0).abs() < 1e-5,
+            "full {full:?}"
+        );
+        // A center-quarter box: original (0.25,0.25,0.5,0.5) -> frame (0.25,0.375,0.5,0.25) -> back.
+        let q = unletterbox(
+            BBox {
+                x: 0.25,
+                y: 0.375,
+                w: 0.5,
+                h: 0.25,
+            },
+            &p,
+        );
+        assert!((q.x - 0.25).abs() < 1e-5, "x {q:?}");
+        assert!((q.y - 0.25).abs() < 1e-5, "y {q:?}");
+        assert!((q.w - 0.5).abs() < 1e-5, "w {q:?}");
+        assert!((q.h - 0.5).abs() < 1e-5, "h {q:?}");
     }
 
     // ── smoke test (gated on model file) ─────────────────────────────────────
