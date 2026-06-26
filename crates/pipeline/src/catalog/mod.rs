@@ -825,10 +825,22 @@ impl Catalog {
                         .map(|v| match v {
                             duckdb::types::Value::Float(f) => f,
                             duckdb::types::Value::Double(d) => d as f32,
-                            _ => 0.0_f32,
+                            _ => {
+                                tracing::warn!(
+                                    file_id = id,
+                                    "unexpected Value variant in FLOAT[] element; substituting 0.0"
+                                );
+                                0.0_f32
+                            }
                         })
                         .collect(),
-                    _ => Vec::new(),
+                    _ => {
+                        return Err(duckdb::Error::InvalidColumnType(
+                            1,
+                            "vector".to_string(),
+                            duckdb::types::Type::Any,
+                        ));
+                    }
                 };
                 Ok((id, vector))
             })
@@ -1617,7 +1629,8 @@ mod tests {
         }
 
         // Write embeddings via the existing JSON CAST(? AS FLOAT[]) path.
-        let v0 = vec![1.0f32, 2.0, 3.0, 4.0];
+        // Intentionally different lengths to prove variable-dimension FLOAT[] round-trips.
+        let v0 = vec![1.0f32, 2.0, 3.0];
         let v1 = vec![-0.5f32, 0.25, 0.125, 8.0];
         catalog
             .flush_ml_batch(&[
