@@ -634,6 +634,22 @@ impl Catalog {
         Ok(count)
     }
 
+    /// Count defect flags of `flag_type` for a single file. Test/inspection helper.
+    pub fn count_file_flag(&self, file_id: i64, flag_type: &str) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM defect_flags WHERE file_id = ? AND flag_type = ?",
+                duckdb::params![file_id, flag_type],
+                |r| r.get(0),
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(n)
+    }
+
     /// Count the total number of sharpness rows in the catalog.
     pub fn sharpness_count(&self) -> Result<i64, CatalogError> {
         let conn = self
