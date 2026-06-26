@@ -37,6 +37,15 @@ pub struct RebuildReport {
     pub global_n_samples: usize,
 }
 
+/// One blur-related defect flag ready to persist. `flag_type` is one of
+/// `"blur"`, `"back_focus"`, `"low_iqa"`.
+pub struct BlurFlagRow {
+    pub file_id: i64,
+    pub flag_type: &'static str,
+    pub confidence: f32,
+    pub reason: String,
+}
+
 pub struct Catalog {
     conn: Mutex<Connection>,
     #[doc(hidden)]
@@ -859,6 +868,80 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Per-bucket p10 for `(camera, lens, focal_bucket, aperture_bucket)`, but
+    /// only when that baseline row has `n_samples >= min_samples`. Otherwise
+    /// `None` (caller should fall back to the global sentinel).
+    pub fn bucket_baseline_p10(
+        &self,
+        camera_model: &str,
+        lens_model: &str,
+        focal_bucket: i32,
+        aperture_bucket: f32,
+        min_samples: usize,
+    ) -> Result<Option<f32>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let result = conn.query_row(
+            "SELECT s_subject_p10, n_samples FROM sharpness_baseline
+             WHERE camera_model = ? AND lens_model = ?
+               AND focal_bucket = ? AND aperture_bucket = ?",
+            duckdb::params![camera_model, lens_model, focal_bucket, aperture_bucket],
+            |r| {
+                let p10: f32 = r.get(0)?;
+                let n: i64 = r.get(1)?;
+                Ok((p10, n))
+            },
+        );
+        match result {
+            Ok((p10, n)) if (n as usize) >= min_samples => Ok(Some(p10)),
+            Ok(_) => Ok(None),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(CatalogError::Db(e.to_string())),
+        }
+    }
+
+    /// Bulk-write blur-related flags in one transaction. Uses prepared
+    /// `INSERT … ON CONFLICT (file_id, flag_type)` (NOT the Appender): the
+    /// `defect_flags` table has a `DEFAULT nextval()` id and a UNIQUE
+    /// constraint, which the positional Appender cannot satisfy. Matches the
+    /// `flush_defect_batch` pattern; one transaction per batch.
+    pub fn flush_blur_flag_batch(&self, flags: &[BlurFlagRow]) -> Result<(), CatalogError> {
+        if flags.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO defect_flags (file_id, flag_type, confidence, reason)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT (file_id, flag_type) DO UPDATE SET
+                         confidence = excluded.confidence,
+                         reason     = excluded.reason",
+                )
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            for f in flags {
+                stmt.execute(duckdb::params![
+                    f.file_id,
+                    f.flag_type,
+                    f.confidence,
+                    f.reason
+                ])
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
     /// Rebuild `sharpness_baseline` from current `sharpness`+`exif` data.
     ///
     /// Buckets are computed in Rust (no DuckDB UDF). Per-bucket rows are written
@@ -1325,6 +1408,127 @@ mod tests {
         assert_eq!(r.camera_model.as_deref(), Some("TestModel"));
         assert_eq!(r.focal_length_mm, Some(50.0));
         assert_eq!(r.aperture, Some(2.8));
+    }
+
+    #[test]
+    fn flush_blur_flag_batch_inserts_and_upserts() {
+        use crate::catalog::BlurFlagRow;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+        let file = IngestedFile {
+            path: PathBuf::from("/f/0.jpg"),
+            content_hash: 3,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let id = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap()[0];
+
+        catalog
+            .flush_blur_flag_batch(&[
+                BlurFlagRow {
+                    file_id: id,
+                    flag_type: "blur",
+                    confidence: 0.4,
+                    reason: "r".into(),
+                },
+                BlurFlagRow {
+                    file_id: id,
+                    flag_type: "low_iqa",
+                    confidence: 0.5,
+                    reason: "r2".into(),
+                },
+            ])
+            .unwrap();
+        assert_eq!(catalog.count_defect_flags("blur").unwrap(), 1);
+        assert_eq!(catalog.count_defect_flags("low_iqa").unwrap(), 1);
+
+        // Re-flush the same (file_id, flag_type) with a new confidence → upsert,
+        // not a UNIQUE violation.
+        catalog
+            .flush_blur_flag_batch(&[BlurFlagRow {
+                file_id: id,
+                flag_type: "blur",
+                confidence: 0.9,
+                reason: "r3".into(),
+            }])
+            .unwrap();
+        assert_eq!(
+            catalog.count_defect_flags("blur").unwrap(),
+            1,
+            "still one blur row"
+        );
+        let conn = catalog.conn.lock().unwrap();
+        let conf: f32 = conn
+            .query_row(
+                "SELECT confidence FROM defect_flags WHERE file_id = ? AND flag_type = 'blur'",
+                duckdb::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            (conf - 0.9).abs() < 1e-5,
+            "confidence upserted to 0.9, got {conf}"
+        );
+    }
+
+    #[test]
+    fn bucket_baseline_p10_respects_min_samples() {
+        use crate::defect::SharpnessResult;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+        for (i, s) in [10.0f32, 20.0, 30.0].into_iter().enumerate() {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/p/{i}.jpg")),
+                content_hash: i as u128,
+                size: 1,
+                mtime_ns: i as i64,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            let exif = ExifData {
+                captured_at: Some(1),
+                camera_make: Some("TestMake".into()),
+                camera_model: Some("TestModel".into()),
+                lens_model: Some("TestLens 50mm".into()),
+                focal_length_mm: Some(50.0),
+                aperture: Some(2.8),
+                iso: Some(200),
+                shutter_seconds: Some(0.01),
+                width: Some(64),
+                height: Some(64),
+                orientation: Some(1),
+            };
+            let id = catalog.flush_batch(&[(file, Some(exif))]).unwrap()[0];
+            catalog
+                .upsert_sharpness(
+                    id,
+                    &SharpnessResult {
+                        s_global: s,
+                        s_subject: Some(s),
+                        s_background: Some(s),
+                        subject_ratio: Some(0.16),
+                        detector_used: "rt-detr-l".into(),
+                    },
+                )
+                .unwrap();
+        }
+        catalog.rebuild_sharpness_baselines(3).unwrap();
+
+        // The bucket has 3 samples. min_samples=3 → Some; min_samples=4 → None.
+        let fb = crate::calibration::buckets::focal_bucket(50.0);
+        let ab = crate::calibration::buckets::aperture_bucket(2.8);
+        let got = catalog
+            .bucket_baseline_p10("TestModel", "TestLens 50mm", fb, ab, 3)
+            .unwrap();
+        assert!(got.is_some(), "3 >= 3 → Some");
+        let none = catalog
+            .bucket_baseline_p10("TestModel", "TestLens 50mm", fb, ab, 4)
+            .unwrap();
+        assert!(none.is_none(), "3 < 4 → None");
     }
 
     #[test]
