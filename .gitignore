@@ -3,3 +3,5 @@
 *.duckdb.wal
 models/*.onnx
 models/*.onnx.data
+# subagent-driven-development scratch
+.superpowers/
