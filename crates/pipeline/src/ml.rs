@@ -1,6 +1,6 @@
 use std::sync::{
-    Mutex,
     atomic::{AtomicU64, Ordering},
+    Mutex,
 };
 
 use rayon::prelude::*;

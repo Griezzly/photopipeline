@@ -22,13 +22,17 @@ pub struct RtDetrDetector {
 impl RtDetrDetector {
     pub fn load(path: &Path) -> Result<Self> {
         let session = crate::models::build_session(path)?;
-        Ok(Self { session: Mutex::new(session) })
+        Ok(Self {
+            session: Mutex::new(session),
+        })
     }
 }
 
 impl SubjectDetector for RtDetrDetector {
     fn detect(&self, _img: &DynamicImage) -> Result<Vec<DetectedSubject>> {
-        anyhow::bail!("RtDetrDetector::detect not yet implemented (deferred — see models/README.md)")
+        anyhow::bail!(
+            "RtDetrDetector::detect not yet implemented (deferred — see models/README.md)"
+        )
     }
 
     fn name(&self) -> &str {

@@ -1,10 +1,6 @@
 use image::{ImageBuffer, Rgb};
 use pipeline::{
-    analyze_ml,
-    cache::Cache,
-    catalog::Catalog,
-    config::IngestConfig,
-    ingest::ingest_directory,
+    analyze_ml, cache::Cache, catalog::Catalog, config::IngestConfig, ingest::ingest_directory,
     models::ModelHub,
 };
 use std::path::PathBuf;

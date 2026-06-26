@@ -20,7 +20,9 @@ pub struct ClipIqaScorer {
 impl ClipIqaScorer {
     pub fn load(path: &Path) -> Result<Self> {
         let session = crate::models::build_session(path)?;
-        Ok(Self { session: Mutex::new(session) })
+        Ok(Self {
+            session: Mutex::new(session),
+        })
     }
 
     fn preprocess(img: &DynamicImage) -> Array4<f32> {
@@ -48,8 +50,8 @@ impl ClipIqaScorer {
 impl Iqa for ClipIqaScorer {
     fn score(&self, img: &DynamicImage) -> Result<f32> {
         let input = Self::preprocess(img);
-        let tensor = ort::value::Tensor::<f32>::from_array(input)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let tensor =
+            ort::value::Tensor::<f32>::from_array(input).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut session = self
             .session
@@ -64,7 +66,9 @@ impl Iqa for ClipIqaScorer {
             .try_extract_tensor::<f32>()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let raw = *data.first().ok_or_else(|| anyhow::anyhow!("iqa_score output is empty"))?;
+        let raw = *data
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("iqa_score output is empty"))?;
         Ok(raw.clamp(0.0, 1.0))
     }
 
@@ -91,11 +95,9 @@ mod tests {
 
         let scorer = ClipIqaScorer::load(&model_path).expect("load failed");
 
-        let img = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(
-            32,
-            32,
-            |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128u8]),
-        ));
+        let img = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(32, 32, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128u8])
+        }));
 
         let score = scorer.score(&img).expect("score failed");
         assert!(

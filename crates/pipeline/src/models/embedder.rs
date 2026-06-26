@@ -14,7 +14,9 @@ pub struct DinoV2Embedder {
 impl DinoV2Embedder {
     pub fn load(path: &Path) -> Result<Self> {
         let session = crate::models::build_session(path)?;
-        Ok(Self { session: Mutex::new(session) })
+        Ok(Self {
+            session: Mutex::new(session),
+        })
     }
 
     fn preprocess(img: &DynamicImage) -> Array4<f32> {
@@ -41,8 +43,8 @@ impl DinoV2Embedder {
 impl Embedder for DinoV2Embedder {
     fn embed(&self, img: &DynamicImage) -> Result<Vec<f32>> {
         let input = Self::preprocess(img);
-        let tensor = ort::value::Tensor::<f32>::from_array(input)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let tensor =
+            ort::value::Tensor::<f32>::from_array(input).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut session = self
             .session
@@ -89,11 +91,9 @@ mod tests {
         assert_eq!(embedder.dim(), 768);
 
         // 32×32 synthetic gradient image.
-        let img = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(
-            32,
-            32,
-            |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128u8]),
-        ));
+        let img = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(32, 32, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128u8])
+        }));
 
         let embedding = embedder.embed(&img).expect("embed failed");
         assert_eq!(embedding.len(), 768, "embedding length mismatch");

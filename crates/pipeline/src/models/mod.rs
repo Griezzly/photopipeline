@@ -199,7 +199,7 @@ fn detect_provider(device: crate::config::DeviceChoice) -> String {
 
     // CoreML EP is disabled in build_session (see note there); report CPU on macOS.
     #[cfg(target_os = "macos")]
-    let _ = ();  // nothing to probe
+    let _ = (); // nothing to probe
 
     "CPUExecutionProvider".into()
 }

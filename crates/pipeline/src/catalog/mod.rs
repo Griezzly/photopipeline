@@ -624,9 +624,7 @@ impl Catalog {
     }
 
     /// Files that have no IQA row yet.  Returns `(file_id, path, hash)`.
-    pub fn files_needing_iqa(
-        &self,
-    ) -> Result<Vec<(i64, std::path::PathBuf, u128)>, CatalogError> {
+    pub fn files_needing_iqa(&self) -> Result<Vec<(i64, std::path::PathBuf, u128)>, CatalogError> {
         self.files_missing_ml_row("iqa")
     }
 
@@ -644,7 +642,9 @@ impl Catalog {
              LEFT JOIN {table} t ON t.file_id = f.id
              WHERE t.file_id IS NULL"
         );
-        let mut stmt = conn.prepare(&sql).map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;

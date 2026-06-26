@@ -154,8 +154,14 @@ fn cmd_scan(
     println!("Defect analysis:");
     println!("  Analyzed             : {}", defect_report.analyzed);
     println!("  Errored              : {}", defect_report.errored);
-    println!("  Flagged overexposed  : {}", defect_report.flagged_overexposed);
-    println!("  Flagged underexposed : {}", defect_report.flagged_underexposed);
+    println!(
+        "  Flagged overexposed  : {}",
+        defect_report.flagged_overexposed
+    );
+    println!(
+        "  Flagged underexposed : {}",
+        defect_report.flagged_underexposed
+    );
 
     let ml_report = analyze_ml(&catalog, &cache, &hub, cfg.catalog.write_batch_size)?;
     if !hub.is_empty() {
@@ -207,7 +213,11 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     println!("PhotoPipe Doctor");
     println!("================");
     println!();
-    println!("OS:           {} ({})", std::env::consts::OS, std::env::consts::ARCH);
+    println!(
+        "OS:           {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     println!("Family:       {}", std::env::consts::FAMILY);
     println!("Config file:  {}", config_path.display());
     println!("Exists:       {}", config_path.exists());
@@ -228,8 +238,8 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     );
 
     println!();
-    doctor_model_file("dinov2_base.onnx",  &cfg.models.model_dir, "embedder");
-    doctor_model_file("clip_iqa.onnx",     &cfg.models.model_dir, "iqa");
+    doctor_model_file("dinov2_base.onnx", &cfg.models.model_dir, "embedder");
+    doctor_model_file("clip_iqa.onnx", &cfg.models.model_dir, "iqa");
     println!("  rt_detr_l.onnx  — deferred (ORT Cos(int64) not implemented; see models/README.md)");
     println!();
 
@@ -243,7 +253,9 @@ fn doctor_model_file(filename: &str, model_dir: &std::path::Path, role: &str) {
     let path = model_dir.join(filename);
     let data_path = model_dir.join(format!("{filename}.data"));
     if path.exists() {
-        let graph_kb = std::fs::metadata(&path).map(|m| m.len() / 1024).unwrap_or(0);
+        let graph_kb = std::fs::metadata(&path)
+            .map(|m| m.len() / 1024)
+            .unwrap_or(0);
         let data_mb = if data_path.exists() {
             std::fs::metadata(&data_path)
                 .map(|m| format!(" + {:.0} MB data", m.len() as f64 / 1_048_576.0))
@@ -259,11 +271,11 @@ fn doctor_model_file(filename: &str, model_dir: &std::path::Path, role: &str) {
 
 fn doctor_provider(device: config::DeviceChoice) -> &'static str {
     match device {
-        config::DeviceChoice::Cpu     => "CPUExecutionProvider",
-        config::DeviceChoice::CoreMl  => "CoreMLExecutionProvider (overridden → CPU on macOS)",
-        config::DeviceChoice::Cuda    => "CUDAExecutionProvider",
+        config::DeviceChoice::Cpu => "CPUExecutionProvider",
+        config::DeviceChoice::CoreMl => "CoreMLExecutionProvider (overridden → CPU on macOS)",
+        config::DeviceChoice::Cuda => "CUDAExecutionProvider",
         config::DeviceChoice::TensorRt => "TensorRtExecutionProvider",
-        config::DeviceChoice::Auto    => {
+        config::DeviceChoice::Auto => {
             #[cfg(target_os = "macos")]
             return "CPUExecutionProvider (auto; CoreML disabled in ort rc.12)";
             #[cfg(not(target_os = "macos"))]
