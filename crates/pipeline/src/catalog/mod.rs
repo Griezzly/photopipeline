@@ -30,6 +30,13 @@ pub struct QualityInputs {
     pub clipped_shadows: f32,
 }
 
+/// One row destined for the `duplicate_members` table.
+pub struct DuplicateMember {
+    pub file_id: i64,
+    pub is_suggested_keeper: bool,
+    pub quality_score: f32,
+}
+
 /// One file's sharpness + raw EXIF + optional IQA score, for the reflag pass.
 /// Buckets are computed in Rust (`calibration::buckets`) at the call site.
 pub struct SharpnessReflagRow {
@@ -983,6 +990,108 @@ impl Catalog {
         Ok(map)
     }
 
+    /// Delete all duplicate groups and members.  Members are deleted first
+    /// because DuckDB does not support `ON DELETE CASCADE`; each delete runs
+    /// as a separate autocommit statement to avoid FK check ordering issues.
+    pub fn clear_duplicate_groups(&self) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        conn.execute("DELETE FROM duplicate_members", [])
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        conn.execute("DELETE FROM duplicate_groups", [])
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Insert a `duplicate_groups` row and return its generated `id`.
+    pub fn insert_duplicate_group(
+        &self,
+        method: &str,
+        created_at: i64,
+    ) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let id: i64 = conn
+            .query_row(
+                "INSERT INTO duplicate_groups (method, created_at)
+                 VALUES (?, ?)
+                 RETURNING id",
+                duckdb::params![method, created_at],
+                |r| r.get(0),
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(id)
+    }
+
+    /// Insert all members of one group in a single transaction.
+    pub fn insert_duplicate_members(
+        &self,
+        group_id: i64,
+        members: &[DuplicateMember],
+    ) -> Result<(), CatalogError> {
+        if members.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO duplicate_members
+                         (group_id, file_id, is_suggested_keeper, quality_score)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT (group_id, file_id) DO UPDATE SET
+                         is_suggested_keeper = excluded.is_suggested_keeper,
+                         quality_score       = excluded.quality_score",
+                )
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            for m in members {
+                stmt.execute(duckdb::params![
+                    group_id,
+                    m.file_id,
+                    m.is_suggested_keeper,
+                    m.quality_score,
+                ])
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Count rows in `duplicate_groups`.
+    pub fn duplicate_group_count(&self) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_groups", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(count)
+    }
+
+    /// Count rows in `duplicate_members`.
+    pub fn duplicate_member_count(&self) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_members", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(count)
+    }
+
     /// Count the total number of IQA rows.
     pub fn iqa_count(&self) -> Result<i64, CatalogError> {
         let conn = self
@@ -1880,6 +1989,63 @@ mod tests {
         assert!(!q0.has_back_focus);
         assert!((q0.clipped_highlights - 0.1).abs() < 1e-6);
         assert!((q0.clipped_shadows - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn duplicate_group_write_and_clear() {
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+
+        let mut ids = Vec::new();
+        for i in 0..3i64 {
+            let file = IngestedFile {
+                path: PathBuf::from(format!("/dg/file{i}.jpg")),
+                content_hash: 300 + i as u128,
+                size: 10 + i as u64,
+                mtime_ns: i,
+                format: FileFormat::Jpg,
+                has_sidecar_jpg: false,
+            };
+            let batch_ids = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap();
+            ids.push(batch_ids[0]);
+        }
+
+        // Empty initially.
+        assert_eq!(catalog.duplicate_group_count().unwrap(), 0);
+        assert_eq!(catalog.duplicate_member_count().unwrap(), 0);
+
+        // Insert one group with two members.
+        let gid = catalog.insert_duplicate_group("time+embed", 12345).unwrap();
+        catalog
+            .insert_duplicate_members(
+                gid,
+                &[
+                    DuplicateMember {
+                        file_id: ids[0],
+                        is_suggested_keeper: true,
+                        quality_score: 0.9,
+                    },
+                    DuplicateMember {
+                        file_id: ids[1],
+                        is_suggested_keeper: false,
+                        quality_score: 0.4,
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(catalog.duplicate_group_count().unwrap(), 1);
+        assert_eq!(catalog.duplicate_member_count().unwrap(), 2);
+
+        // Distinct ids for a second group.
+        let gid2 = catalog.insert_duplicate_group("time+embed", 12346).unwrap();
+        assert_ne!(gid, gid2, "group ids must be distinct");
+
+        // Clear wipes everything (members first, then groups — no CASCADE).
+        catalog.clear_duplicate_groups().unwrap();
+        assert_eq!(catalog.duplicate_group_count().unwrap(), 0);
+        assert_eq!(catalog.duplicate_member_count().unwrap(), 0);
     }
 
     #[test]
