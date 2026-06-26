@@ -55,7 +55,11 @@ enum Command {
         reprocess: bool,
     },
 
-    /// Rebuild per-lens sharpness baselines from the catalog.
+    /// Rebuild per-lens sharpness baselines and re-flag blur/back-focus/low-IQA.
+    ///
+    /// Run after a meaningful number of photos per lens have been scanned
+    /// (~30+ per lens is the default sample threshold). Leaves over/underexposed
+    /// flags untouched.
     Calibrate,
 
     /// Rebuild duplicate groups using current embeddings.
@@ -174,9 +178,25 @@ fn cmd_scan(
     Ok(())
 }
 
-fn cmd_calibrate(_cfg: &config::Config) -> Result<()> {
-    tracing::info!("calibrate — not yet implemented");
-    eprintln!("photopipe calibrate: not yet implemented (Phase 4)");
+fn cmd_calibrate(cfg: &config::Config) -> Result<()> {
+    use pipeline::catalog::Catalog;
+
+    let catalog =
+        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+
+    let report = pipeline::run_calibration(&catalog, &cfg.defect)?;
+
+    println!("Calibration complete:");
+    println!("  Buckets built          : {}", report.buckets_built);
+    println!("  Global sample count    : {}", report.global_n_samples);
+    println!("  Stale flags cleared    : {}", report.flags_cleared);
+    println!("  Flagged blur           : {}", report.flagged_blur);
+    println!("  Flagged back-focus     : {}", report.flagged_back_focus);
+    println!("  Flagged low-IQA        : {}", report.flagged_low_iqa);
+    println!(
+        "  Blur confidence bumped : {}",
+        report.blur_confidence_bumped
+    );
     Ok(())
 }
 
