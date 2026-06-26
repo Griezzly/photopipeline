@@ -20,7 +20,8 @@ pub fn l2_normalize(v: &mut [f32]) {
 }
 
 /// Cosine similarity of two already-L2-normalized vectors (a dot product).
-/// Iterates over `min(len)` so mismatched dims don't panic.
+/// Both slices MUST have equal length; this is enforced by the `debug_assert_eq!`
+/// below and a precondition of callers (all vectors share the same embedding dim).
 pub fn cosine_normalized(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "cosine: dimension mismatch");
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()

@@ -993,6 +993,8 @@ impl Catalog {
     /// Delete all duplicate groups and members.  Members are deleted first
     /// because DuckDB does not support `ON DELETE CASCADE`; each delete runs
     /// as a separate autocommit statement to avoid FK check ordering issues.
+    /// The two DELETEs are therefore NOT in one transaction; crash-recovery
+    /// relies on the next `run_dedupe` call re-clearing before rebuilding.
     pub fn clear_duplicate_groups(&self) -> Result<(), CatalogError> {
         let conn = self
             .conn
