@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use petgraph::graph::UnGraph;
+use petgraph::unionfind::UnionFind;
 
 use crate::catalog::QualityInputs;
 use crate::config::DedupeConfig;
@@ -42,6 +42,8 @@ pub fn build_edges(
     captured_at: &[Option<i64>],
     cfg: &DedupeConfig,
 ) -> Vec<(usize, usize)> {
+    debug_assert_eq!(ids.len(), normalized.len());
+    debug_assert_eq!(ids.len(), captured_at.len());
     let n = ids.len();
     let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
 
@@ -83,63 +85,31 @@ pub fn build_edges(
 
 /// Connected components of an undirected graph over `node_count` nodes.
 ///
-/// Returns one `Vec<usize>` of node indices per component.  Nodes are added
-/// in ascending order before edges, so component membership is deterministic
-/// regardless of edge order.
+/// Returns one `Vec<usize>` of node indices per component, with each component
+/// in ascending node-index order and the outer `Vec` sorted by each component's
+/// smallest member.  Output is fully deterministic for any edge order.
 ///
-/// Note: `petgraph::algo::connected_components` only returns a COUNT, not
-/// membership — so component membership is recovered via a deterministic
-/// union-find that uses the same sorted-edge input.
+/// Uses `petgraph::unionfind::UnionFind` (union-by-rank) for O(α n) complexity.
 pub fn connected_components_sorted(node_count: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
-    // Build petgraph graph for correctness (future use / visualisation), even
-    // though membership itself comes from the union-find below.
-    let mut graph: UnGraph<usize, ()> = UnGraph::new_undirected();
-    // Add nodes 0..node_count in order; node index == graph NodeIndex order.
-    let node_ids: Vec<_> = (0..node_count).map(|i| graph.add_node(i)).collect();
+    use std::collections::BTreeMap;
+
+    let mut uf = UnionFind::<usize>::new(node_count);
     let mut sorted_edges = edges.to_vec();
     sorted_edges.sort_unstable();
     for &(a, b) in &sorted_edges {
-        graph.add_edge(node_ids[a], node_ids[b], ());
+        uf.union(a, b);
     }
 
-    // Union-find over node indices to recover component membership.
-    let mut parent: Vec<usize> = (0..node_count).collect();
-
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        let mut root = x;
-        while parent[root] != root {
-            root = parent[root];
-        }
-        // Path compression.
-        let mut cur = x;
-        while parent[cur] != root {
-            let next = parent[cur];
-            parent[cur] = root;
-            cur = next;
-        }
-        root
-    }
-
-    for &(a, b) in &sorted_edges {
-        let ra = find(&mut parent, a);
-        let rb = find(&mut parent, b);
-        if ra != rb {
-            // Attach larger root to smaller for deterministic structure.
-            if ra < rb {
-                parent[rb] = ra;
-            } else {
-                parent[ra] = rb;
-            }
-        }
-    }
-
-    let mut by_root: std::collections::BTreeMap<usize, Vec<usize>> =
-        std::collections::BTreeMap::new();
+    let mut by_root: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for i in 0..node_count {
-        let r = find(&mut parent, i);
-        by_root.entry(r).or_default().push(i);
+        by_root.entry(uf.find(i)).or_default().push(i); // members pushed in ascending i
     }
-    by_root.into_values().collect()
+
+    let mut comps: Vec<Vec<usize>> = by_root.into_values().collect();
+    // petgraph UnionFind uses union-by-rank, so the root is NOT necessarily the
+    // smallest member; sort the outer vec by smallest member for deterministic output.
+    comps.sort_by_key(|c| c[0]);
+    comps
 }
 
 #[cfg(test)]
