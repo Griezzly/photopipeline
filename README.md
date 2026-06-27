@@ -6,16 +6,15 @@ produces:
 - a **DuckDB catalog** of per-file metadata, defect flags (blur, back-focus, over/
   under-exposure, low quality), and duplicate-group assignments;
 - a **local web review UI** (`photopipe serve`) to triage and cull, plus a
-  symlink **review tree** you can browse in your file manager; and
+  **review tree** of copied files you can browse in your file manager; and
 - a **keepers export tree** of the photos you chose to keep.
 
 Strictly **non-destructive** — your originals are only ever read. Outputs are a
-separate DuckDB file and trees of symlinks; nothing is moved, modified, or
-deleted.
+separate DuckDB file and trees of real copied files; nothing is moved, modified,
+or deleted.
 
-> **Platform note:** photopipe builds and runs on **Linux and macOS**. On
-> **Windows**, run it inside **WSL2** (see the Windows guide below) — this is
-> also how the NVIDIA GPU path works on a Windows machine.
+> **Platform note:** photopipe builds and runs natively on **Linux**, **macOS**,
+> and **Windows** (see the Windows guide below). WSL2 also works on Windows.
 
 ---
 
@@ -40,8 +39,8 @@ scan ──> calibrate ──> dedupe ──> serve / review-tree ──> export
   suggested keeper per group.
 - **`serve`** — the review UI: a grid of your photos (flagged/duplicates first),
   keyboard-driven keep/reject, written through to the catalog.
-- **`export-keepers`** — build a `keepers/YYYY-MM/` tree of links to everything you
-  kept, ready to hand to Lightroom / Capture One / a backup.
+- **`export-keepers`** — build a `keepers/YYYY-MM/` tree of copies of everything
+  you kept, ready to hand to Lightroom / Capture One / a backup.
 
 ---
 
@@ -85,47 +84,59 @@ photopipe needs a stable **Rust** toolchain (edition 2021). **Python is only use
 once**, to export the ONNX model files — the shipped binary has no Python
 dependency at runtime.
 
-### Windows (PC with an NVIDIA GPU) — via WSL2
+### Windows (PC with an NVIDIA GPU) — native build
 
-On Windows the GPU path and the symlink trees both work through **WSL2**. The
-NVIDIA Windows driver exposes the GPU to WSL2 (CUDA-on-WSL) — you do **not**
-install a Linux NVIDIA driver inside WSL.
+photopipe builds and runs natively on Windows. WSL2 also works (see the
+note at the end of this section).
 
-1. **Install WSL2 + Ubuntu** (PowerShell, as admin), then reboot:
-   ```powershell
-   wsl --install -d Ubuntu
-   ```
-2. **NVIDIA driver:** install the latest **NVIDIA driver for Windows** (the
-   standard Game-Ready/Studio driver includes WSL CUDA support). Nothing
-   GPU-driver-related is installed inside Ubuntu.
-3. **Inside the Ubuntu (WSL) shell**, install the build prerequisites:
-   ```bash
-   sudo apt update
-   sudo apt install -y build-essential pkg-config git python3 python3-venv python3-pip
-   # Rust
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source ~/.cargo/env
-   # CUDA runtime + cuDNN that ONNX Runtime needs for the GPU provider:
-   sudo apt install -y nvidia-cuda-toolkit       # or NVIDIA's CUDA-on-WSL packages
-   ```
-   ONNX Runtime's CUDA execution provider needs the CUDA runtime and cuDNN on
-   the library path. If they're missing, photopipe still runs — it just falls
-   back to CPU. `photopipe doctor` tells you which provider was selected.
-4. **Build and run inside WSL:**
-   ```bash
-   git clone <repo-url> photopipe && cd photopipe
-   cargo build --release
-   ```
-5. **Where to keep photos.** Reading from the Windows drive (`/mnt/c/...`) works
-   but is slow; copying a library onto the WSL ext4 filesystem (e.g.
-   `~/Photos`) is much faster for scanning. Keep the repo itself on ext4 too.
-6. **Reviewing.** The web UI is the easiest review path on Windows: run
-   `photopipe serve` in WSL and open `http://127.0.0.1:8787/` in your **Windows**
-   browser (WSL forwards localhost automatically). The symlink review/keepers
-   trees are best consumed by Linux tooling inside WSL.
+**Prerequisites:**
 
-> Native (non-WSL) Windows builds are **not** supported yet — the link trees use
-> Unix symlinks.
+1. **Visual Studio Build Tools** — install from
+   <https://visualstudio.microsoft.com/downloads/> (select the
+   **Desktop development with C++** workload). This provides the MSVC linker
+   and Windows SDK that Rust's MSVC toolchain requires.
+2. **Rust (MSVC toolchain)** — install from <https://rustup.rs/>. The installer
+   auto-selects the `x86_64-pc-windows-msvc` target when VS Build Tools are
+   present.
+3. **NVIDIA driver + CUDA runtime + cuDNN** — install the latest
+   Game-Ready or Studio driver from <https://www.nvidia.com/drivers>. Then
+   install the CUDA Toolkit and the matching cuDNN from the NVIDIA developer
+   site. ONNX Runtime's CUDA execution provider discovers them via `PATH`/
+   `CUDA_PATH`. If they are absent, photopipe still runs — it falls back to the
+   CPU provider. `photopipe doctor` shows which provider was selected.
+4. **Python (one-time only)** — needed only to export the ONNX model files (see
+   "Model setup" below). The shipped binary has no Python dependency at runtime.
+
+**Build and run** (in a Developer Command Prompt or regular PowerShell after
+sourcing the VS environment):
+
+```powershell
+git clone <repo-url> photopipe
+cd photopipe
+cargo build --release
+.\target\release\photopipe.exe doctor
+```
+
+**Default data locations on Windows:**
+
+| Purpose | Default path |
+|---------|-------------|
+| Catalog (DuckDB) | `%APPDATA%\photopipe\catalog.duckdb` |
+| Preview cache | `%LOCALAPPDATA%\photopipe\` |
+
+Override either in `photopipe.toml` (copy from `photopipe.example.toml`); the
+file lives at `%APPDATA%\photopipe\photopipe.toml` by default. Pass
+`--config <path>` to any command to override.
+
+**Reviewing on Windows:** run `photopipe serve` and open
+`http://127.0.0.1:8787/` in your browser. The review and keepers trees
+contain real **copied** files, so they open correctly in Windows Explorer and
+any photo tool.
+
+> **WSL2 also works** if you prefer a Linux environment on Windows. The
+> NVIDIA driver for Windows already exposes the GPU to WSL2 (CUDA-on-WSL) — no
+> separate Linux driver is needed inside WSL. Build and use photopipe inside
+> Ubuntu/WSL exactly as on Linux.
 
 ### macOS (Apple Silicon — M1 or newer)
 
@@ -201,8 +212,9 @@ Pass a different file with `--config <path>` on any command. See
   plus `jpg jpeg`).
 - `[ingest] sidecar_jpg` — `"prefer"` (use the JPG next to a RAW for previews),
   `"ignore"`, or `"require"`.
-- `[output] link_type` — `"symlink"` (default) or `"hardlink"` for the review and
-  keepers trees.
+- `[output] review_tree` / `keeper_strategy` — destination pattern for the review
+  tree and which selection strategy to use for keeper elections. The trees always
+  contain real **copied** files (works on all platforms without symlink permissions).
 
 ---
 
@@ -233,15 +245,16 @@ written through to the catalog immediately.
 The footer shows live keep / reject / undecided counts. The server binds
 `127.0.0.1` only — it is never exposed on the network.
 
-### Symlink review tree (file-manager browsing)
+### Review tree (file-manager browsing)
 
 ```bash
 photopipe review-tree ~/Photos/_review --include rejected,duplicates,uncertain
 ```
 
 Builds `rejected/<reason>/`, `uncertain/`, and `duplicates/group_NNNNN/` folders of
-symlinks for browsing in a Linux/macOS file manager. `--regenerate` rebuilds from
-scratch.
+**copied** files for browsing in any OS file manager (Linux, macOS, or Windows).
+The CLI prints how much data will be copied before starting. `--regenerate`
+deletes and rebuilds the tree from scratch.
 
 ---
 
@@ -254,9 +267,11 @@ or the CLI:
 photopipe export-keepers ~/Photos/_keepers
 ```
 
-This builds a links-only `<output>/YYYY-MM/` tree of everything with a **keep**
+This builds a `<output>/YYYY-MM/` tree of **copies** of everything with a **keep**
 decision (for duplicate groups, only your chosen keeper). Originals are never
-moved or modified. `--regenerate` deletes and rebuilds the tree.
+moved or modified. The CLI prints the estimated copy size before starting; the
+web UI shows the estimate and asks you to confirm before copying.
+`--regenerate` deletes and rebuilds the tree.
 
 ---
 
@@ -285,8 +300,8 @@ photopipe doctor
 | `calibrate` | Rebuild per-lens sharpness baselines from the catalog. |
 | `dedupe` | Rebuild duplicate groups from current embeddings. |
 | `serve` | Launch the local review web UI. `--port` (default 8787). |
-| `review-tree <OUTPUT>` | Generate/update the symlink review tree. `--include`, `--regenerate`. |
-| `export-keepers <OUTPUT>` | Materialize the keepers export tree. `--regenerate`. |
+| `review-tree <OUTPUT>` | Generate/update the review tree (copies). `--include`, `--regenerate`. |
+| `export-keepers <OUTPUT>` | Materialize the keepers export tree (copies). `--regenerate`. |
 | `info <FILE>` | Print all catalog data for one file as JSON. |
 | `stats` | Print catalog summary statistics. |
 | `doctor` | Diagnose config, models, DB, and system health. |
@@ -299,8 +314,12 @@ All commands accept `--config <path>`, `--log-level <level>`, and
 ## Guarantees
 
 - **Non-destructive:** originals are only read; outputs are a separate DuckDB file
-  and trees of symlinks.
+  and trees of real copied files — nothing is moved, modified, or deleted.
 - **Idempotent:** re-running `scan` on unchanged inputs does no new work;
   re-running `export-keepers` reconciles the tree without touching originals.
 - **Decisions persist:** your keep/reject choices live in the catalog and survive
   re-scans and re-dedupes.
+- **Safe tree management:** every review and keepers tree is marked with a
+  `.photopipe-tree` sentinel file when created. The tool refuses to remove a
+  directory that lacks this marker, preventing accidental deletion of unrelated
+  folders.

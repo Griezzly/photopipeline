@@ -44,11 +44,9 @@ knn_k                          = 10
 min_group_size                 = 2
 
 [output]
-review_tree     = "<library>/_review" # <library> is substituted with the scan root
-link_type       = "symlink"           # "symlink" | "hardlink"
-                                      # Also governs the keepers export tree produced
-                                      # by `photopipe export-keepers` and the web UI's
-                                      # Export button.
+# review-tree and export-keepers always COPY files (cross-platform; real files
+# any tool can read). Originals are never moved or modified.
+review_tree    = "<library>/_review" # <library> is substituted with the scan root
 keeper_strategy = "iqa"              # "iqa" | "sharpness" | "iqa_then_sharpness"
 
 # photopipe serve reads catalog.db_path (above) and catalog.cache_dir for the

@@ -335,7 +335,11 @@ fn cmd_review_tree(
     let report = build_review_tree(&catalog, &output, &include, regenerate)?;
 
     println!("Review tree: {}", output.display());
-    println!("  Copied  : {} files ({})", report.files_copied, pipeline::humanize_bytes(report.bytes_copied));
+    println!(
+        "  Copied  : {} files ({})",
+        report.files_copied,
+        pipeline::humanize_bytes(report.bytes_copied)
+    );
     println!("  Skipped : {}", report.files_skipped);
     println!("  Removed : {}", report.files_removed);
     println!("  Groups  : {}", report.groups);
