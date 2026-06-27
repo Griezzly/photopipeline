@@ -61,6 +61,32 @@ pub fn encode_webp(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
     Ok(encoder.encode(quality as f32).to_vec())
 }
 
+/// Render an original photo to WebP bytes at the given size/quality.
+///
+/// Chooses the JPEG path for `.jpg`/`.jpeg` (case-insensitive) and the RAW
+/// preview-extraction path otherwise. Used by the review server to produce
+/// thumbnails and previews on demand.
+pub fn render_webp(
+    path: &Path,
+    max_long_edge: u32,
+    quality: u8,
+) -> Result<Vec<u8>, crate::error::IngestError> {
+    let is_jpg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+        .unwrap_or(false);
+    let img = if is_jpg {
+        extract_preview_jpg(path, max_long_edge)?
+    } else {
+        extract_preview_raw(path, max_long_edge)?
+    };
+    encode_webp(&img, quality).map_err(|reason| crate::error::IngestError::Preview {
+        path: path.to_owned(),
+        reason,
+    })
+}
+
 /// Resize `img` so its longest edge is at most `max_long_edge` pixels.
 ///
 /// If the image is already small enough, it is returned unchanged.
@@ -74,4 +100,25 @@ fn resize_to_long_edge(img: DynamicImage, max_long_edge: u32) -> DynamicImage {
     let new_w = ((w as f64 * scale).round() as u32).max(1);
     let new_h = ((h as f64 * scale).round() as u32).max(1);
     img.resize(new_w, new_h, FilterType::Lanczos3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn render_webp_from_jpg() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("x.jpg");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(64, 48, |_, _| Rgb([10, 20, 30]));
+        img.save(&p).unwrap();
+
+        let bytes = render_webp(&p, 32, 80).unwrap();
+        assert!(!bytes.is_empty());
+        // RIFF/WEBP magic
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP");
+    }
 }
