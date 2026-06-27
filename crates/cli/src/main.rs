@@ -323,6 +323,14 @@ fn cmd_review_tree(
     let catalog =
         Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
 
+    let est = pipeline::estimate_review_copy(&catalog, &output, &include)?;
+    println!(
+        "Copying {} files ({}) → {} …",
+        est.files,
+        pipeline::humanize_bytes(est.bytes),
+        output.display()
+    );
+
     tracing::info!(output = %output.display(), regenerate, "building review tree");
     let report = build_review_tree(&catalog, &output, &include, regenerate)?;
 
@@ -339,9 +347,16 @@ fn cmd_export_keepers(output: PathBuf, regenerate: bool, cfg: &config::Config) -
     let catalog =
         Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
     let out = config::expand_tilde(&output);
+    let est = pipeline::estimate_keepers_copy(&catalog, &out)?;
+    println!(
+        "Copying {} files ({}) → {} …",
+        est.files,
+        pipeline::humanize_bytes(est.bytes),
+        out.display()
+    );
     let report = pipeline::build_keepers_tree(&catalog, &out, regenerate)?;
     println!(
-        "Keepers tree: {} copied ({}), {} skipped, {} removed, {} errors → {}",
+        "Copied {} files ({}), {} skipped, {} removed, {} errors → {}",
         report.files_copied,
         pipeline::humanize_bytes(report.bytes_copied),
         report.files_skipped,

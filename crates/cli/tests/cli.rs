@@ -143,23 +143,34 @@ fn export_keepers_creates_tree() {
         catalog.set_decision(id, Verdict::Keep, None).unwrap();
     }
 
-    let status = Command::new(env!("CARGO_BIN_EXE_photopipe"))
-        .args([
-            "--config",
-            cfg_path.to_str().unwrap(),
-            "export-keepers",
-            out.to_str().unwrap(),
-        ])
-        .status()
+    let output_run = Command::new(env!("CARGO_BIN_EXE_photopipe"))
+        .args(["--config", cfg_path.to_str().unwrap(), "export-keepers", out.to_str().unwrap()])
+        .output()
         .unwrap();
-    assert!(status.success(), "expected exit 0 from export-keepers");
+    assert!(output_run.status.success());
+    let stdout = String::from_utf8_lossy(&output_run.stdout);
+    assert!(stdout.contains("Copying"), "expected a pre-flight estimate line, got: {stdout}");
+    assert!(stdout.contains("Copied"), "expected a final report line, got: {stdout}");
 
-    // Expect at least one symlink named a.jpg under the keepers tree.
+    // a.jpg is a real copied file (not a symlink), byte-identical to the original.
     let entries = walkdir_like(&out);
-    assert!(
-        entries.iter().any(|n| n == "a.jpg"),
-        "expected a.jpg in keepers tree, found: {entries:?}"
-    );
+    assert!(entries.iter().any(|n| n == "a.jpg"));
+    let copied = find_file(&out, "a.jpg").expect("a.jpg copied");
+    assert!(!std::fs::symlink_metadata(&copied).unwrap().file_type().is_symlink());
+}
+
+fn find_file(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for e in std::fs::read_dir(root).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(found) = find_file(&p, name) {
+                return Some(found);
+            }
+        } else if p.file_name().and_then(|n| n.to_str()) == Some(name) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Minimal recursive filename collector (avoids adding a dep to the cli crate).
