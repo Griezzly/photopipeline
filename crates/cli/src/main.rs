@@ -320,10 +320,100 @@ fn cmd_info(_file: PathBuf, _cfg: &config::Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stats(_cfg: &config::Config) -> Result<()> {
-    tracing::info!("stats — not yet implemented");
-    eprintln!("photopipe stats: not yet implemented (Phase 7)");
+fn cmd_stats(cfg: &config::Config) -> Result<()> {
+    let catalog =
+        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+
+    let s = catalog
+        .stats()
+        .map_err(|e| anyhow::anyhow!("stats: {}", e))?;
+    let flags = catalog
+        .flag_counts()
+        .map_err(|e| anyhow::anyhow!("flags: {}", e))?;
+    let cameras = catalog
+        .per_camera_counts()
+        .map_err(|e| anyhow::anyhow!("cameras: {}", e))?;
+    let lenses = catalog
+        .per_lens_counts()
+        .map_err(|e| anyhow::anyhow!("lenses: {}", e))?;
+
+    let db_size = file_size(&cfg.catalog.db_path);
+    let cache_size = dir_size(&cfg.catalog.cache_dir);
+
+    println!("PhotoPipe Stats");
+    println!("===============");
+    println!("Total files          : {}", s.total_files);
+    println!("Embeddings           : {}", s.embedding_count);
+    println!("IQA scores           : {}", s.iqa_count);
+    println!("Duplicate groups     : {}", s.duplicate_group_count);
+    println!("Files in groups      : {}", s.grouped_file_count);
+    println!();
+    println!("Defect flags");
+    println!("------------");
+    if flags.is_empty() {
+        println!("  (none)");
+    } else {
+        for (ft, n) in &flags {
+            println!("  {ft:<14} {n}");
+        }
+    }
+    println!();
+    println!("Per camera");
+    println!("----------");
+    if cameras.is_empty() {
+        println!("  (no EXIF)");
+    } else {
+        for (cam, n) in &cameras {
+            println!("  {cam:<28} {n}");
+        }
+    }
+    println!();
+    println!("Per lens");
+    println!("--------");
+    if lenses.is_empty() {
+        println!("  (no EXIF)");
+    } else {
+        for (cam, lens, n) in &lenses {
+            println!("  {cam} / {lens:<28} {n}");
+        }
+    }
+    println!();
+    println!("Disk usage");
+    println!("----------");
+    println!(
+        "  Catalog : {:.1} MB ({})",
+        db_size as f64 / 1_048_576.0,
+        cfg.catalog.db_path.display()
+    );
+    println!(
+        "  Cache   : {:.1} MB ({})",
+        cache_size as f64 / 1_048_576.0,
+        cfg.catalog.cache_dir.display()
+    );
     Ok(())
+}
+
+/// Size in bytes of a single file, or 0 if it can't be read.
+fn file_size(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Recursive byte size of a directory tree, ignoring entries it can't read.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    for entry in read.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total += dir_size(&entry.path());
+        } else {
+            total += meta.len();
+        }
+    }
+    total
 }
 
 fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()> {

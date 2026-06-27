@@ -16,6 +16,16 @@ pub struct MlRow {
     pub iqa_score: Option<(String, f32)>,
 }
 
+/// Aggregate catalog counts for `photopipe stats`.
+pub struct CatalogStats {
+    pub total_files: i64,
+    pub duplicate_group_count: i64,
+    /// Distinct files that belong to at least one duplicate group.
+    pub grouped_file_count: i64,
+    pub embedding_count: i64,
+    pub iqa_count: i64,
+}
+
 /// One defect-flagged file as needed by the review tree.
 #[derive(Debug, Clone)]
 pub struct ReviewEntry {
@@ -1590,6 +1600,118 @@ impl Catalog {
             global_n_samples: global_n,
         })
     }
+
+    /// Aggregate counts for the `stats` command.
+    pub fn stats(&self) -> Result<CatalogStats, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let total_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let duplicate_group_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_groups", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let grouped_file_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT file_id) FROM duplicate_members",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let embedding_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let iqa_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM iqa", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(CatalogStats {
+            total_files,
+            duplicate_group_count,
+            grouped_file_count,
+            embedding_count,
+            iqa_count,
+        })
+    }
+
+    /// Count of each defect flag type, e.g. `("blur", 12)`.
+    pub fn flag_counts(&self) -> Result<Vec<(String, i64)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT flag_type, COUNT(*) FROM defect_flags
+                 GROUP BY flag_type ORDER BY flag_type",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// File count per camera model (NULL model reported as "(unknown)").
+    pub fn per_camera_counts(&self) -> Result<Vec<(String, i64)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(camera_model, '(unknown)'), COUNT(*)
+                 FROM exif GROUP BY camera_model ORDER BY COUNT(*) DESC, 1",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// File count per (camera model, lens model) pair (NULLs → "(unknown)").
+    pub fn per_lens_counts(&self) -> Result<Vec<(String, String, i64)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(camera_model, '(unknown)'),
+                        COALESCE(lens_model, '(unknown)'), COUNT(*)
+                 FROM exif GROUP BY camera_model, lens_model
+                 ORDER BY COUNT(*) DESC, 1, 2",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
 }
 
 /// Return (p10, p50, p90) of `samples` using linear interpolation between
@@ -2413,5 +2535,111 @@ mod tests {
         let (catalog, _dir) = make_catalog();
         // The single migration (version 1) runs at open().
         assert_eq!(catalog.schema_version().unwrap(), 1);
+    }
+
+    /// Insert a file with the given path/hash and return its id.
+    fn insert_file(catalog: &Catalog, path: &str, hash: u128) -> i64 {
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+        let file = IngestedFile {
+            path: PathBuf::from(path),
+            content_hash: hash,
+            size: 1234,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap()[0]
+    }
+
+    #[test]
+    fn stats_counts_files_and_groups() {
+        let (catalog, _dir) = make_catalog();
+        let a = insert_file(&catalog, "/p/a.jpg", 1);
+        let b = insert_file(&catalog, "/p/b.jpg", 2);
+        let _c = insert_file(&catalog, "/p/c.jpg", 3);
+
+        // One duplicate group with two members (a, b).
+        {
+            let conn = catalog.conn.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO duplicate_groups (method, created_at) VALUES ('test', 0);",
+            )
+            .unwrap();
+            let gid: i64 = conn
+                .query_row("SELECT MAX(id) FROM duplicate_groups", [], |r| r.get(0))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO duplicate_members (group_id, file_id, is_suggested_keeper, quality_score)
+                 VALUES (?, ?, true, 1.0)",
+                duckdb::params![gid, a],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO duplicate_members (group_id, file_id, is_suggested_keeper, quality_score)
+                 VALUES (?, ?, false, 0.5)",
+                duckdb::params![gid, b],
+            )
+            .unwrap();
+        }
+
+        let s = catalog.stats().unwrap();
+        assert_eq!(s.total_files, 3);
+        assert_eq!(s.duplicate_group_count, 1);
+        assert_eq!(s.grouped_file_count, 2);
+        assert_eq!(s.embedding_count, 0);
+        assert_eq!(s.iqa_count, 0);
+    }
+
+    #[test]
+    fn flag_counts_groups_by_type() {
+        let (catalog, _dir) = make_catalog();
+        let a = insert_file(&catalog, "/p/a.jpg", 1);
+        let b = insert_file(&catalog, "/p/b.jpg", 2);
+        {
+            let conn = catalog.conn.lock().unwrap();
+            for (fid, ft) in [(a, "blur"), (b, "blur"), (a, "overexposed")] {
+                conn.execute(
+                    "INSERT INTO defect_flags (file_id, flag_type, confidence, reason)
+                     VALUES (?, ?, 0.9, 'r')",
+                    duckdb::params![fid, ft],
+                )
+                .unwrap();
+            }
+        }
+        let mut counts = catalog.flag_counts().unwrap();
+        counts.sort();
+        assert_eq!(
+            counts,
+            vec![("blur".to_string(), 2), ("overexposed".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn per_camera_and_per_lens_counts() {
+        use crate::ingest::ExifData;
+        let (catalog, _dir) = make_catalog();
+        let a = insert_file(&catalog, "/p/a.jpg", 1);
+        let b = insert_file(&catalog, "/p/b.jpg", 2);
+        let exif = ExifData {
+            captured_at: Some(1),
+            camera_make: Some("TestMake".into()),
+            camera_model: Some("CamX".into()),
+            lens_model: Some("Lens50".into()),
+            focal_length_mm: Some(50.0),
+            aperture: Some(2.8),
+            iso: Some(200),
+            shutter_seconds: Some(0.01),
+            width: Some(100),
+            height: Some(100),
+            orientation: Some(1),
+        };
+        catalog.upsert_exif(a, &exif).unwrap();
+        catalog.upsert_exif(b, &exif).unwrap();
+
+        let cams = catalog.per_camera_counts().unwrap();
+        assert_eq!(cams, vec![("CamX".to_string(), 2)]);
+
+        let lenses = catalog.per_lens_counts().unwrap();
+        assert_eq!(lenses, vec![("CamX".to_string(), "Lens50".to_string(), 2)]);
     }
 }
