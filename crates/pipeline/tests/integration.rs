@@ -285,22 +285,21 @@ fn exif_round_trip_jpg() {
         "captured_at round-trip"
     );
 
-    // String fields — strip whitespace and compare contains to handle any
-    // trailing spaces that display_value() might add.
-    let make = exif.camera_make.as_deref().unwrap_or("");
-    assert!(
-        make.contains("TestMake"),
-        "camera_make '{make}' should contain TestMake"
+    // String fields — exact equality; no wrapping quotes, no trailing whitespace.
+    assert_eq!(
+        exif.camera_make.as_deref(),
+        Some("TestMake"),
+        "camera_make must be exactly 'TestMake' (no quote-wrapping)"
     );
-    let model = exif.camera_model.as_deref().unwrap_or("");
-    assert!(
-        model.contains("TestModel"),
-        "camera_model '{model}' should contain TestModel"
+    assert_eq!(
+        exif.camera_model.as_deref(),
+        Some("TestModel"),
+        "camera_model must be exactly 'TestModel' (no quote-wrapping)"
     );
-    let lens = exif.lens_model.as_deref().unwrap_or("");
-    assert!(
-        lens.contains("TestLens"),
-        "lens_model '{lens}' should contain TestLens"
+    assert_eq!(
+        exif.lens_model.as_deref(),
+        Some("TestLens 50mm"),
+        "lens_model must be exactly 'TestLens 50mm' (no quote-wrapping)"
     );
 
     // Numeric EXIF fields.

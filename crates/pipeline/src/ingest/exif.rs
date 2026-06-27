@@ -83,7 +83,14 @@ pub fn read_exif_jpg(path: &Path) -> Result<ExifData, crate::error::IngestError>
 
     let get_str = |tag| -> Option<String> {
         exif.get_field(tag, exif::In::PRIMARY)
-            .map(|f| f.display_value().to_string())
+            .and_then(|f| match f.value {
+                exif::Value::Ascii(ref parts) => parts
+                    .first()
+                    .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string()),
+                // Non-ASCII representation: fall back to display, stripping wrapping quotes.
+                _ => Some(f.display_value().to_string().trim_matches('"').to_string()),
+            })
+            .filter(|s| !s.is_empty())
     };
 
     let get_rational = |tag| -> Option<f32> {
