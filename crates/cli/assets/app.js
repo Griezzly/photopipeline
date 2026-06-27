@@ -134,10 +134,23 @@ document.addEventListener('keydown', (e) => {
 
 flagFilter.addEventListener('change', loadPhotos);
 decidedFilter.addEventListener('change', loadPhotos);
+function humanBytes(n) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return i ? `${v.toFixed(1)} ${u[i]}` : `${n} B`;
+}
+
 document.getElementById('export-btn').addEventListener('click', async () => {
   try {
+    const est = await api('GET', '/api/export/estimate');
+    const ok = confirm(
+      `This will copy ${est.files} photo(s) (${humanBytes(est.bytes)}) to the "_keepers" ` +
+      `folder (relative to where 'photopipe serve' was started). Continue?`
+    );
+    if (!ok) return;
     const r = await api('POST', '/api/export', { regenerate: false });
-    alert(`Exported ${r.links_created} keeper link(s), ${r.errors} error(s) to the "_keepers" folder (relative to where 'photopipe serve' was started).`);
+    alert(`Copied ${r.files_copied} photo(s) (${humanBytes(r.bytes_copied)}), ${r.errors} error(s).`);
   } catch (err) {
     alert(`Export failed: ${err.message}`);
   }
