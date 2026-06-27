@@ -18,7 +18,7 @@ button { cursor: pointer; }
   position: absolute; top: 4px; left: 4px; font-size: 11px;
   background: rgba(0,0,0,.7); padding: 2px 5px; border-radius: 3px;
 }
-.detail { position: fixed; inset: 0; background: rgba(0,0,0,.95); display: flex; }
+.detail { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.95); display: flex; }
 .detail.hidden { display: none; }
 .detail img { flex: 1; object-fit: contain; min-width: 0; }
 .detail aside { width: 320px; padding: 16px; overflow: auto; background: #1b1b1b; font-size: 13px; }

@@ -252,3 +252,47 @@ async fn decision_roundtrip_updates_counts() {
     assert_eq!(v["undecided"], 1);
     assert_eq!(v["kept"], 0);
 }
+
+#[tokio::test]
+async fn thumb_derives_from_preview_cache_when_original_unrenderable() {
+    // Regression: state_with_one_file inserts content_hash 0xABCD at a path that
+    // does not exist on disk, so rendering the original would fail. With the
+    // preview cache pre-populated, /thumb must downscale that preview rather
+    // than fall back to the placeholder.
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use image::{ImageBuffer, Rgb};
+    use tower::ServiceExt;
+
+    let (dir, state, id) = state_with_one_file();
+
+    // Produce a real preview webp and store it in the PREVIEW cache slot (0xABCD).
+    let jpg = dir.path().join("seed.jpg");
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(120, 90, |x, _| Rgb([(x % 256) as u8, 1, 2]));
+    img.save(&jpg).unwrap();
+    let preview = pipeline::render_webp(&jpg, 2048, 85).unwrap();
+    state.cache.write(0xABCD, &preview).unwrap();
+
+    let app = photopipe::serve::router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/thumb/{id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(ct, "image/webp"); // derived from preview cache, not the placeholder
+    let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    assert_eq!(&body[0..4], b"RIFF");
+}

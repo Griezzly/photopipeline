@@ -125,50 +125,38 @@ pub async fn preview(State(state): State<AppState>, Path(id): Path<i64>) -> Resp
     render_asset(state, id, false).await
 }
 
-/// Locate the original by id, serve a cached webp if present, else render and
-/// cache it. Any failure falls back to the SVG placeholder. Runs the blocking
-/// DB + image work on a blocking thread.
+/// Locate the original by id and serve a WebP. Previews are served from (or
+/// rendered into) the preview cache; thumbnails are derived by downscaling the
+/// preview — never by re-decoding the original — so RAW formats whose embedded
+/// preview cannot be re-extracted on demand still get a thumbnail from the
+/// preview `scan` produced. Any failure falls back to the SVG placeholder.
+/// Runs the blocking DB + image work on a blocking thread.
 async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
     let result = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         let loc = state.catalog.lookup_file(id).ok()??;
         let hash = loc.content_hash;
-        let (edge, quality) = if is_thumb {
-            (THUMB_EDGE, THUMB_QUALITY)
-        } else {
-            (PREVIEW_EDGE, PREVIEW_QUALITY)
-        };
 
-        // Cache hit?
-        let cached_path = if is_thumb {
-            state.cache.thumb_path(hash)
+        if is_thumb {
+            // Thumbnail already cached?
+            if state.cache.has_thumb(hash) {
+                if let Ok(bytes) = std::fs::read(state.cache.thumb_path(hash)) {
+                    return Some(bytes);
+                }
+            }
+            // Derive the thumbnail from the preview rather than the original.
+            let preview = preview_bytes(&state, &loc.path, hash)?;
+            match pipeline::downscale_webp(&preview, THUMB_EDGE, THUMB_QUALITY) {
+                Ok(thumb) => {
+                    let _ = state.cache.write_thumb(hash, &thumb);
+                    Some(thumb)
+                }
+                Err(e) => {
+                    tracing::warn!(path = %loc.path.display(), error = %e, "thumb downscale failed");
+                    None
+                }
+            }
         } else {
-            state.cache.path(hash)
-        };
-        let cached = if is_thumb {
-            state.cache.has_thumb(hash)
-        } else {
-            state.cache.has(hash)
-        };
-        if cached {
-            if let Ok(bytes) = std::fs::read(&cached_path) {
-                return Some(bytes);
-            }
-        }
-
-        // Render on demand.
-        match pipeline::render_webp(&loc.path, edge, quality) {
-            Ok(bytes) => {
-                let _ = if is_thumb {
-                    state.cache.write_thumb(hash, &bytes)
-                } else {
-                    state.cache.write(hash, &bytes)
-                };
-                Some(bytes)
-            }
-            Err(e) => {
-                tracing::warn!(path = %loc.path.display(), error = %e, "render failed");
-                None
-            }
+            preview_bytes(&state, &loc.path, hash)
         }
     })
     .await
@@ -177,6 +165,27 @@ async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
     match result {
         Some(bytes) => webp_response(bytes),
         None => placeholder(),
+    }
+}
+
+/// Return the preview WebP for `hash`: the cached copy when present, otherwise
+/// rendered from the original and cached. `None` (with a warning) when the
+/// original cannot be rendered.
+fn preview_bytes(state: &AppState, original: &std::path::Path, hash: u128) -> Option<Vec<u8>> {
+    if state.cache.has(hash) {
+        if let Ok(bytes) = std::fs::read(state.cache.path(hash)) {
+            return Some(bytes);
+        }
+    }
+    match pipeline::render_webp(original, PREVIEW_EDGE, PREVIEW_QUALITY) {
+        Ok(bytes) => {
+            let _ = state.cache.write(hash, &bytes);
+            Some(bytes)
+        }
+        Err(e) => {
+            tracing::warn!(path = %original.display(), error = %e, "render failed");
+            None
+        }
     }
 }
 

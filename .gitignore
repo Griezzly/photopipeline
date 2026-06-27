@@ -8,3 +8,15 @@ models/*.onnx.data
 
 # python bytecode cache (tools/ export scripts)
 __pycache__/
+
+# editor / IDE
+.idea/
+.claude/
+
+# playwright MCP browser-test artifacts + screenshots
+.playwright-mcp/
+/*.png
+
+# local planning scratch (not part of the repo)
+PHASE_*_PROMPT.md
+PROJECT_OVERVIEW.md
