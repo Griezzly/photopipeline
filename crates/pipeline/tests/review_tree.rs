@@ -127,20 +127,21 @@ fn rejected_and_uncertain_and_duplicates_are_built() {
     let group_dir = format!("duplicates/group_{gid:05}_2023-06-15");
 
     let out = lib.path().join("_review");
-    let report =
-        build_review_tree(&catalog, &out, &[], false).unwrap();
-    assert!(
-        report.files_copied >= 4,
-        "copied {}",
-        report.files_copied
-    );
+    let report = build_review_tree(&catalog, &out, &[], false).unwrap();
+    assert!(report.files_copied >= 4, "copied {}", report.files_copied);
     assert_eq!(report.groups, 1);
 
     // rejected/blur/2023-06/blur.jpg is a COPY of the original (byte-identical).
     let blur_link = out.join("rejected/blur/2023-06/blur.jpg");
     assert!(blur_link.is_file());
-    assert!(!std::fs::symlink_metadata(&blur_link).unwrap().file_type().is_symlink());
-    assert_eq!(std::fs::read(&blur_link).unwrap(), std::fs::read(&blur_path).unwrap());
+    assert!(!std::fs::symlink_metadata(&blur_link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        std::fs::read(&blur_link).unwrap(),
+        std::fs::read(&blur_path).unwrap()
+    );
 
     // low_iqa -> low_quality.
     assert!(out.join("rejected/low_quality/2023-06/lowq.jpg").exists());
@@ -189,7 +190,10 @@ fn non_destructive_originals_unchanged() {
     let copy_in_tree = out.join("rejected/blur/2023-06/a.jpg");
     assert!(copy_in_tree.is_file());
     std::fs::remove_file(&copy_in_tree).unwrap();
-    assert!(orig.exists(), "deleting a copy must not delete the original");
+    assert!(
+        orig.exists(),
+        "deleting a copy must not delete the original"
+    );
     assert!(!std::fs::read(&orig).unwrap().is_empty());
 }
 
@@ -227,10 +231,7 @@ fn regenerate_rebuilds_after_manual_deletion() {
 
     // --regenerate rebuilds all.
     let r2 = build_review_tree(&catalog, &out, &[], true).unwrap();
-    assert_eq!(
-        r2.files_copied, 4,
-        "regenerate should recreate all 4 files"
-    );
+    assert_eq!(r2.files_copied, 4, "regenerate should recreate all 4 files");
     let n = fs::read_dir(out.join("rejected/blur/2023-06"))
         .unwrap()
         .count();
@@ -359,13 +360,7 @@ fn include_filter_limits_categories() {
     let gid = make_group(&catalog, kid, &[oid]);
 
     let out = lib.path().join("_review");
-    build_review_tree(
-        &catalog,
-        &out,
-        &["duplicates".to_string()],
-        false,
-    )
-    .unwrap();
+    build_review_tree(&catalog, &out, &["duplicates".to_string()], false).unwrap();
 
     assert!(
         !out.join("rejected").exists(),

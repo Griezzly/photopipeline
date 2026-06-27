@@ -299,10 +299,10 @@ async fn thumb_derives_from_preview_cache_when_original_unrenderable() {
 
 #[tokio::test]
 async fn export_estimate_reports_files_and_bytes() {
-    use std::sync::Arc;
     use image::{ImageBuffer, Rgb};
     use pipeline::catalog::Verdict;
     use pipeline::ingest::{FileFormat, IngestedFile};
+    use std::sync::Arc;
 
     let dir = tempfile::TempDir::new().unwrap();
     let lib = dir.path().join("lib");
@@ -312,14 +312,21 @@ async fn export_estimate_reports_files_and_bytes() {
     img.save(&p).unwrap();
 
     let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
-    let file = IngestedFile { path: p.clone(), content_hash: 1, size: 1, mtime_ns: 1,
-        format: FileFormat::Jpg, has_sidecar_jpg: false };
+    let file = IngestedFile {
+        path: p.clone(),
+        content_hash: 1,
+        size: 1,
+        mtime_ns: 1,
+        format: FileFormat::Jpg,
+        has_sidecar_jpg: false,
+    };
     let id = catalog.flush_batch(&[(file, None)]).unwrap()[0];
     catalog.set_decision(id, Verdict::Keep, None).unwrap();
 
     let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
     let state = photopipe::serve::AppState {
-        catalog: Arc::new(catalog), cache: Arc::new(cache),
+        catalog: Arc::new(catalog),
+        cache: Arc::new(cache),
         cfg: Arc::new(pipeline::config::Config::default()),
     };
     let out = dir.path().join("_keepers");
@@ -327,5 +334,8 @@ async fn export_estimate_reports_files_and_bytes() {
     let (s, v) = get_json(photopipe::serve::router(state), &uri).await;
     assert_eq!(s, axum::http::StatusCode::OK);
     assert_eq!(v["files"], 1);
-    assert!(v["bytes"].as_u64().unwrap() > 0, "expected nonzero bytes: {v}");
+    assert!(
+        v["bytes"].as_u64().unwrap() > 0,
+        "expected nonzero bytes: {v}"
+    );
 }

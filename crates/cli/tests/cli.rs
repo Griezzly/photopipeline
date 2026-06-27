@@ -144,19 +144,33 @@ fn export_keepers_creates_tree() {
     }
 
     let output_run = Command::new(env!("CARGO_BIN_EXE_photopipe"))
-        .args(["--config", cfg_path.to_str().unwrap(), "export-keepers", out.to_str().unwrap()])
+        .args([
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "export-keepers",
+            out.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(output_run.status.success());
     let stdout = String::from_utf8_lossy(&output_run.stdout);
-    assert!(stdout.contains("Copying"), "expected a pre-flight estimate line, got: {stdout}");
-    assert!(stdout.contains("Copied"), "expected a final report line, got: {stdout}");
+    assert!(
+        stdout.contains("Copying"),
+        "expected a pre-flight estimate line, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Copied"),
+        "expected a final report line, got: {stdout}"
+    );
 
     // a.jpg is a real copied file (not a symlink), byte-identical to the original.
     let entries = walkdir_like(&out);
     assert!(entries.iter().any(|n| n == "a.jpg"));
     let copied = find_file(&out, "a.jpg").expect("a.jpg copied");
-    assert!(!std::fs::symlink_metadata(&copied).unwrap().file_type().is_symlink());
+    assert!(!std::fs::symlink_metadata(&copied)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 fn find_file(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {

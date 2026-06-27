@@ -280,12 +280,28 @@ mod tests {
     #[test]
     fn default_paths_are_absolute_and_namespaced() {
         let cfg = Config::default();
-        assert!(cfg.catalog.db_path.is_absolute(), "db_path: {:?}", cfg.catalog.db_path);
-        assert!(cfg.catalog.cache_dir.is_absolute(), "cache_dir: {:?}", cfg.catalog.cache_dir);
+        assert!(
+            cfg.catalog.db_path.is_absolute(),
+            "db_path: {:?}",
+            cfg.catalog.db_path
+        );
+        assert!(
+            cfg.catalog.cache_dir.is_absolute(),
+            "cache_dir: {:?}",
+            cfg.catalog.cache_dir
+        );
         assert!(cfg.catalog.db_path.to_string_lossy().contains("photopipe"));
-        assert!(cfg.catalog.cache_dir.to_string_lossy().contains("photopipe"));
-        assert!(default_config_path().to_string_lossy().contains("photopipe"));
-        assert!(default_config_path().to_string_lossy().ends_with("photopipe.toml"));
+        assert!(cfg
+            .catalog
+            .cache_dir
+            .to_string_lossy()
+            .contains("photopipe"));
+        assert!(default_config_path()
+            .to_string_lossy()
+            .contains("photopipe"));
+        assert!(default_config_path()
+            .to_string_lossy()
+            .ends_with("photopipe.toml"));
     }
 
     #[test]

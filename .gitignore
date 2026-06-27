@@ -20,3 +20,6 @@ __pycache__/
 # local planning scratch (not part of the repo)
 PHASE_*_PROMPT.md
 PROJECT_OVERVIEW.md
+
+# stray copy-export trees accidentally created in the repo root
+/_keepers/

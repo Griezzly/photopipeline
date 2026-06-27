@@ -195,7 +195,9 @@ fn resolve_dests(output_root: &Path, planned: &[PlannedLink]) -> Vec<(PathBuf, P
 fn estimate_copy(output_root: &Path, planned: &[PlannedLink]) -> CopyEstimate {
     let mut est = CopyEstimate::default();
     for (dest, src) in resolve_dests(output_root, planned) {
-        let Ok(abs_src) = src.canonicalize() else { continue };
+        let Ok(abs_src) = src.canonicalize() else {
+            continue;
+        };
         if needs_copy(&dest, &abs_src) {
             est.files += 1;
             est.bytes += std::fs::metadata(&abs_src).map(|m| m.len()).unwrap_or(0);
@@ -211,7 +213,9 @@ fn is_managed_tree(root: &Path) -> bool {
 
 /// True if `dir` exists and contains no entries.
 fn dir_is_empty(dir: &Path) -> bool {
-    std::fs::read_dir(dir).map(|mut r| r.next().is_none()).unwrap_or(false)
+    std::fs::read_dir(dir)
+        .map(|mut r| r.next().is_none())
+        .unwrap_or(false)
 }
 
 /// Refuse to write into an existing non-empty directory that is not a
@@ -309,7 +313,11 @@ fn materialize_copies(
 
 /// Within a managed tree, remove files (copies or stray symlinks) not in
 /// `expected` and now-empty directories; the root marker and README are kept.
-fn prune_stale(output_root: &Path, expected: &std::collections::HashSet<PathBuf>, report: &mut CopyReport) {
+fn prune_stale(
+    output_root: &Path,
+    expected: &std::collections::HashSet<PathBuf>,
+    report: &mut CopyReport,
+) {
     prune_dir(output_root, output_root, expected, report);
 }
 
@@ -542,7 +550,10 @@ mod tests {
         std::fs::write(root.join("sub/photo.jpg"), b"real").unwrap();
         // No .photopipe-tree marker -> refuse.
         let err = remove_managed_tree(&root).unwrap_err();
-        assert!(err.to_string().contains("not a photopipe tree"), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("not a photopipe tree"),
+            "unexpected: {err}"
+        );
         assert!(root.join("sub/photo.jpg").exists());
     }
 
@@ -571,7 +582,10 @@ mod tests {
         }
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello world");
         // Second call: destination current -> skip.
-        assert!(matches!(copy_file(&dest, &src).unwrap(), CopyOutcome::Skipped));
+        assert!(matches!(
+            copy_file(&dest, &src).unwrap(),
+            CopyOutcome::Skipped
+        ));
     }
 
     #[test]
