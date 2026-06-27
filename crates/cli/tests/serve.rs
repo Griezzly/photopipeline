@@ -88,3 +88,66 @@ async fn photos_and_detail_and_groups() {
     assert_eq!(s, axum::http::StatusCode::OK);
     assert!(v.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn thumb_renders_from_real_jpg_and_caches() {
+    use std::sync::Arc;
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    use image::{ImageBuffer, Rgb};
+    use pipeline::ingest::{FileFormat, IngestedFile};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let lib = dir.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let p = lib.join("a.jpg");
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(40, 30, |_, _| Rgb([1, 2, 3]));
+    img.save(&p).unwrap();
+
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let file = IngestedFile {
+        path: p,
+        content_hash: 0x55,
+        size: 1,
+        mtime_ns: 1,
+        format: FileFormat::Jpg,
+        has_sidecar_jpg: false,
+    };
+    let id = catalog.flush_batch(&[(file, None)]).unwrap()[0];
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let state = photopipe::serve::AppState {
+        catalog: Arc::new(catalog),
+        cache: Arc::new(cache),
+        cfg: Arc::new(pipeline::config::Config::default()),
+    };
+    let app = photopipe::serve::router(state);
+
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/thumb/{id}")).body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    assert_eq!(ct, "image/webp");
+    let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    assert_eq!(&body[0..4], b"RIFF");
+}
+
+#[tokio::test]
+async fn thumb_for_missing_file_returns_svg_placeholder() {
+    let (_dir, state, _id) = state_with_one_file();
+    let app = photopipe::serve::router(state);
+    let (status, ct) = {
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let resp = app
+            .oneshot(Request::builder().uri("/thumb/999999").body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+        (resp.status(), ct)
+    };
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(ct.starts_with("image/svg+xml"));
+}
