@@ -29,8 +29,8 @@ pub struct CatalogConfig {
 impl Default for CatalogConfig {
     fn default() -> Self {
         Self {
-            db_path: xdg_data_home().join("photopipe/catalog.duckdb"),
-            cache_dir: xdg_cache_home().join("photopipe"),
+            db_path: data_root().join("photopipe/catalog.duckdb"),
+            cache_dir: cache_root().join("photopipe"),
             write_batch_size: 64,
             enable_vss: false,
         }
@@ -231,9 +231,9 @@ pub enum KeeperStrategy {
 
 // ── loading ───────────────────────────────────────────────────────────────────
 
-/// Default config-file path: `$XDG_CONFIG_HOME/photopipe/photopipe.toml`.
+/// Default config-file path: `<config dir>/photopipe/photopipe.toml`.
 pub fn default_config_path() -> PathBuf {
-    xdg_config_home().join("photopipe/photopipe.toml")
+    config_root().join("photopipe/photopipe.toml")
 }
 
 /// Load config from `path`, falling back to built-in defaults if the file
@@ -255,48 +255,29 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
 pub fn expand_tilde(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
+        if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }
     }
     p.to_path_buf()
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+/// Per-OS config dir (Linux `~/.config`, macOS `~/Library/Application Support`,
+/// Windows `%APPDATA%`); falls back to the current dir if undeterminable.
+fn config_root() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn xdg_config_home() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            home_dir()
-                .unwrap_or_else(|| PathBuf::from("~"))
-                .join(".config")
-        })
+/// Per-OS data dir (Linux `~/.local/share`, macOS `~/Library/Application Support`,
+/// Windows `%APPDATA%`).
+fn data_root() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn xdg_data_home() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            home_dir()
-                .unwrap_or_else(|| PathBuf::from("~"))
-                .join(".local/share")
-        })
-}
-
-fn xdg_cache_home() -> PathBuf {
-    std::env::var("XDG_CACHE_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            home_dir()
-                .unwrap_or_else(|| PathBuf::from("~"))
-                .join(".cache")
-        })
+/// Per-OS cache dir (Linux `~/.cache`, macOS `~/Library/Caches`,
+/// Windows `%LOCALAPPDATA%`).
+fn cache_root() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -304,6 +285,17 @@ fn xdg_cache_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_paths_are_absolute_and_namespaced() {
+        let cfg = Config::default();
+        assert!(cfg.catalog.db_path.is_absolute(), "db_path: {:?}", cfg.catalog.db_path);
+        assert!(cfg.catalog.cache_dir.is_absolute(), "cache_dir: {:?}", cfg.catalog.cache_dir);
+        assert!(cfg.catalog.db_path.to_string_lossy().contains("photopipe"));
+        assert!(cfg.catalog.cache_dir.to_string_lossy().contains("photopipe"));
+        assert!(default_config_path().to_string_lossy().contains("photopipe"));
+        assert!(default_config_path().to_string_lossy().ends_with("photopipe.toml"));
+    }
 
     #[test]
     fn defaults_round_trip() {
