@@ -104,8 +104,11 @@ note at the end of this section).
    site. ONNX Runtime's CUDA execution provider discovers them via `PATH`/
    `CUDA_PATH`. If they are absent, photopipe still runs — it falls back to the
    CPU provider. `photopipe doctor` shows which provider was selected.
-4. **Python (one-time only)** — needed only to export the ONNX model files (see
-   "Model setup" below). The shipped binary has no Python dependency at runtime.
+4. **ONNX model files** — copy the three `.onnx` files into `models\` (see
+   "Model setup" below). The easiest path on Windows is to copy pre-exported
+   files from another machine (e.g. your Linux/WSL install) into `models\` —
+   then you need no Python on Windows at all. Python is only required if you
+   want to export the models from scratch.
 
 **Build and run** (in a Developer Command Prompt or regular PowerShell after
 sourcing the VS environment):
@@ -173,8 +176,13 @@ driver plus the CUDA runtime + cuDNN that ONNX Runtime expects. `cargo build
 
 ## Model setup (one-time)
 
-The ONNX model files are **not** committed. Export them once with the Python
-scripts in `tools/` (Python is needed *only* here, never at runtime):
+The ONNX model files are **not** committed. The fastest way to get them onto a
+new machine is to **copy the three `.onnx` files** (`dinov2_base.onnx`,
+`clip_iqa.onnx`, `rt_detr_l.onnx`) from an existing install into `models/` —
+they are plain files with no per-machine state, so this needs no toolchain.
+
+To produce them from scratch, export them once with the Python scripts in
+`tools/` (Python is needed *only* here, never at runtime):
 
 ```bash
 ./models/download.sh            # runs all three exporters into ./models/
