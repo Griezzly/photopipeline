@@ -4,7 +4,68 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use pipeline::catalog::Catalog;
 use pipeline::config;
+use pipeline::models::ModelHub;
+
+/// Schema version the binary expects the catalog to be at.
+const EXPECTED_SCHEMA_VERSION: u32 = 1;
+const MIN_FREE_DISK_GB: u64 = 5;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl CheckStatus {
+    fn glyph(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "[ ok ]",
+            CheckStatus::Warn => "[warn]",
+            CheckStatus::Fail => "[fail]",
+        }
+    }
+}
+
+/// One diagnostic line. `critical` checks that `Fail` make `doctor` exit non-zero.
+struct DoctorCheck {
+    label: String,
+    status: CheckStatus,
+    detail: String,
+    critical: bool,
+}
+
+impl DoctorCheck {
+    fn ok(label: &str, detail: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            status: CheckStatus::Ok,
+            detail: detail.into(),
+            critical: false,
+        }
+    }
+    fn warn(label: &str, detail: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            status: CheckStatus::Warn,
+            detail: detail.into(),
+            critical: false,
+        }
+    }
+    fn fail_critical(label: &str, detail: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            status: CheckStatus::Fail,
+            detail: detail.into(),
+            critical: true,
+        }
+    }
+    fn print(&self) {
+        println!("{} {:<22} {}", self.status.glyph(), self.label, self.detail);
+    }
+}
 
 // ── CLI definition ─────────────────────────────────────────────────────────────
 
@@ -277,52 +338,178 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     println!("Family:       {}", std::env::consts::FAMILY);
     println!("Config file:  {}", config_path.display());
     println!("Exists:       {}", config_path.exists());
-    println!();
-
-    println!("Models");
-    println!("------");
-    println!("Model dir : {}", cfg.models.model_dir.display());
-
-    // Show the provider that would be selected (without actually loading models).
-    let provider = doctor_provider(cfg.models.device);
-    println!("Provider  : {provider}");
+    println!("Model dir:    {}", cfg.models.model_dir.display());
+    println!("Provider:     {}", doctor_provider(cfg.models.device));
 
     #[cfg(target_os = "macos")]
     println!(
         "  [macOS] CoreML EP disabled (ort rc.12 incompatibility with external-data models); \
          using CPU — revisit when ort ≥ 2.0.0 stable"
     );
-
-    println!();
-    doctor_model_file("dinov2_base.onnx", &cfg.models.model_dir, "embedder");
-    doctor_model_file("clip_iqa.onnx", &cfg.models.model_dir, "iqa");
-    doctor_model_file("rt_detr_l.onnx", &cfg.models.model_dir, "detector");
     println!();
 
-    println!("Effective configuration:");
-    println!("------------------------");
-    println!("{}", toml::to_string_pretty(cfg)?);
+    println!("Health checks");
+    println!("-------------");
+
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+    checks.push(doctor_check_schema(&cfg.catalog.db_path));
+    checks.push(doctor_check_cache_writable(&cfg.catalog.cache_dir));
+    checks.push(doctor_check_disk_free(&cfg.catalog.db_path));
+
+    // Actually attempt to load models so we report which slots came up.
+    match ModelHub::from_config(&cfg.models) {
+        Ok(hub) => {
+            println!("(ORT execution provider in use: {})", hub.provider);
+            checks.extend(doctor_check_models(&cfg.models, &hub));
+        }
+        Err(e) => {
+            checks.push(DoctorCheck::fail_critical(
+                "Models",
+                format!("ModelHub::from_config failed: {e}"),
+            ));
+        }
+    }
+
+    for c in &checks {
+        c.print();
+    }
+    println!();
+
+    let failed = checks
+        .iter()
+        .any(|c| c.critical && c.status == CheckStatus::Fail);
+    if failed {
+        println!("Result: UNHEALTHY — fix the [fail] items above.");
+        anyhow::bail!("doctor: one or more critical checks failed");
+    }
+    println!("Result: healthy.");
     Ok(())
 }
 
-fn doctor_model_file(filename: &str, model_dir: &std::path::Path, role: &str) {
-    let path = model_dir.join(filename);
-    let data_path = model_dir.join(format!("{filename}.data"));
-    if path.exists() {
-        let graph_kb = std::fs::metadata(&path)
-            .map(|m| m.len() / 1024)
-            .unwrap_or(0);
-        let data_mb = if data_path.exists() {
-            std::fs::metadata(&data_path)
-                .map(|m| format!(" + {:.0} MB data", m.len() as f64 / 1_048_576.0))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        println!("  {filename}  [{role}] ✓ present ({graph_kb} KB{data_mb})");
-    } else {
-        println!("  {filename}  [{role}] ✗ not found — run tools/export_{role}.py");
+/// Open the catalog and verify its schema version matches what we expect.
+fn doctor_check_schema(db_path: &std::path::Path) -> DoctorCheck {
+    if !db_path.exists() {
+        // Not yet created is fine — `scan` creates it. Report, don't fail.
+        return DoctorCheck::warn(
+            "DB schema",
+            format!(
+                "no catalog yet at {} (run `scan` to create)",
+                db_path.display()
+            ),
+        );
     }
+    match Catalog::open(db_path) {
+        Ok(catalog) => match catalog.schema_version() {
+            Ok(v) if v == EXPECTED_SCHEMA_VERSION => {
+                DoctorCheck::ok("DB schema", format!("version {v}"))
+            }
+            Ok(v) => DoctorCheck::fail_critical(
+                "DB schema",
+                format!(
+                    "version {v}, expected {EXPECTED_SCHEMA_VERSION} — DB is from a different photopipe build"
+                ),
+            ),
+            Err(e) => {
+                DoctorCheck::fail_critical("DB schema", format!("cannot read schema version: {e}"))
+            }
+        },
+        Err(e) => DoctorCheck::fail_critical("DB schema", format!("cannot open catalog: {e}")),
+    }
+}
+
+/// Verify the cache directory exists (creating it) and is writable by
+/// creating then removing a probe file.
+fn doctor_check_cache_writable(cache_dir: &std::path::Path) -> DoctorCheck {
+    if let Err(e) = std::fs::create_dir_all(cache_dir) {
+        return DoctorCheck::fail_critical(
+            "Cache writable",
+            format!("cannot create {}: {e}", cache_dir.display()),
+        );
+    }
+    let probe = cache_dir.join(".photopipe-doctor-probe");
+    match std::fs::write(&probe, b"ok") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            DoctorCheck::ok("Cache writable", cache_dir.display().to_string())
+        }
+        Err(e) => DoctorCheck::fail_critical(
+            "Cache writable",
+            format!("cannot write under {}: {e}", cache_dir.display()),
+        ),
+    }
+}
+
+/// Report free space on the filesystem that holds `path`. Non-critical:
+/// warns when below MIN_FREE_DISK_GB but never fails the run.
+fn doctor_check_disk_free(path: &std::path::Path) -> DoctorCheck {
+    use sysinfo::Disks;
+
+    let disks = Disks::new_with_refreshed_list();
+    // Pick the disk whose mount point is the longest prefix of `path`
+    // (the most specific mount). Fall back to the max available if none match.
+    let target = path.to_path_buf();
+    let best = disks
+        .list()
+        .iter()
+        .filter(|d| target.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .or_else(|| disks.list().iter().max_by_key(|d| d.available_space()));
+
+    match best {
+        Some(d) => {
+            let free_gb = d.available_space() / 1_073_741_824;
+            let detail = format!("{free_gb} GB free on {}", d.mount_point().display());
+            if free_gb >= MIN_FREE_DISK_GB {
+                DoctorCheck::ok("Disk free", detail)
+            } else {
+                DoctorCheck::warn("Disk free", format!("{detail} (< {MIN_FREE_DISK_GB} GB)"))
+            }
+        }
+        None => DoctorCheck::warn("Disk free", "could not determine free space".to_string()),
+    }
+}
+
+/// For each model configured by name, check the ONNX file is present
+/// (critical) and whether the loaded hub populated the slot (non-critical).
+fn doctor_check_models(cfg: &config::ModelsConfig, hub: &ModelHub) -> Vec<DoctorCheck> {
+    // (config name, expected filename, slot-loaded predicate, role label)
+    let specs: [(&str, &str, bool); 3] = [
+        (
+            cfg.embedder.as_str(),
+            "dinov2_base.onnx",
+            hub.embedder.is_some(),
+        ),
+        (cfg.iqa.as_str(), "clip_iqa.onnx", hub.iqa.is_some()),
+        (
+            cfg.detector.as_str(),
+            "rt_detr_l.onnx",
+            hub.detector.is_some(),
+        ),
+    ];
+    let roles = ["embedder", "iqa", "detector"];
+
+    let mut checks = Vec::new();
+    for ((name, filename, loaded), role) in specs.into_iter().zip(roles) {
+        let label = format!("Model {role}");
+        let path = cfg.model_dir.join(filename);
+        if !path.exists() {
+            checks.push(DoctorCheck::fail_critical(
+                &label,
+                format!("'{name}' configured but {} missing", path.display()),
+            ));
+        } else if loaded {
+            checks.push(DoctorCheck::ok(
+                &label,
+                format!("'{name}' loaded ({filename})"),
+            ));
+        } else {
+            checks.push(DoctorCheck::warn(
+                &label,
+                format!("'{name}' file present but failed to load ({filename})"),
+            ));
+        }
+    }
+    checks
 }
 
 fn doctor_provider(device: config::DeviceChoice) -> &'static str {
