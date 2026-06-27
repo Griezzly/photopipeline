@@ -92,4 +92,16 @@ pub const MIGRATIONS: &[&str] = &[
          PRIMARY KEY (camera_model, lens_model, focal_bucket, aperture_bucket)
      );
      COMMIT;",
+    // version 2 — review decisions
+    "BEGIN TRANSACTION;
+     INSERT INTO schema_version VALUES (2);
+     CREATE TABLE decisions (
+         file_id      BIGINT PRIMARY KEY REFERENCES files(id),
+         verdict      VARCHAR NOT NULL,
+         is_keeper    BOOLEAN NOT NULL DEFAULT false,
+         note         VARCHAR,
+         decided_at   BIGINT NOT NULL
+     );
+     CREATE INDEX idx_decisions_verdict ON decisions(verdict);
+     COMMIT;",
 ];
