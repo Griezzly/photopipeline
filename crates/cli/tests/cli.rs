@@ -152,10 +152,7 @@ fn export_keepers_creates_tree() {
         ])
         .status()
         .unwrap();
-    assert!(
-        status.success(),
-        "expected exit 0 from export-keepers"
-    );
+    assert!(status.success(), "expected exit 0 from export-keepers");
 
     // Expect at least one symlink named a.jpg under the keepers tree.
     let entries = walkdir_like(&out);

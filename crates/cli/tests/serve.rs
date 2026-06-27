@@ -17,7 +17,12 @@ async fn health_endpoint_returns_ok() {
     let app = photopipe::serve::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/api/health").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -30,7 +35,12 @@ async fn get_json(app: axum::Router, uri: &str) -> (axum::http::StatusCode, serd
     use axum::http::Request;
     use tower::ServiceExt;
     let resp = app
-        .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = resp.status();
@@ -44,8 +54,8 @@ async fn get_json(app: axum::Router, uri: &str) -> (axum::http::StatusCode, serd
 }
 
 fn state_with_one_file() -> (tempfile::TempDir, photopipe::serve::AppState, i64) {
-    use std::sync::Arc;
     use pipeline::ingest::{FileFormat, IngestedFile};
+    use std::sync::Arc;
     let dir = tempfile::TempDir::new().unwrap();
     let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
     let file = IngestedFile {
@@ -91,12 +101,12 @@ async fn photos_and_detail_and_groups() {
 
 #[tokio::test]
 async fn thumb_renders_from_real_jpg_and_caches() {
-    use std::sync::Arc;
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
     use image::{ImageBuffer, Rgb};
     use pipeline::ingest::{FileFormat, IngestedFile};
+    use std::sync::Arc;
+    use tower::ServiceExt;
 
     let dir = tempfile::TempDir::new().unwrap();
     let lib = dir.path().join("lib");
@@ -124,11 +134,22 @@ async fn thumb_renders_from_real_jpg_and_caches() {
     let app = photopipe::serve::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri(format!("/thumb/{id}")).body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/thumb/{id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert_eq!(ct, "image/webp");
     let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     assert_eq!(&body[0..4], b"RIFF");
@@ -142,10 +163,21 @@ async fn thumb_for_missing_file_returns_svg_placeholder() {
         use axum::http::Request;
         use tower::ServiceExt;
         let resp = app
-            .oneshot(Request::builder().uri("/thumb/999999").body(axum::body::Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/thumb/999999")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         (resp.status(), ct)
     };
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -211,7 +243,11 @@ async fn decision_roundtrip_updates_counts() {
     assert_eq!(v["undecided"], 1);
 
     // read-only counts endpoint reflects the same state
-    let (s, v) = get_json(photopipe::serve::router(state_with_one_file().1), "/api/counts").await;
+    let (s, v) = get_json(
+        photopipe::serve::router(state_with_one_file().1),
+        "/api/counts",
+    )
+    .await;
     assert_eq!(s, axum::http::StatusCode::OK);
     assert_eq!(v["undecided"], 1);
     assert_eq!(v["kept"], 0);

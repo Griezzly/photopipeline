@@ -83,7 +83,9 @@ mod tests {
 
     #[test]
     fn thumb_path_is_separate_namespace() {
-        let cache = Cache { root: PathBuf::from("/tmp/test") };
+        let cache = Cache {
+            root: PathBuf::from("/tmp/test"),
+        };
         let hash: u128 = 0x1234;
         let t = cache.thumb_path(hash);
         let p = cache.path(hash);

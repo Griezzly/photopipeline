@@ -68,20 +68,13 @@ pub async fn list_photos(
         limit: q.limit.unwrap_or(200),
         offset: q.offset.unwrap_or(0),
     };
-    state
-        .catalog
-        .review_list(&filter)
-        .map(Json)
-        .map_err(|e| {
-            tracing::warn!(error = %e, "review_list failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    state.catalog.review_list(&filter).map(Json).map_err(|e| {
+        tracing::warn!(error = %e, "review_list failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
-pub async fn photo_detail(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Response {
+pub async fn photo_detail(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
     match state.catalog.dump_file_by_id(id) {
         Ok(Some(dump)) => Json(dump).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -146,8 +139,16 @@ async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
         };
 
         // Cache hit?
-        let cached_path = if is_thumb { state.cache.thumb_path(hash) } else { state.cache.path(hash) };
-        let cached = if is_thumb { state.cache.has_thumb(hash) } else { state.cache.has(hash) };
+        let cached_path = if is_thumb {
+            state.cache.thumb_path(hash)
+        } else {
+            state.cache.path(hash)
+        };
+        let cached = if is_thumb {
+            state.cache.has_thumb(hash)
+        } else {
+            state.cache.has(hash)
+        };
         if cached {
             if let Ok(bytes) = std::fs::read(&cached_path) {
                 return Some(bytes);
@@ -192,8 +193,12 @@ pub async fn post_decision(
     Json(req): Json<DecisionRequest>,
 ) -> Result<Json<DecisionCounts>, StatusCode> {
     let r = match req.action.as_str() {
-        "keep" => state.catalog.set_decision(req.file_id, Verdict::Keep, req.note.as_deref()),
-        "reject" => state.catalog.set_decision(req.file_id, Verdict::Reject, req.note.as_deref()),
+        "keep" => state
+            .catalog
+            .set_decision(req.file_id, Verdict::Keep, req.note.as_deref()),
+        "reject" => state
+            .catalog
+            .set_decision(req.file_id, Verdict::Reject, req.note.as_deref()),
         "undecide" => state.catalog.clear_decision(req.file_id),
         "keeper" => state.catalog.pick_keeper(req.file_id),
         _ => return Err(StatusCode::BAD_REQUEST),
@@ -210,9 +215,7 @@ pub async fn post_decision(
 }
 
 /// Read-only current counts (frontend loads this on startup).
-pub async fn get_counts(
-    State(state): State<AppState>,
-) -> Result<Json<DecisionCounts>, StatusCode> {
+pub async fn get_counts(State(state): State<AppState>) -> Result<Json<DecisionCounts>, StatusCode> {
     state
         .catalog
         .decision_counts()

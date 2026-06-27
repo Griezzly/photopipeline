@@ -2512,6 +2512,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "image",
  "pipeline",
  "rust-embed",
  "serde",

@@ -78,11 +78,52 @@ photopipe doctor
 | `calibrate` | Rebuild per-lens sharpness baselines from the catalog. |
 | `dedupe` | Rebuild duplicate groups from current embeddings. |
 | `review-tree <OUTPUT>` | Generate/update the symlink review tree. `--include`, `--regenerate`. |
+| `serve` | Launch the local review web UI. `--port` (default 8787). |
+| `export-keepers <OUTPUT>` | Materialize a keepers export tree from recorded decisions. `--regenerate`. |
 | `info <FILE>` | Print all catalog data for one file as JSON. |
 | `stats` | Print catalog summary statistics. |
 | `doctor` | Diagnose config, models, DB, and system health. |
 
 All commands accept `--config <path>`, `--log-level <level>`, and `--log-format <pretty|json>`.
+
+## Review UI
+
+After scanning and deduping, launch the local web UI to triage your photos:
+
+```bash
+photopipe serve --port 8787
+# then open http://127.0.0.1:8787/ in your browser
+```
+
+The grid shows all photos **flagged-first** (defects and duplicates before clean
+shots). Use the flag filter (blur, back_focus, overexposed, underexposed,
+low_iqa) and the decided filter (all / undecided / decided) to focus your
+review.
+
+**Keyboard shortcuts**
+
+| Key | Action |
+|-----|--------|
+| `j` / `→` | Move to next photo |
+| `k` / `←` | Move to previous photo |
+| `Space` / `Enter` | Mark keep |
+| `x` | Mark reject |
+| `u` | Mark undecide |
+| `K` | Pick as group keeper |
+| `f` | Open detail view |
+| `Esc` / `f` | Close detail view |
+
+**Exporting keepers**
+
+Once you have reviewed your photos, export keepers via the **Export keepers**
+button in the UI or directly from the command line:
+
+```bash
+photopipe export-keepers ~/Photos/_keepers
+```
+
+This builds a links-only `<output>/YYYY-MM/` tree — originals are never moved
+or modified. Pass `--regenerate` to delete and rebuild the tree from scratch.
 
 ## Guarantees
 
