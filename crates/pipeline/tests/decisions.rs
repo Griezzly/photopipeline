@@ -34,7 +34,9 @@ fn set_get_clear_decision() {
 
     assert!(catalog.get_decision(id).unwrap().is_none());
 
-    catalog.set_decision(id, Verdict::Reject, Some("soft")).unwrap();
+    catalog
+        .set_decision(id, Verdict::Reject, Some("soft"))
+        .unwrap();
     let d = catalog.get_decision(id).unwrap().unwrap();
     assert_eq!(d.verdict, Verdict::Reject);
     assert_eq!(d.note.as_deref(), Some("soft"));
@@ -42,7 +44,10 @@ fn set_get_clear_decision() {
 
     // upsert overwrites verdict
     catalog.set_decision(id, Verdict::Keep, None).unwrap();
-    assert_eq!(catalog.get_decision(id).unwrap().unwrap().verdict, Verdict::Keep);
+    assert_eq!(
+        catalog.get_decision(id).unwrap().unwrap().verdict,
+        Verdict::Keep
+    );
 
     catalog.clear_decision(id).unwrap();
     assert!(catalog.get_decision(id).unwrap().is_none());
@@ -61,9 +66,21 @@ fn pick_keeper_keeps_one_rejects_siblings() {
         .insert_duplicate_members(
             gid,
             &[
-                DuplicateMember { file_id: a, is_suggested_keeper: true, quality_score: 1.0 },
-                DuplicateMember { file_id: b, is_suggested_keeper: false, quality_score: 0.5 },
-                DuplicateMember { file_id: c, is_suggested_keeper: false, quality_score: 0.4 },
+                DuplicateMember {
+                    file_id: a,
+                    is_suggested_keeper: true,
+                    quality_score: 1.0,
+                },
+                DuplicateMember {
+                    file_id: b,
+                    is_suggested_keeper: false,
+                    quality_score: 0.5,
+                },
+                DuplicateMember {
+                    file_id: c,
+                    is_suggested_keeper: false,
+                    quality_score: 0.4,
+                },
             ],
         )
         .unwrap();
@@ -74,8 +91,14 @@ fn pick_keeper_keeps_one_rejects_siblings() {
     let db = catalog.get_decision(b).unwrap().unwrap();
     assert_eq!(db.verdict, Verdict::Keep);
     assert!(db.is_keeper);
-    assert_eq!(catalog.get_decision(a).unwrap().unwrap().verdict, Verdict::Reject);
-    assert_eq!(catalog.get_decision(c).unwrap().unwrap().verdict, Verdict::Reject);
+    assert_eq!(
+        catalog.get_decision(a).unwrap().unwrap().verdict,
+        Verdict::Reject
+    );
+    assert_eq!(
+        catalog.get_decision(c).unwrap().unwrap().verdict,
+        Verdict::Reject
+    );
     assert!(!catalog.get_decision(a).unwrap().unwrap().is_keeper);
 }
 
@@ -96,6 +119,69 @@ fn decision_counts_partition_total() {
     assert_eq!(counts.undecided, 1);
 }
 
+use image::{ImageBuffer, Rgb};
+use pipeline::build_keepers_tree;
+use pipeline::config::{KeeperStrategy, LinkType, OutputConfig};
+
+fn out_cfg() -> OutputConfig {
+    OutputConfig {
+        review_tree: "<library>/_review".into(),
+        link_type: LinkType::Symlink,
+        keeper_strategy: KeeperStrategy::Iqa,
+    }
+}
+
+#[test]
+fn keepers_tree_links_only_kept_files() {
+    let dir = TempDir::new().unwrap();
+    let lib = dir.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+
+    // Two real on-disk files so symlinks can canonicalize their targets.
+    let mut ids = Vec::new();
+    for (name, hash) in [("keep.jpg", 1u128), ("drop.jpg", 2u128)] {
+        let p = lib.join(name);
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(8, 8, |_, _| Rgb([0, 0, 0]));
+        img.save(&p).unwrap();
+        let file = IngestedFile {
+            path: p,
+            content_hash: hash,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let exif = Some(ExifData {
+            captured_at: Some(1_700_000_000),
+            ..Default::default()
+        });
+        ids.push(catalog.flush_batch(&[(file, exif)]).unwrap()[0]);
+    }
+    catalog.set_decision(ids[0], Verdict::Keep, None).unwrap();
+    catalog.set_decision(ids[1], Verdict::Reject, None).unwrap();
+
+    let out = dir.path().join("_keepers");
+    let report = build_keepers_tree(&catalog, &out, &out_cfg(), false).unwrap();
+    assert_eq!(report.links_created, 1);
+
+    // exactly one symlink exists, named keep.jpg, under a YYYY-MM subdir
+    let mut found = Vec::new();
+    for month in std::fs::read_dir(&out).unwrap() {
+        let month = month.unwrap().path();
+        if month.is_dir() {
+            for e in std::fs::read_dir(&month).unwrap() {
+                found.push(e.unwrap().file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    assert_eq!(found, vec!["keep.jpg".to_string()]);
+
+    // idempotent: second run creates nothing new
+    let report2 = build_keepers_tree(&catalog, &out, &out_cfg(), false).unwrap();
+    assert_eq!(report2.links_created, 0);
+}
+
 use pipeline::defect::DefectFlag;
 
 #[test]
@@ -112,7 +198,10 @@ fn review_list_orders_flagged_first_and_filters() {
             format: FileFormat::Jpg,
             has_sidecar_jpg: false,
         };
-        let exif = Some(ExifData { captured_at: Some(1000), ..Default::default() });
+        let exif = Some(ExifData {
+            captured_at: Some(1000),
+            ..Default::default()
+        });
         catalog.flush_batch(&[(file, exif)]).unwrap()[0]
     };
     // flagged file, captured later
@@ -125,7 +214,10 @@ fn review_list_orders_flagged_first_and_filters() {
             format: FileFormat::Jpg,
             has_sidecar_jpg: false,
         };
-        let exif = Some(ExifData { captured_at: Some(2000), ..Default::default() });
+        let exif = Some(ExifData {
+            captured_at: Some(2000),
+            ..Default::default()
+        });
         catalog.flush_batch(&[(file, exif)]).unwrap()[0]
     };
     // Real DefectFlag has no file_id field and reason: String (not Option<String>).
@@ -151,14 +243,20 @@ fn review_list_orders_flagged_first_and_filters() {
 
     // filter by flag_type
     let only_blur = catalog
-        .review_list(&ReviewFilter { flag_type: Some("blur".into()), ..Default::default() })
+        .review_list(&ReviewFilter {
+            flag_type: Some("blur".into()),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(only_blur.len(), 1);
     assert_eq!(only_blur[0].file_id, flagged);
 
     // filter by decided=false (neither has a decision yet → both)
     let undecided = catalog
-        .review_list(&ReviewFilter { decided: Some(false), ..Default::default() })
+        .review_list(&ReviewFilter {
+            decided: Some(false),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(undecided.len(), 2);
 }

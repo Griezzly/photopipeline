@@ -15,4 +15,4 @@ pub use dedupe::{run_dedupe, DedupeReport};
 pub use defect::analyze_defects;
 pub use ingest::ingest_directory;
 pub use ml::analyze_ml;
-pub use output::{build_review_tree, ReviewTreeReport};
+pub use output::{build_keepers_tree, build_review_tree, KeepersReport, ReviewTreeReport};

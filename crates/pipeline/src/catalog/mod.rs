@@ -130,6 +130,12 @@ pub struct FileLocator {
     pub content_hash: u128,
 }
 
+/// A kept file plus its `YYYY-MM` capture month, for the keepers export tree.
+pub struct KeptFile {
+    pub path: std::path::PathBuf,
+    pub year_month: String,
+}
+
 /// One duplicate group as needed by the review tree.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReviewGroup {
@@ -152,7 +158,12 @@ pub struct ReviewFilter {
 
 impl Default for ReviewFilter {
     fn default() -> Self {
-        Self { flag_type: None, decided: None, limit: 200, offset: 0 }
+        Self {
+            flag_type: None,
+            decided: None,
+            limit: 200,
+            offset: 0,
+        }
     }
 }
 
@@ -985,6 +996,42 @@ impl Catalog {
         Ok(groups)
     }
 
+    /// All files the user decided to keep, dated "YYYY-MM" (or "unknown-date").
+    pub fn keeper_files(&self) -> Result<Vec<KeptFile>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.path,
+                        COALESCE(
+                            strftime(CAST(to_timestamp(e.captured_at) AS TIMESTAMP), '%Y-%m'),
+                            'unknown-date') AS ym
+                 FROM decisions dec
+                 JOIN files f ON f.id = dec.file_id
+                 LEFT JOIN exif e ON e.file_id = f.id
+                 WHERE dec.verdict = 'keep'
+                 ORDER BY f.path",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                let path: String = r.get(0)?;
+                let ym: String = r.get(1)?;
+                Ok(KeptFile {
+                    path: std::path::PathBuf::from(path),
+                    year_month: ym,
+                })
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     /// Count defect flags of `flag_type` for a single file. Test/inspection helper.
     pub fn count_file_flag(&self, file_id: i64, flag_type: &str) -> Result<i64, CatalogError> {
         let conn = self
@@ -1439,8 +1486,11 @@ impl Catalog {
             .conn
             .lock()
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
-        conn.execute("DELETE FROM decisions WHERE file_id = ?", duckdb::params![file_id])
-            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM decisions WHERE file_id = ?",
+            duckdb::params![file_id],
+        )
+        .map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(())
     }
 
@@ -1522,7 +1572,8 @@ impl Catalog {
         })();
         match result {
             Ok(()) => {
-                conn.execute("COMMIT", []).map_err(|e| CatalogError::Db(e.to_string()))?;
+                conn.execute("COMMIT", [])
+                    .map_err(|e| CatalogError::Db(e.to_string()))?;
                 Ok(())
             }
             Err(e) => {
@@ -1566,10 +1617,7 @@ impl Catalog {
 
     /// Paged review list, flagged-first. Flags are aggregated per file via
     /// `string_agg` (avoids LIST FromSql) and split on ',' in Rust.
-    pub fn review_list(
-        &self,
-        filter: &ReviewFilter,
-    ) -> Result<Vec<ReviewListItem>, CatalogError> {
+    pub fn review_list(&self, filter: &ReviewFilter) -> Result<Vec<ReviewListItem>, CatalogError> {
         let conn = self
             .conn
             .lock()
@@ -2304,7 +2352,10 @@ impl Catalog {
             Some((path, hash_hex)) => {
                 let content_hash = u128::from_str_radix(&hash_hex, 16)
                     .map_err(|e| CatalogError::Db(format!("bad content_hash hex: {e}")))?;
-                Ok(Some(FileLocator { path: std::path::PathBuf::from(path), content_hash }))
+                Ok(Some(FileLocator {
+                    path: std::path::PathBuf::from(path),
+                    content_hash,
+                }))
             }
         }
     }
