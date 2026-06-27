@@ -137,7 +137,7 @@ decidedFilter.addEventListener('change', loadPhotos);
 document.getElementById('export-btn').addEventListener('click', async () => {
   try {
     const r = await api('POST', '/api/export', { regenerate: false });
-    alert(`Exported keepers: ${r.links_created} new link(s), ${r.errors} error(s).`);
+    alert(`Exported ${r.links_created} keeper link(s), ${r.errors} error(s) to the "_keepers" folder (relative to where 'photopipe serve' was started).`);
   } catch (err) {
     alert(`Export failed: ${err.message}`);
   }

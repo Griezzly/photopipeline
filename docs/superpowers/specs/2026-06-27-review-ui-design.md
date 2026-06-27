@@ -97,7 +97,11 @@ Rules:
   each other.
 - **Idempotency preserved.** The `decisions` table is independent of `files`/flags, so
   re-running `scan` never touches it. Decisions survive re-scans as long as the `file_id`
-  persists. The migration is atomic (`BEGIN TRANSACTION; ... COMMIT;`).
+  persists. The migration is atomic (`BEGIN TRANSACTION; ... COMMIT;`). Decisions also
+  intentionally persist across `dedupe` regrouping (keyed by `file_id`); a re-grouped
+  duplicate may therefore retain a prior reject decision — this keeps export correct (a
+  rejected file is never exported) but the decision is surfaced in the UI without its
+  original group context.
 
 ## 5. Review UI & workflow
 

@@ -1559,6 +1559,9 @@ impl Catalog {
                      verdict = 'keep', is_keeper = true, decided_at = excluded.decided_at",
                 duckdb::params![file_id, now],
             )?;
+            // Assumes duplicate_members rows reference live files(id). There is no files-delete
+            // path today; if a future GC deletes files, it must clear decisions first (no ON
+            // DELETE CASCADE in DuckDB).
             for sib in &siblings {
                 conn.execute(
                     "INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
