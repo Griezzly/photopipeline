@@ -185,6 +185,48 @@ pub struct BlurFlagRow {
     pub reason: String,
 }
 
+/// A user's keep/reject decision for one file. Verdicts are written through
+/// to the `decisions` table immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    Keep,
+    Reject,
+}
+
+impl Verdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verdict::Keep => "keep",
+            Verdict::Reject => "reject",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<Verdict> {
+        match s {
+            "keep" => Some(Verdict::Keep),
+            "reject" => Some(Verdict::Reject),
+            _ => None,
+        }
+    }
+}
+
+/// A persisted decision row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Decision {
+    pub verdict: Verdict,
+    pub is_keeper: bool,
+    pub note: Option<String>,
+    pub decided_at: i64,
+}
+
+/// Live counts for the review footer. `undecided = total_files - kept - rejected`.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct DecisionCounts {
+    pub kept: i64,
+    pub rejected: i64,
+    pub undecided: i64,
+}
+
 pub struct Catalog {
     conn: Mutex<Connection>,
     #[doc(hidden)]
@@ -1318,6 +1360,170 @@ impl Catalog {
         }
         tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(())
+    }
+
+    /// Seconds since the Unix epoch, for `decided_at`.
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// Record a keep/reject verdict (write-through upsert). Leaves `is_keeper`
+    /// unchanged on update; new rows default it to false.
+    pub fn set_decision(
+        &self,
+        file_id: i64,
+        verdict: Verdict,
+        note: Option<&str>,
+    ) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        conn.execute(
+            "INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
+             VALUES (?, ?, false, ?, ?)
+             ON CONFLICT (file_id) DO UPDATE SET
+                 verdict    = excluded.verdict,
+                 note       = excluded.note,
+                 decided_at = excluded.decided_at",
+            duckdb::params![file_id, verdict.as_str(), note, Self::now_secs()],
+        )
+        .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Remove a decision row (back to "undecided").
+    pub fn clear_decision(&self, file_id: i64) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        conn.execute("DELETE FROM decisions WHERE file_id = ?", duckdb::params![file_id])
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_decision(&self, file_id: i64) -> Result<Option<Decision>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let row = conn.query_row(
+            "SELECT verdict, is_keeper, note, decided_at FROM decisions WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                let verdict: String = r.get(0)?;
+                let is_keeper: bool = r.get(1)?;
+                let note: Option<String> = r.get(2)?;
+                let decided_at: i64 = r.get(3)?;
+                Ok((verdict, is_keeper, note, decided_at))
+            },
+        );
+        match optional_row(row)? {
+            None => Ok(None),
+            Some((verdict, is_keeper, note, decided_at)) => Ok(Some(Decision {
+                verdict: Verdict::from_str(&verdict)
+                    .ok_or_else(|| CatalogError::Db(format!("bad verdict: {verdict}")))?,
+                is_keeper,
+                note,
+                decided_at,
+            })),
+        }
+    }
+
+    /// Mark `file_id` as the kept keeper of its duplicate group(s): the file
+    /// becomes verdict=keep, is_keeper=true; every other member of those groups
+    /// becomes verdict=reject, is_keeper=false. If the file is in no group, it
+    /// is simply marked keep+keeper. Runs in a transaction.
+    pub fn pick_keeper(&self, file_id: i64) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+
+        // All member file_ids sharing any group with `file_id` (excluding it).
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT m2.file_id
+                 FROM duplicate_members m1
+                 JOIN duplicate_members m2 ON m1.group_id = m2.group_id
+                 WHERE m1.file_id = ? AND m2.file_id <> ?",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let siblings: Vec<i64> = stmt
+            .query_map(duckdb::params![file_id, file_id], |r| r.get::<_, i64>(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        drop(stmt);
+
+        let now = Self::now_secs();
+        conn.execute("BEGIN TRANSACTION", [])
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let result = (|| {
+            conn.execute(
+                "INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
+                 VALUES (?, 'keep', true, NULL, ?)
+                 ON CONFLICT (file_id) DO UPDATE SET
+                     verdict = 'keep', is_keeper = true, decided_at = excluded.decided_at",
+                duckdb::params![file_id, now],
+            )?;
+            for sib in &siblings {
+                conn.execute(
+                    "INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
+                     VALUES (?, 'reject', false, NULL, ?)
+                     ON CONFLICT (file_id) DO UPDATE SET
+                         verdict = 'reject', is_keeper = false, decided_at = excluded.decided_at",
+                    duckdb::params![sib, now],
+                )?;
+            }
+            Ok::<(), duckdb::Error>(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", []).map_err(|e| CatalogError::Db(e.to_string()))?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", []);
+                Err(CatalogError::Db(e.to_string()))
+            }
+        }
+    }
+
+    pub fn count_decisions(&self) -> Result<i64, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        conn.query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))
+    }
+
+    pub fn decision_counts(&self) -> Result<DecisionCounts, CatalogError> {
+        let total = self.file_count()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let (kept, rejected): (i64, i64) = conn
+            .query_row(
+                "SELECT
+                     COUNT(*) FILTER (WHERE verdict = 'keep'),
+                     COUNT(*) FILTER (WHERE verdict = 'reject')
+                 FROM decisions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(DecisionCounts {
+            kept,
+            rejected,
+            undecided: (total - kept - rejected).max(0),
+        })
     }
 
     /// Count rows in `duplicate_groups`.
@@ -2775,8 +2981,8 @@ mod tests {
     #[test]
     fn schema_version_reports_current_migration() {
         let (catalog, _dir) = make_catalog();
-        // The single migration (version 1) runs at open().
-        assert_eq!(catalog.schema_version().unwrap(), 1);
+        // Migrations v1 (base schema) and v2 (decisions table) run at open().
+        assert_eq!(catalog.schema_version().unwrap(), 2);
     }
 
     /// Insert a file with the given path/hash and return its id.
