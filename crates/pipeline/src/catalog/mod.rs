@@ -16,6 +16,27 @@ pub struct MlRow {
     pub iqa_score: Option<(String, f32)>,
 }
 
+/// One defect-flagged file as needed by the review tree.
+#[derive(Debug, Clone)]
+pub struct ReviewEntry {
+    pub file_id: i64,
+    pub path: std::path::PathBuf,
+    pub flag_type: String,
+    pub confidence: f32,
+    /// "YYYY-MM" from `exif.captured_at`, or "unknown-date" when NULL.
+    pub year_month: String,
+}
+
+/// One duplicate group as needed by the review tree.
+#[derive(Debug, Clone)]
+pub struct ReviewGroup {
+    pub group_id: i64,
+    /// "YYYY-MM-DD" from the keeper's `captured_at`, or "unknown-date".
+    pub date: String,
+    pub keeper: Option<std::path::PathBuf>,
+    pub others: Vec<std::path::PathBuf>,
+}
+
 /// Per-file inputs to the dedupe `quality_score` formula.
 pub struct QualityInputs {
     /// IQA score (`iqa.score`), or `None` when no IQA row exists.
@@ -653,6 +674,119 @@ impl Catalog {
             )
             .map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(count)
+    }
+
+    /// Every defect-flagged file with its path, confidence, and capture
+    /// year-month ("YYYY-MM" or "unknown-date"). Used to build the review tree.
+    pub fn review_entries(&self) -> Result<Vec<ReviewEntry>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.id,
+                        f.path,
+                        d.flag_type,
+                        d.confidence,
+                        COALESCE(
+                            strftime(CAST(to_timestamp(e.captured_at) AS TIMESTAMP), '%Y-%m'),
+                            'unknown-date'
+                        ) AS year_month
+                 FROM defect_flags d
+                 JOIN files f ON f.id = d.file_id
+                 LEFT JOIN exif e ON e.file_id = f.id
+                 ORDER BY f.id, d.flag_type",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let file_id: i64 = row.get(0)?;
+                let path_str: String = row.get(1)?;
+                let flag_type: String = row.get(2)?;
+                let confidence: f32 = row.get(3)?;
+                let year_month: String = row.get(4)?;
+                Ok(ReviewEntry {
+                    file_id,
+                    path: std::path::PathBuf::from(path_str),
+                    flag_type,
+                    confidence,
+                    year_month,
+                })
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(result)
+    }
+
+    /// All duplicate groups with their suggested keeper and other members,
+    /// dated "YYYY-MM-DD" (or "unknown-date") from the keeper's capture time.
+    pub fn duplicate_groups_for_review(&self) -> Result<Vec<ReviewGroup>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.group_id,
+                        f.path,
+                        m.is_suggested_keeper,
+                        COALESCE(
+                            strftime(CAST(to_timestamp(ke.captured_at) AS TIMESTAMP), '%Y-%m-%d'),
+                            'unknown-date'
+                        ) AS group_date
+                 FROM duplicate_members m
+                 JOIN files f ON f.id = m.file_id
+                 LEFT JOIN duplicate_members km
+                        ON km.group_id = m.group_id AND km.is_suggested_keeper = TRUE
+                 LEFT JOIN exif ke ON ke.file_id = km.file_id
+                 ORDER BY m.group_id, m.is_suggested_keeper DESC, f.path",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let group_id: i64 = row.get(0)?;
+                let path_str: String = row.get(1)?;
+                let is_keeper: bool = row.get(2)?;
+                let date: String = row.get(3)?;
+                Ok((
+                    group_id,
+                    std::path::PathBuf::from(path_str),
+                    is_keeper,
+                    date,
+                ))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut groups: Vec<ReviewGroup> = Vec::new();
+        for row in rows {
+            let (group_id, path, is_keeper, date) =
+                row.map_err(|e| CatalogError::Db(e.to_string()))?;
+            let g = match groups.last_mut() {
+                Some(g) if g.group_id == group_id => g,
+                _ => {
+                    groups.push(ReviewGroup {
+                        group_id,
+                        date,
+                        keeper: None,
+                        others: Vec::new(),
+                    });
+                    groups.last_mut().unwrap()
+                }
+            };
+            if is_keeper && g.keeper.is_none() {
+                g.keeper = Some(path);
+            } else {
+                g.others.push(path);
+            }
+        }
+        Ok(groups)
     }
 
     /// Count defect flags of `flag_type` for a single file. Test/inspection helper.
@@ -2125,6 +2259,102 @@ mod tests {
 
         let keepers = catalog.suggested_keeper_ids().unwrap();
         assert_eq!(keepers, vec![ids[1]], "only ids[1] should be the keeper");
+    }
+
+    #[test]
+    fn review_entries_and_groups_round_trip() {
+        use crate::defect::DefectFlag;
+        use crate::ingest::{ExifData, FileFormat, IngestedFile};
+
+        let (catalog, _dir) = make_catalog();
+
+        // captured_at 1686830400 = 2023-06-15.
+        let mk = |p: &str, hash: u128| IngestedFile {
+            path: std::path::PathBuf::from(p),
+            content_hash: hash,
+            size: 100,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let exif_dated = ExifData {
+            captured_at: Some(1686830400),
+            ..Default::default()
+        };
+
+        let ids = catalog
+            .flush_batch(&[
+                (mk("/lib/a.jpg", 1), Some(exif_dated.clone())),
+                (mk("/lib/b.jpg", 2), Some(exif_dated.clone())),
+                (mk("/lib/c.jpg", 3), None::<ExifData>), // NULL captured_at -> unknown-date
+            ])
+            .unwrap();
+
+        catalog
+            .upsert_defect_flag(
+                ids[0],
+                &DefectFlag {
+                    flag_type: "blur".into(),
+                    confidence: 0.8,
+                    reason: "x".into(),
+                },
+            )
+            .unwrap();
+        catalog
+            .upsert_defect_flag(
+                ids[2],
+                &DefectFlag {
+                    flag_type: "low_iqa".into(),
+                    confidence: 0.3,
+                    reason: "y".into(),
+                },
+            )
+            .unwrap();
+
+        let entries = catalog.review_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        let blur = entries.iter().find(|e| e.flag_type == "blur").unwrap();
+        assert_eq!(blur.path, std::path::PathBuf::from("/lib/a.jpg"));
+        assert!((blur.confidence - 0.8).abs() < 1e-6);
+        assert_eq!(blur.year_month, "2023-06");
+        let lowq = entries.iter().find(|e| e.flag_type == "low_iqa").unwrap();
+        assert_eq!(lowq.year_month, "unknown-date");
+
+        // Duplicate group: a is keeper, b is other; dated 2023-06-15.
+        {
+            let conn = catalog.conn.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO duplicate_groups (method, created_at) VALUES ('test', 0);",
+            )
+            .unwrap();
+            let gid: i64 = conn
+                .query_row("SELECT MAX(id) FROM duplicate_groups", [], |r| r.get(0))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO duplicate_members (group_id, file_id, is_suggested_keeper, quality_score)
+                 VALUES (?, ?, TRUE, 1.0)",
+                duckdb::params![gid, ids[0]],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO duplicate_members (group_id, file_id, is_suggested_keeper, quality_score)
+                 VALUES (?, ?, FALSE, 0.5)",
+                duckdb::params![gid, ids[1]],
+            )
+            .unwrap();
+        }
+
+        let groups = catalog.duplicate_groups_for_review().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].date, "2023-06-15");
+        assert_eq!(
+            groups[0].keeper,
+            Some(std::path::PathBuf::from("/lib/a.jpg"))
+        );
+        assert_eq!(
+            groups[0].others,
+            vec![std::path::PathBuf::from("/lib/b.jpg")]
+        );
     }
 
     #[test]
