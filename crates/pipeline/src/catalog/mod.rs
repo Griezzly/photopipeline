@@ -134,6 +134,37 @@ pub struct ReviewGroup {
     pub others: Vec<std::path::PathBuf>,
 }
 
+/// Filter/paging for the review list. `decided = Some(true)` → only files with
+/// a decision; `Some(false)` → only undecided; `None` → all.
+#[derive(Debug, Clone)]
+pub struct ReviewFilter {
+    pub flag_type: Option<String>,
+    pub decided: Option<bool>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl Default for ReviewFilter {
+    fn default() -> Self {
+        Self { flag_type: None, decided: None, limit: 200, offset: 0 }
+    }
+}
+
+/// One row of the review grid: file + aggregated flags + score + decision.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewListItem {
+    pub file_id: i64,
+    pub path: String,
+    pub content_hash: String,
+    pub year_month: String,
+    pub iqa_score: Option<f32>,
+    pub flags: Vec<String>,
+    pub max_confidence: Option<f32>,
+    pub group_id: Option<i64>,
+    pub verdict: Option<String>,
+    pub is_keeper: bool,
+}
+
 /// Per-file inputs to the dedupe `quality_score` formula.
 pub struct QualityInputs {
     /// IQA score (`iqa.score`), or `None` when no IQA row exists.
@@ -201,6 +232,7 @@ impl Verdict {
             Verdict::Reject => "reject",
         }
     }
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Verdict> {
         match s {
             "keep" => Some(Verdict::Keep),
@@ -1524,6 +1556,92 @@ impl Catalog {
             rejected,
             undecided: (total - kept - rejected).max(0),
         })
+    }
+
+    /// Paged review list, flagged-first. Flags are aggregated per file via
+    /// `string_agg` (avoids LIST FromSql) and split on ',' in Rust.
+    pub fn review_list(
+        &self,
+        filter: &ReviewFilter,
+    ) -> Result<Vec<ReviewListItem>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        // Optional filters are expressed as `(? IS NULL OR <cond>)` so the SQL
+        // and the parameter list stay static regardless of which are set.
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path, content_hash, ym, iqa, flags, maxconf, gid, verdict, is_keeper
+                 FROM (
+                     SELECT
+                         f.id,
+                         f.path,
+                         f.content_hash,
+                         COALESCE(
+                             strftime(CAST(to_timestamp(e.captured_at) AS TIMESTAMP), '%Y-%m'),
+                             'unknown-date') AS ym,
+                         iq.score AS iqa,
+                         (SELECT string_agg(d.flag_type, ',')
+                            FROM defect_flags d WHERE d.file_id = f.id) AS flags,
+                         (SELECT max(d.confidence)
+                            FROM defect_flags d WHERE d.file_id = f.id) AS maxconf,
+                         (SELECT min(m.group_id)
+                            FROM duplicate_members m WHERE m.file_id = f.id) AS gid,
+                         dec.verdict,
+                         COALESCE(dec.is_keeper, false) AS is_keeper,
+                         e.captured_at AS captured_at
+                     FROM files f
+                     LEFT JOIN exif e ON e.file_id = f.id
+                     LEFT JOIN iqa iq ON iq.file_id = f.id
+                     LEFT JOIN decisions dec ON dec.file_id = f.id
+                     WHERE (CAST(? AS VARCHAR) IS NULL
+                            OR EXISTS (SELECT 1 FROM defect_flags d
+                                       WHERE d.file_id = f.id AND d.flag_type = ?))
+                       AND (CAST(? AS BOOLEAN) IS NULL
+                            OR (? = (dec.verdict IS NOT NULL)))
+                 ) sub
+                 ORDER BY (maxconf IS NOT NULL) DESC, captured_at NULLS LAST, id
+                 LIMIT ? OFFSET ?",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(
+                duckdb::params![
+                    filter.flag_type,
+                    filter.flag_type,
+                    filter.decided,
+                    filter.decided,
+                    filter.limit,
+                    filter.offset,
+                ],
+                |row| {
+                    let flags_str: Option<String> = row.get(5)?;
+                    let flags = flags_str
+                        .map(|s| s.split(',').map(|x| x.to_string()).collect())
+                        .unwrap_or_default();
+                    Ok(ReviewListItem {
+                        file_id: row.get(0)?,
+                        path: row.get(1)?,
+                        content_hash: row.get(2)?,
+                        year_month: row.get(3)?,
+                        iqa_score: row.get(4)?,
+                        flags,
+                        max_confidence: row.get(6)?,
+                        group_id: row.get(7)?,
+                        verdict: row.get(8)?,
+                        is_keeper: row.get(9)?,
+                    })
+                },
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     /// Count rows in `duplicate_groups`.

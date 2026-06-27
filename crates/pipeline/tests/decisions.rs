@@ -1,4 +1,4 @@
-use pipeline::catalog::Catalog;
+use pipeline::catalog::{Catalog, ReviewFilter};
 use tempfile::TempDir;
 
 #[test]
@@ -94,4 +94,71 @@ fn decision_counts_partition_total() {
     assert_eq!(counts.kept, 1);
     assert_eq!(counts.rejected, 1);
     assert_eq!(counts.undecided, 1);
+}
+
+use pipeline::defect::DefectFlag;
+
+#[test]
+fn review_list_orders_flagged_first_and_filters() {
+    let dir = TempDir::new().unwrap();
+    let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    // clean file (no flag), captured earlier
+    let clean = {
+        let file = IngestedFile {
+            path: PathBuf::from("/lib/clean.jpg"),
+            content_hash: 10,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let exif = Some(ExifData { captured_at: Some(1000), ..Default::default() });
+        catalog.flush_batch(&[(file, exif)]).unwrap()[0]
+    };
+    // flagged file, captured later
+    let flagged = {
+        let file = IngestedFile {
+            path: PathBuf::from("/lib/blurry.jpg"),
+            content_hash: 11,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let exif = Some(ExifData { captured_at: Some(2000), ..Default::default() });
+        catalog.flush_batch(&[(file, exif)]).unwrap()[0]
+    };
+    // Real DefectFlag has no file_id field and reason: String (not Option<String>).
+    // Use upsert_defect_flag which takes (file_id, &DefectFlag).
+    catalog
+        .upsert_defect_flag(
+            flagged,
+            &DefectFlag {
+                flag_type: "blur".into(),
+                confidence: 0.9,
+                reason: "test".into(),
+            },
+        )
+        .unwrap();
+
+    // unfiltered: flagged comes first despite later capture time
+    let all = catalog.review_list(&ReviewFilter::default()).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].file_id, flagged);
+    assert_eq!(all[0].flags, vec!["blur".to_string()]);
+    assert_eq!(all[1].file_id, clean);
+    assert!(all[1].flags.is_empty());
+
+    // filter by flag_type
+    let only_blur = catalog
+        .review_list(&ReviewFilter { flag_type: Some("blur".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(only_blur.len(), 1);
+    assert_eq!(only_blur[0].file_id, flagged);
+
+    // filter by decided=false (neither has a decision yet → both)
+    let undecided = catalog
+        .review_list(&ReviewFilter { decided: Some(false), ..Default::default() })
+        .unwrap();
+    assert_eq!(undecided.len(), 2);
 }
