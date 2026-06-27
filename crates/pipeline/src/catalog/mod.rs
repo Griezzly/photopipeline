@@ -7,6 +7,93 @@ use crate::error::CatalogError;
 pub mod queries;
 pub mod schema;
 
+/// Full catalog dump of one file for `photopipe info`. JSON-serialisable.
+#[derive(serde::Serialize)]
+pub struct FileDump {
+    pub file: FileRowDump,
+    pub exif: Option<ExifRowDump>,
+    pub sharpness: Option<SharpnessRowDump>,
+    pub exposure: Option<ExposureRowDump>,
+    pub iqa: Option<IqaRowDump>,
+    pub embedding: Option<EmbeddingDump>,
+    pub defect_flags: Vec<DefectFlagDump>,
+    /// Ids of duplicate groups this file belongs to.
+    pub duplicate_groups: Vec<i64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct FileRowDump {
+    pub id: i64,
+    pub path: String,
+    pub content_hash: String,
+    pub size_bytes: i64,
+    pub mtime_ns: i64,
+    pub file_format: String,
+    pub has_sidecar_jpg: bool,
+    pub last_processed: i64,
+}
+
+#[derive(serde::Serialize)]
+pub struct ExifRowDump {
+    pub captured_at: Option<i64>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub focal_length_mm: Option<f32>,
+    pub aperture: Option<f32>,
+    pub iso: Option<i32>,
+    pub shutter_seconds: Option<f32>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub orientation: Option<i16>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SharpnessRowDump {
+    pub s_global: f32,
+    pub s_subject: Option<f32>,
+    pub s_background: Option<f32>,
+    pub subject_ratio: Option<f32>,
+    pub detector_used: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ExposureRowDump {
+    pub clipped_highlights: f32,
+    pub clipped_shadows: f32,
+    pub mean_luma: f32,
+    pub histogram_skew: f32,
+}
+
+#[derive(serde::Serialize)]
+pub struct IqaRowDump {
+    pub model: String,
+    pub score: f32,
+}
+
+#[derive(serde::Serialize)]
+pub struct EmbeddingDump {
+    pub model: String,
+    /// Number of dimensions in the embedding vector (vector itself omitted).
+    pub dim: usize,
+}
+
+#[derive(serde::Serialize)]
+pub struct DefectFlagDump {
+    pub flag_type: String,
+    pub confidence: f32,
+    pub reason: Option<String>,
+}
+
+/// Map a single-row query result into `Option`, treating "no rows" as `None`.
+fn optional_row<T>(result: Result<T, duckdb::Error>) -> Result<Option<T>, CatalogError> {
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(CatalogError::Db(e.to_string())),
+    }
+}
+
 /// One row of ML output ready to be persisted.
 pub struct MlRow {
     pub file_id: i64,
@@ -1712,6 +1799,161 @@ impl Catalog {
         }
         Ok(out)
     }
+
+    /// Dump every catalog row associated with `path`. Returns `None` when no
+    /// `files` row matches.
+    pub fn dump_file(&self, path: &Path) -> Result<Option<FileDump>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let path_str = path.to_string_lossy();
+
+        // files row (also gives us the id for the remaining lookups).
+        let file = conn.query_row(
+            "SELECT id, path, content_hash, size_bytes, mtime_ns, file_format,
+                    has_sidecar_jpg, last_processed
+             FROM files WHERE path = ?",
+            duckdb::params![path_str.as_ref()],
+            |r| {
+                Ok(FileRowDump {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    content_hash: r.get(2)?,
+                    size_bytes: r.get(3)?,
+                    mtime_ns: r.get(4)?,
+                    file_format: r.get(5)?,
+                    has_sidecar_jpg: r.get(6)?,
+                    last_processed: r.get(7)?,
+                })
+            },
+        );
+        let file = match file {
+            Ok(f) => f,
+            Err(duckdb::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(CatalogError::Db(e.to_string())),
+        };
+        let file_id = file.id;
+
+        let exif = optional_row(conn.query_row(
+            "SELECT captured_at, camera_make, camera_model, lens_model, focal_length_mm,
+                    aperture, iso, shutter_seconds, width, height, orientation
+             FROM exif WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                Ok(ExifRowDump {
+                    captured_at: r.get(0)?,
+                    camera_make: r.get(1)?,
+                    camera_model: r.get(2)?,
+                    lens_model: r.get(3)?,
+                    focal_length_mm: r.get(4)?,
+                    aperture: r.get(5)?,
+                    iso: r.get(6)?,
+                    shutter_seconds: r.get(7)?,
+                    width: r.get(8)?,
+                    height: r.get(9)?,
+                    orientation: r.get(10)?,
+                })
+            },
+        ))?;
+
+        let sharpness = optional_row(conn.query_row(
+            "SELECT s_global, s_subject, s_background, subject_ratio, detector_used
+             FROM sharpness WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                Ok(SharpnessRowDump {
+                    s_global: r.get(0)?,
+                    s_subject: r.get(1)?,
+                    s_background: r.get(2)?,
+                    subject_ratio: r.get(3)?,
+                    detector_used: r.get(4)?,
+                })
+            },
+        ))?;
+
+        let exposure = optional_row(conn.query_row(
+            "SELECT clipped_highlights, clipped_shadows, mean_luma, histogram_skew
+             FROM exposure WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                Ok(ExposureRowDump {
+                    clipped_highlights: r.get(0)?,
+                    clipped_shadows: r.get(1)?,
+                    mean_luma: r.get(2)?,
+                    histogram_skew: r.get(3)?,
+                })
+            },
+        ))?;
+
+        let iqa = optional_row(conn.query_row(
+            "SELECT model, score FROM iqa WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                Ok(IqaRowDump {
+                    model: r.get(0)?,
+                    score: r.get(1)?,
+                })
+            },
+        ))?;
+
+        // Use len(vector) in SQL to get the dimension — avoids the Vec<f32> FromSql
+        // limitation in duckdb-rs v1 (no FromSql impl for Vec<f32>; confirmed in Phase 5).
+        let embedding = optional_row(conn.query_row(
+            "SELECT model, len(vector) AS dim FROM embeddings WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                let model: String = r.get(0)?;
+                let dim: i64 = r.get(1)?;
+                Ok(EmbeddingDump {
+                    model,
+                    dim: dim as usize,
+                })
+            },
+        ))?;
+
+        let mut flag_stmt = conn
+            .prepare(
+                "SELECT flag_type, confidence, reason FROM defect_flags
+                 WHERE file_id = ? ORDER BY flag_type",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let flag_rows = flag_stmt
+            .query_map(duckdb::params![file_id], |r| {
+                Ok(DefectFlagDump {
+                    flag_type: r.get(0)?,
+                    confidence: r.get(1)?,
+                    reason: r.get(2)?,
+                })
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut defect_flags = Vec::new();
+        for r in flag_rows {
+            defect_flags.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+
+        let mut grp_stmt = conn
+            .prepare("SELECT group_id FROM duplicate_members WHERE file_id = ? ORDER BY group_id")
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let grp_rows = grp_stmt
+            .query_map(duckdb::params![file_id], |r| r.get::<_, i64>(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut duplicate_groups = Vec::new();
+        for r in grp_rows {
+            duplicate_groups.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+
+        Ok(Some(FileDump {
+            file,
+            exif,
+            sharpness,
+            exposure,
+            iqa,
+            embedding,
+            defect_flags,
+            duplicate_groups,
+        }))
+    }
 }
 
 /// Return (p10, p50, p90) of `samples` using linear interpolation between
@@ -2612,6 +2854,92 @@ mod tests {
             counts,
             vec![("blur".to_string(), 2), ("overexposed".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn dump_file_present_and_absent() {
+        use crate::defect::{DefectFlag, ExposureResult, SharpnessResult};
+        use crate::ingest::ExifData;
+
+        let (catalog, _dir) = make_catalog();
+        let id = insert_file(&catalog, "/p/known.jpg", 7);
+
+        let exif = ExifData {
+            captured_at: Some(1686830400),
+            camera_make: Some("TestMake".into()),
+            camera_model: Some("CamX".into()),
+            lens_model: Some("Lens50".into()),
+            focal_length_mm: Some(50.0),
+            aperture: Some(2.8),
+            iso: Some(200),
+            shutter_seconds: Some(0.01),
+            width: Some(100),
+            height: Some(100),
+            orientation: Some(1),
+        };
+        catalog.upsert_exif(id, &exif).unwrap();
+        catalog
+            .upsert_sharpness(
+                id,
+                &SharpnessResult {
+                    s_global: 12.5,
+                    s_subject: Some(20.0),
+                    s_background: Some(5.0),
+                    subject_ratio: Some(0.3),
+                    detector_used: "rt-detr-l".into(),
+                },
+            )
+            .unwrap();
+        catalog
+            .upsert_exposure(
+                id,
+                &ExposureResult {
+                    clipped_highlights: 0.01,
+                    clipped_shadows: 0.02,
+                    mean_luma: 0.5,
+                    histogram_skew: 0.0,
+                },
+            )
+            .unwrap();
+        catalog
+            .upsert_defect_flag(
+                id,
+                &DefectFlag {
+                    flag_type: "blur".into(),
+                    confidence: 0.9,
+                    reason: "low".into(),
+                },
+            )
+            .unwrap();
+        catalog
+            .flush_ml_batch(&[MlRow {
+                file_id: id,
+                embedding: Some(("dinov2-base".into(), vec![0.1, 0.2, 0.3])),
+                iqa_score: Some(("clip-iqa".into(), 0.75)),
+            }])
+            .unwrap();
+
+        let dump = catalog
+            .dump_file(&PathBuf::from("/p/known.jpg"))
+            .unwrap()
+            .expect("file should be present");
+        assert_eq!(dump.file.path, "/p/known.jpg");
+        assert_eq!(
+            dump.exif.as_ref().unwrap().camera_model.as_deref(),
+            Some("CamX")
+        );
+        assert!((dump.sharpness.as_ref().unwrap().s_global - 12.5).abs() < 1e-4);
+        assert!(dump.exposure.is_some());
+        assert_eq!(dump.iqa.as_ref().unwrap().model, "clip-iqa");
+        assert_eq!(dump.embedding.as_ref().unwrap().dim, 3);
+        assert_eq!(dump.defect_flags.len(), 1);
+        assert_eq!(dump.defect_flags[0].flag_type, "blur");
+
+        // Unknown file → None.
+        assert!(catalog
+            .dump_file(&PathBuf::from("/p/missing.jpg"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -314,10 +314,22 @@ fn cmd_review_tree(
     Ok(())
 }
 
-fn cmd_info(_file: PathBuf, _cfg: &config::Config) -> Result<()> {
-    tracing::info!("info — not yet implemented");
-    eprintln!("photopipe info: not yet implemented (Phase 7)");
-    Ok(())
+fn cmd_info(file: PathBuf, cfg: &config::Config) -> Result<()> {
+    let catalog =
+        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+    match catalog
+        .dump_file(&file)
+        .map_err(|e| anyhow::anyhow!("info: {}", e))?
+    {
+        Some(dump) => {
+            let json = serde_json::to_string_pretty(&dump)?;
+            println!("{json}");
+            Ok(())
+        }
+        None => {
+            anyhow::bail!("no catalog entry for {}", file.display());
+        }
+    }
 }
 
 fn cmd_stats(cfg: &config::Config) -> Result<()> {
