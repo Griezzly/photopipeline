@@ -131,7 +131,7 @@ enum Command {
     /// assign duplicate-group IDs and elect one keeper per group.
     Dedupe,
 
-    /// Generate or update the symlink review tree.
+    /// Generate or update the review tree (copies flagged photos for browsing).
     ReviewTree {
         /// Destination directory for the review tree.
         output: PathBuf,
@@ -316,6 +316,8 @@ fn cmd_review_tree(
     cfg: &config::Config,
 ) -> Result<()> {
     use pipeline::{build_review_tree, catalog::Catalog};
+
+    let output = config::expand_tilde(&output);
 
     // The positional <OUTPUT> arg always wins as the destination root.
     // cfg.output.review_tree (with its <library> token) is only a fallback
