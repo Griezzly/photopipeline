@@ -124,8 +124,14 @@ pub struct ReviewEntry {
     pub year_month: String,
 }
 
+/// Enough to locate a file on disk and key its cached preview.
+pub struct FileLocator {
+    pub path: std::path::PathBuf,
+    pub content_hash: u128,
+}
+
 /// One duplicate group as needed by the review tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ReviewGroup {
     pub group_id: i64,
     /// "YYYY-MM-DD" from the keeper's `captured_at`, or "unknown-date".
@@ -2277,6 +2283,37 @@ impl Catalog {
             defect_flags,
             duplicate_groups,
         }))
+    }
+
+    pub fn lookup_file(&self, file_id: i64) -> Result<Option<FileLocator>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let row = conn.query_row(
+            "SELECT path, content_hash FROM files WHERE id = ?",
+            duckdb::params![file_id],
+            |r| {
+                let path: String = r.get(0)?;
+                let hash_hex: String = r.get(1)?;
+                Ok((path, hash_hex))
+            },
+        );
+        match optional_row(row)? {
+            None => Ok(None),
+            Some((path, hash_hex)) => {
+                let content_hash = u128::from_str_radix(&hash_hex, 16)
+                    .map_err(|e| CatalogError::Db(format!("bad content_hash hex: {e}")))?;
+                Ok(Some(FileLocator { path: std::path::PathBuf::from(path), content_hash }))
+            }
+        }
+    }
+
+    pub fn dump_file_by_id(&self, file_id: i64) -> Result<Option<FileDump>, CatalogError> {
+        match self.lookup_file(file_id)? {
+            None => Ok(None),
+            Some(loc) => self.dump_file(&loc.path),
+        }
     }
 }
 

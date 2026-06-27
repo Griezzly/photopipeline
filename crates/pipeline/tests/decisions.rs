@@ -162,3 +162,20 @@ fn review_list_orders_flagged_first_and_filters() {
         .unwrap();
     assert_eq!(undecided.len(), 2);
 }
+
+#[test]
+fn lookup_file_returns_path_and_hash() {
+    let dir = TempDir::new().unwrap();
+    let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let id = add_file(&catalog, "a.jpg", 0xABCD);
+
+    let loc = catalog.lookup_file(id).unwrap().unwrap();
+    assert_eq!(loc.path, PathBuf::from("/lib/a.jpg"));
+    assert_eq!(loc.content_hash, 0xABCD);
+
+    assert!(catalog.lookup_file(999_999).unwrap().is_none());
+
+    // dump_file_by_id resolves the same row dump as dump_file(path)
+    let dump = catalog.dump_file_by_id(id).unwrap().unwrap();
+    assert_eq!(dump.file.id, id);
+}
