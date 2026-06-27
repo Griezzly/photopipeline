@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/decisions", post(handlers::post_decision))
         .route("/api/counts", get(handlers::get_counts))
         .route("/api/export", post(handlers::post_export))
+        .route("/:file", get(handlers::static_asset))
         .with_state(state)
 }
 

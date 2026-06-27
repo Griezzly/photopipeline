@@ -1,0 +1,26 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #ddd; }
+header, footer {
+  position: sticky; display: flex; gap: 12px; align-items: center;
+  padding: 8px 12px; background: #1b1b1b; border-bottom: 1px solid #333;
+}
+header { top: 0; } footer { bottom: 0; border-top: 1px solid #333; border-bottom: none; }
+.spacer { flex: 1; }
+select, button { background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 4px 8px; }
+button { cursor: pointer; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; padding: 12px; }
+.tile { position: relative; border: 3px solid transparent; border-radius: 6px; overflow: hidden; background: #000; }
+.tile.sel { outline: 2px solid #4af; }
+.tile.keep { border-color: #3a3; }
+.tile.reject { border-color: #c33; }
+.tile img { display: block; width: 100%; height: 160px; object-fit: cover; }
+.tile .badge {
+  position: absolute; top: 4px; left: 4px; font-size: 11px;
+  background: rgba(0,0,0,.7); padding: 2px 5px; border-radius: 3px;
+}
+.detail { position: fixed; inset: 0; background: rgba(0,0,0,.95); display: flex; }
+.detail.hidden { display: none; }
+.detail img { flex: 1; object-fit: contain; min-width: 0; }
+.detail aside { width: 320px; padding: 16px; overflow: auto; background: #1b1b1b; font-size: 13px; }
+.detail aside dt { color: #888; margin-top: 8px; }
+.detail aside dd { margin: 0; }

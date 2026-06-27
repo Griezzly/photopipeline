@@ -33,6 +33,22 @@ pub async fn index() -> Response {
     }
 }
 
+/// Serve any embedded asset by path (e.g. `app.js`, `style.css`).
+pub async fn static_asset(Path(file): Path<String>) -> Response {
+    match Assets::get(&file) {
+        Some(f) => {
+            let ct = match file.rsplit('.').next() {
+                Some("js") => "text/javascript; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("html") => "text/html; charset=utf-8",
+                _ => "application/octet-stream",
+            };
+            ([(header::CONTENT_TYPE, ct)], f.data.into_owned()).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Query string for `/api/photos`.
 #[derive(Debug, Deserialize)]
 pub struct PhotoQuery {
