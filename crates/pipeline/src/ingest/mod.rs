@@ -127,6 +127,9 @@ pub fn ingest_directory(
 
     tracing::info!(total = paths.len(), "ingest: files found");
 
+    // ── drop sidecar JPGs (RAW + same-name JPG → keep RAW only) ─────────────
+    let paths = exclude_sidecar_jpgs(paths);
+
     // ── process in parallel ──────────────────────────────────────────────────
     let batch: Mutex<Vec<(IngestedFile, Option<ExifData>)>> = Mutex::new(Vec::new());
 
@@ -327,6 +330,62 @@ fn find_sidecar_jpg(path: &Path) -> Option<PathBuf> {
     None
 }
 
+// ── sidecar JPG exclusion ─────────────────────────────────────────────────────
+
+/// Drop any `.jpg`/`.jpeg` whose same-stem RAW sibling is also in `paths`
+/// (same parent dir, case-insensitive stem). RAWs and standalone JPGs are kept.
+fn exclude_sidecar_jpgs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+
+    // Build a set of (parent_dir, lowercased_stem) for every RAW path.
+    let raw_keys: HashSet<(PathBuf, String)> = paths
+        .iter()
+        .filter(|p| {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            FileFormat::from_ext(ext)
+                .map(|f| f.is_raw())
+                .unwrap_or(false)
+        })
+        .filter_map(|p| {
+            let parent = p.parent()?.to_owned();
+            let stem = p.file_stem()?.to_string_lossy().to_ascii_lowercase();
+            Some((parent, stem))
+        })
+        .collect();
+
+    let before = paths.len();
+    let result: Vec<PathBuf> = paths
+        .into_iter()
+        .filter(|p| {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let is_jpg = matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg");
+            if !is_jpg {
+                return true;
+            }
+            // Keep this JPG only if there is no RAW sibling in the same dir.
+            let key = p.parent().and_then(|parent| {
+                let stem = p.file_stem()?.to_string_lossy().to_ascii_lowercase();
+                Some((parent.to_owned(), stem))
+            });
+            match key {
+                Some(k) => !raw_keys.contains(&k),
+                None => true,
+            }
+        })
+        .collect();
+
+    let excluded = before - result.len();
+    if excluded > 0 {
+        tracing::info!(
+            kept = result.len(),
+            excluded,
+            "ingest: sidecar JPGs excluded from catalog"
+        );
+    }
+
+    result
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -352,5 +411,67 @@ mod tests {
         assert_eq!(FileFormat::from_ext("ARW"), Some(FileFormat::Arw));
         assert_eq!(FileFormat::from_ext("JPEG"), Some(FileFormat::Jpg));
         assert_eq!(FileFormat::from_ext("xyz"), None);
+    }
+
+    // ── exclude_sidecar_jpgs tests ────────────────────────────────────────────
+
+    #[test]
+    fn exclude_drops_jpg_when_raw_sibling_present() {
+        let paths = vec![
+            PathBuf::from("/photos/X.ARW"),
+            PathBuf::from("/photos/X.JPG"),
+        ];
+        let result = exclude_sidecar_jpgs(paths);
+        assert_eq!(result, vec![PathBuf::from("/photos/X.ARW")]);
+    }
+
+    #[test]
+    fn exclude_keeps_standalone_jpg() {
+        let paths = vec![PathBuf::from("/photos/Z.JPG")];
+        let result = exclude_sidecar_jpgs(paths);
+        assert_eq!(result, vec![PathBuf::from("/photos/Z.JPG")]);
+    }
+
+    #[test]
+    fn exclude_case_insensitive_stem_and_ext() {
+        // ARW + lowercase jpg: jpg dropped
+        let paths = vec![
+            PathBuf::from("/photos/DSC1.ARW"),
+            PathBuf::from("/photos/DSC1.jpg"),
+        ];
+        let result = exclude_sidecar_jpgs(paths);
+        assert!(result.contains(&PathBuf::from("/photos/DSC1.ARW")));
+        assert!(!result.contains(&PathBuf::from("/photos/DSC1.jpg")));
+
+        // ARW + uppercase JPG: also dropped
+        let paths2 = vec![
+            PathBuf::from("/photos/DSC2.ARW"),
+            PathBuf::from("/photos/DSC2.JPG"),
+        ];
+        let result2 = exclude_sidecar_jpgs(paths2);
+        assert!(result2.contains(&PathBuf::from("/photos/DSC2.ARW")));
+        assert!(!result2.contains(&PathBuf::from("/photos/DSC2.JPG")));
+    }
+
+    #[test]
+    fn exclude_different_dirs_same_stem_both_kept() {
+        // a.ARW in dir1, a.JPG in dir2 — not siblings, both kept
+        let paths = vec![PathBuf::from("/dir1/a.ARW"), PathBuf::from("/dir2/a.JPG")];
+        let result = exclude_sidecar_jpgs(paths);
+        assert!(result.contains(&PathBuf::from("/dir1/a.ARW")));
+        assert!(result.contains(&PathBuf::from("/dir2/a.JPG")));
+    }
+
+    #[test]
+    fn exclude_always_keeps_the_raw() {
+        let paths = vec![
+            PathBuf::from("/photos/IMG_5000.CR3"),
+            PathBuf::from("/photos/IMG_5000.jpg"),
+            PathBuf::from("/photos/IMG_5001.NEF"),
+        ];
+        let result = exclude_sidecar_jpgs(paths);
+        assert!(result.contains(&PathBuf::from("/photos/IMG_5000.CR3")));
+        assert!(result.contains(&PathBuf::from("/photos/IMG_5001.NEF")));
+        assert!(!result.contains(&PathBuf::from("/photos/IMG_5000.jpg")));
     }
 }
