@@ -229,12 +229,27 @@ fn cmd_dedupe(cfg: &config::Config) -> Result<()> {
 
 fn cmd_review_tree(
     output: PathBuf,
-    _include: Vec<String>,
-    _regenerate: bool,
-    _cfg: &config::Config,
+    include: Vec<String>,
+    regenerate: bool,
+    cfg: &config::Config,
 ) -> Result<()> {
-    tracing::info!(?output, "review-tree — not yet implemented");
-    eprintln!("photopipe review-tree: not yet implemented (Phase 6)");
+    use pipeline::{build_review_tree, catalog::Catalog};
+
+    // The positional <OUTPUT> arg always wins as the destination root.
+    // cfg.output.review_tree (with its <library> token) is only a fallback
+    // default for callers/config; the CLI requires the arg directly.
+    // We still pass cfg.output because it carries link_type.
+    let catalog =
+        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+
+    tracing::info!(output = %output.display(), regenerate, "building review tree");
+    let report = build_review_tree(&catalog, &output, &cfg.output, &include, regenerate)?;
+
+    println!("Review tree: {}", output.display());
+    println!("  Links created : {}", report.links_created);
+    println!("  Links removed : {}", report.links_removed);
+    println!("  Groups        : {}", report.groups);
+    println!("  Errors        : {}", report.errors);
     Ok(())
 }
 
