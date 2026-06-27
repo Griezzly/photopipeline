@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use pipeline::cache::Cache;
@@ -31,6 +31,9 @@ pub fn router(state: AppState) -> Router {
         .route("/thumb/:id", get(handlers::thumb))
         .route("/preview/:id", get(handlers::preview))
         .route("/", get(handlers::index))
+        .route("/api/decisions", post(handlers::post_decision))
+        .route("/api/counts", get(handlers::get_counts))
+        .route("/api/export", post(handlers::post_export))
         .with_state(state)
 }
 

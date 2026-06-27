@@ -4,9 +4,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pipeline::catalog::{ReviewFilter, ReviewGroup, ReviewListItem};
+use pipeline::catalog::{DecisionCounts, ReviewFilter, ReviewGroup, ReviewListItem, Verdict};
+use pipeline::config::expand_tilde;
+use pipeline::{build_keepers_tree, KeepersReport};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
+use std::path::PathBuf;
 
 use super::AppState;
 
@@ -158,4 +161,74 @@ async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
         Some(bytes) => webp_response(bytes),
         None => placeholder(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DecisionRequest {
+    pub file_id: i64,
+    /// "keep" | "reject" | "undecide" | "keeper"
+    pub action: String,
+    pub note: Option<String>,
+}
+
+pub async fn post_decision(
+    State(state): State<AppState>,
+    Json(req): Json<DecisionRequest>,
+) -> Result<Json<DecisionCounts>, StatusCode> {
+    let r = match req.action.as_str() {
+        "keep" => state.catalog.set_decision(req.file_id, Verdict::Keep, req.note.as_deref()),
+        "reject" => state.catalog.set_decision(req.file_id, Verdict::Reject, req.note.as_deref()),
+        "undecide" => state.catalog.clear_decision(req.file_id),
+        "keeper" => state.catalog.pick_keeper(req.file_id),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    r.map_err(|e| {
+        tracing::warn!(error = %e, "decision write failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    state
+        .catalog
+        .decision_counts()
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Read-only current counts (frontend loads this on startup).
+pub async fn get_counts(
+    State(state): State<AppState>,
+) -> Result<Json<DecisionCounts>, StatusCode> {
+    state
+        .catalog
+        .decision_counts()
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportRequest {
+    /// Output directory. Defaults to `<cwd>/_keepers` when omitted.
+    pub output: Option<String>,
+    #[serde(default)]
+    pub regenerate: bool,
+}
+
+pub async fn post_export(
+    State(state): State<AppState>,
+    Json(req): Json<ExportRequest>,
+) -> Result<Json<KeepersReport>, StatusCode> {
+    let out: PathBuf = req
+        .output
+        .map(|s| expand_tilde(&PathBuf::from(s)))
+        .unwrap_or_else(|| PathBuf::from("_keepers"));
+    let cfg = state.cfg.clone();
+    let catalog = state.catalog.clone();
+    let regenerate = req.regenerate;
+    tokio::task::spawn_blocking(move || build_keepers_tree(&catalog, &out, &cfg.output, regenerate))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "export failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }

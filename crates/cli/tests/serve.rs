@@ -151,3 +151,68 @@ async fn thumb_for_missing_file_returns_svg_placeholder() {
     assert_eq!(status, axum::http::StatusCode::OK);
     assert!(ct.starts_with("image/svg+xml"));
 }
+
+async fn post_json(
+    app: axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let val = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, val)
+}
+
+#[tokio::test]
+async fn decision_roundtrip_updates_counts() {
+    let (_dir, state, id) = state_with_one_file();
+    let app = photopipe::serve::router(state);
+
+    let (s, v) = post_json(
+        app.clone(),
+        "/api/decisions",
+        serde_json::json!({ "file_id": id, "action": "reject" }),
+    )
+    .await;
+    assert_eq!(s, axum::http::StatusCode::OK);
+    assert_eq!(v["rejected"], 1);
+    assert_eq!(v["kept"], 0);
+
+    let (_s, v) = post_json(
+        app.clone(),
+        "/api/decisions",
+        serde_json::json!({ "file_id": id, "action": "keep" }),
+    )
+    .await;
+    assert_eq!(v["kept"], 1);
+    assert_eq!(v["rejected"], 0);
+
+    let (_s, v) = post_json(
+        app,
+        "/api/decisions",
+        serde_json::json!({ "file_id": id, "action": "undecide" }),
+    )
+    .await;
+    assert_eq!(v["kept"], 0);
+    assert_eq!(v["undecided"], 1);
+
+    // read-only counts endpoint reflects the same state
+    let (s, v) = get_json(photopipe::serve::router(state_with_one_file().1), "/api/counts").await;
+    assert_eq!(s, axum::http::StatusCode::OK);
+    assert_eq!(v["undecided"], 1);
+    assert_eq!(v["kept"], 0);
+}
