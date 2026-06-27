@@ -200,7 +200,6 @@ impl Default for DedupeConfig {
 pub struct OutputConfig {
     /// Literal `<library>` is substituted with the scan root at runtime.
     pub review_tree: String,
-    pub link_type: LinkType,
     pub keeper_strategy: KeeperStrategy,
 }
 
@@ -208,17 +207,9 @@ impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             review_tree: "<library>/_review".into(),
-            link_type: LinkType::Symlink,
             keeper_strategy: KeeperStrategy::Iqa,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LinkType {
-    Symlink,
-    Hardlink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,5 +309,17 @@ mod tests {
         assert_eq!(cfg.ingest.preview_quality, 90);
         // other fields remain at defaults
         assert_eq!(cfg.ingest.preview_max_long_edge, 2048);
+    }
+
+    #[test]
+    fn legacy_link_type_key_is_ignored() {
+        // Old configs carried [output] link_type — it must parse without error now.
+        let toml_str = r#"
+            [output]
+            link_type = "hardlink"
+            review_tree = "<library>/_review"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).expect("legacy link_type should be ignored");
+        assert_eq!(cfg.output.review_tree, "<library>/_review");
     }
 }
