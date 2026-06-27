@@ -160,6 +160,15 @@ enum Command {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
+
+    /// Materialize a keepers export tree from recorded decisions.
+    ExportKeepers {
+        /// Destination directory for the keepers tree.
+        output: PathBuf,
+        /// Delete the tree and rebuild from scratch.
+        #[arg(long)]
+        regenerate: bool,
+    },
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -191,6 +200,9 @@ fn main() -> Result<()> {
         Command::Stats => cmd_stats(&cfg),
         Command::Doctor => cmd_doctor(&config_path, &cfg),
         Command::Serve { port } => serve::run(&cfg, port),
+        Command::ExportKeepers { output, regenerate } => {
+            cmd_export_keepers(output, regenerate, &cfg)
+        }
     }
 }
 
@@ -320,6 +332,21 @@ fn cmd_review_tree(
     println!("  Links removed : {}", report.links_removed);
     println!("  Groups        : {}", report.groups);
     println!("  Errors        : {}", report.errors);
+    Ok(())
+}
+
+fn cmd_export_keepers(output: PathBuf, regenerate: bool, cfg: &config::Config) -> Result<()> {
+    let catalog =
+        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+    let out = config::expand_tilde(&output);
+    let report = pipeline::build_keepers_tree(&catalog, &out, &cfg.output, regenerate)?;
+    println!(
+        "keepers tree: {} created, {} removed, {} errors → {}",
+        report.links_created,
+        report.links_removed,
+        report.errors,
+        out.display()
+    );
     Ok(())
 }
 

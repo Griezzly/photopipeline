@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use pipeline::catalog::Catalog;
+use pipeline::catalog::{Catalog, Verdict};
 use pipeline::ingest::{ExifData, FileFormat, IngestedFile};
 
 /// Write a minimal config TOML pointing catalog + cache into `dir`, returning
@@ -116,4 +116,67 @@ fn doctor_exits_nonzero_when_configured_model_missing() {
         combined.contains("missing"),
         "doctor output should mention a missing model:\n{combined}"
     );
+}
+
+#[test]
+fn export_keepers_creates_tree() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (cfg_path, db_path) = write_config(dir.path());
+    let out = dir.path().join("_keepers");
+
+    // Seed a catalog with one kept file via the library API.
+    {
+        let lib = dir.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let p = lib.join("a.jpg");
+        std::fs::write(&p, b"not-a-real-jpg-but-fine-for-linking").unwrap();
+        let catalog = Catalog::open(&db_path).unwrap();
+        let file = IngestedFile {
+            path: p,
+            content_hash: 1,
+            size: 1,
+            mtime_ns: 1,
+            format: FileFormat::Jpg,
+            has_sidecar_jpg: false,
+        };
+        let id = catalog.flush_batch(&[(file, None::<ExifData>)]).unwrap()[0];
+        catalog.set_decision(id, Verdict::Keep, None).unwrap();
+    }
+
+    let status = Command::new(env!("CARGO_BIN_EXE_photopipe"))
+        .args([
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "export-keepers",
+            out.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "expected exit 0 from export-keepers"
+    );
+
+    // Expect at least one symlink named a.jpg under the keepers tree.
+    let entries = walkdir_like(&out);
+    assert!(
+        entries.iter().any(|n| n == "a.jpg"),
+        "expected a.jpg in keepers tree, found: {entries:?}"
+    );
+}
+
+/// Minimal recursive filename collector (avoids adding a dep to the cli crate).
+fn walkdir_like(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walkdir_like(&p));
+            } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
 }
