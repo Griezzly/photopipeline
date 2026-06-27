@@ -259,3 +259,28 @@ pub async fn post_export(
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }
+
+#[derive(Debug, Deserialize)]
+pub struct EstimateQuery {
+    pub output: Option<String>,
+}
+
+/// Read-only estimate of the keepers copy (files + bytes that would be written).
+pub async fn get_export_estimate(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<EstimateQuery>,
+) -> Result<axum::Json<pipeline::CopyEstimate>, StatusCode> {
+    let out: PathBuf = q
+        .output
+        .map(|s| expand_tilde(&PathBuf::from(s)))
+        .unwrap_or_else(|| PathBuf::from("_keepers"));
+    let catalog = state.catalog.clone();
+    tokio::task::spawn_blocking(move || pipeline::estimate_keepers_copy(&catalog, &out))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(axum::Json)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "export estimate failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
