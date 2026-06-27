@@ -383,6 +383,25 @@ impl Catalog {
         Ok(file_ids)
     }
 
+    /// Return the highest applied schema migration version.
+    ///
+    /// `0` means no migrations have been recorded (a fresh, empty
+    /// `schema_version` table); the current shipping schema is version `1`.
+    pub fn schema_version(&self) -> Result<u32, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let version: u32 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(version)
+    }
+
     /// Return the EXIF row for the file at `path`, or `None` if not present.
     pub fn get_exif_by_path(
         &self,
@@ -2387,5 +2406,12 @@ mod tests {
         let p10 = catalog.iqa_global_p10().unwrap().expect("should be Some");
         // quantile_cont(0.10) over 0.0..0.9 is ~0.09.
         assert!((0.0..=0.2).contains(&p10), "p10 {p10} out of expected band");
+    }
+
+    #[test]
+    fn schema_version_reports_current_migration() {
+        let (catalog, _dir) = make_catalog();
+        // The single migration (version 1) runs at open().
+        assert_eq!(catalog.schema_version().unwrap(), 1);
     }
 }
