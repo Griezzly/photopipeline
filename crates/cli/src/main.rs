@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use photopipe::serve;
 use pipeline::catalog::Catalog;
 use pipeline::config;
 use pipeline::models::ModelHub;
@@ -152,6 +153,13 @@ enum Command {
 
     /// Check configuration, models, database, and system health.
     Doctor,
+
+    /// Launch the local review web server.
+    Serve {
+        /// Port to bind on 127.0.0.1.
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+    },
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -182,6 +190,7 @@ fn main() -> Result<()> {
         Command::Info { file } => cmd_info(file, &cfg),
         Command::Stats => cmd_stats(&cfg),
         Command::Doctor => cmd_doctor(&config_path, &cfg),
+        Command::Serve { port } => serve::run(&cfg, port),
     }
 }
 
