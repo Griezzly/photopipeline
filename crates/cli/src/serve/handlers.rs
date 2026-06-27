@@ -248,10 +248,9 @@ pub async fn post_export(
         .output
         .map(|s| expand_tilde(&PathBuf::from(s)))
         .unwrap_or_else(|| PathBuf::from("_keepers"));
-    let cfg = state.cfg.clone();
     let catalog = state.catalog.clone();
     let regenerate = req.regenerate;
-    tokio::task::spawn_blocking(move || build_keepers_tree(&catalog, &out, &cfg.output, regenerate))
+    tokio::task::spawn_blocking(move || build_keepers_tree(&catalog, &out, regenerate))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(Json)

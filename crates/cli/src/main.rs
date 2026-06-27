@@ -320,18 +320,18 @@ fn cmd_review_tree(
     // The positional <OUTPUT> arg always wins as the destination root.
     // cfg.output.review_tree (with its <library> token) is only a fallback
     // default for callers/config; the CLI requires the arg directly.
-    // We still pass cfg.output because it carries link_type.
     let catalog =
         Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
 
     tracing::info!(output = %output.display(), regenerate, "building review tree");
-    let report = build_review_tree(&catalog, &output, &cfg.output, &include, regenerate)?;
+    let report = build_review_tree(&catalog, &output, &include, regenerate)?;
 
     println!("Review tree: {}", output.display());
-    println!("  Links created : {}", report.links_created);
-    println!("  Links removed : {}", report.links_removed);
-    println!("  Groups        : {}", report.groups);
-    println!("  Errors        : {}", report.errors);
+    println!("  Copied  : {} files ({})", report.files_copied, pipeline::humanize_bytes(report.bytes_copied));
+    println!("  Skipped : {}", report.files_skipped);
+    println!("  Removed : {}", report.files_removed);
+    println!("  Groups  : {}", report.groups);
+    println!("  Errors  : {}", report.errors);
     Ok(())
 }
 
@@ -339,11 +339,13 @@ fn cmd_export_keepers(output: PathBuf, regenerate: bool, cfg: &config::Config) -
     let catalog =
         Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
     let out = config::expand_tilde(&output);
-    let report = pipeline::build_keepers_tree(&catalog, &out, &cfg.output, regenerate)?;
+    let report = pipeline::build_keepers_tree(&catalog, &out, regenerate)?;
     println!(
-        "keepers tree: {} created, {} removed, {} errors → {}",
-        report.links_created,
-        report.links_removed,
+        "Keepers tree: {} copied ({}), {} skipped, {} removed, {} errors → {}",
+        report.files_copied,
+        pipeline::humanize_bytes(report.bytes_copied),
+        report.files_skipped,
+        report.files_removed,
         report.errors,
         out.display()
     );

@@ -1,4 +1,4 @@
-//! Phase 6 — build the symlink/hardlink review tree from catalog data.
+//! Phase 6 — build the copy-based review tree from catalog data.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -98,70 +98,262 @@ pub(crate) fn plan_links(
     links
 }
 
-use crate::config::{LinkType, OutputConfig};
+/// The marker file written at the root of every photopipe-managed tree.
+const TREE_MARKER: &str = ".photopipe-tree";
 
 /// Summary of a review-tree build.
 #[derive(Debug, Default, Clone)]
 pub struct ReviewTreeReport {
-    pub links_created: u64,
-    pub links_removed: u64,
+    pub files_copied: u64,
+    pub files_skipped: u64,
+    pub files_removed: u64,
+    pub bytes_copied: u64,
     pub groups: u64,
     pub errors: u64,
 }
 
-/// Result of materializing a set of planned links.
+/// Bytes/files a copy would write (excludes already-current destinations).
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct CopyEstimate {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// Internal result of materializing a set of planned copies.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct MaterializeReport {
-    pub created: u64,
-    pub removed: u64,
-    pub errors: u64,
+struct CopyReport {
+    copied: u64,
+    skipped: u64,
+    removed: u64,
+    bytes: u64,
+    errors: u64,
 }
 
 /// The single regular file the tool itself writes at the tree root.
 const README_NAME: &str = "README.txt";
 
-/// Create one link (symlink or hardlink) at `link_path` pointing to the
-/// absolute `original`. Idempotent: if a correct symlink already exists, it
-/// is left as-is. Hardlink across filesystems fails loudly (EXDEV).
-/// Returns `true` if a new link was created.
-fn create_link(link_path: &Path, original: &Path, link_type: LinkType) -> anyhow::Result<bool> {
+/// Outcome of a single `copy_file`.
+enum CopyOutcome {
+    /// File was copied; carries the byte count written.
+    Copied(u64),
+    /// Destination already current; nothing written.
+    Skipped,
+}
+
+/// True if `dest` is missing or differs from `src` (size, or `src` is newer).
+fn needs_copy(dest: &Path, src: &Path) -> bool {
+    let (Ok(dm), Ok(sm)) = (std::fs::metadata(dest), std::fs::metadata(src)) else {
+        return true; // dest missing (or src unstattable → attempt; copy will error & be counted)
+    };
+    if dm.len() != sm.len() {
+        return true;
+    }
+    match (sm.modified(), dm.modified()) {
+        (Ok(s), Ok(d)) => s > d,
+        _ => false,
+    }
+}
+
+/// Copy `src` to `dest` unless `dest` is already current. Originals are only
+/// read. Returns the outcome (with byte count when copied).
+fn copy_file(dest: &Path, src: &Path) -> anyhow::Result<CopyOutcome> {
     use anyhow::Context;
-
-    let abs_original = original
+    let abs_src = src
         .canonicalize()
-        .with_context(|| format!("original not found: {}", original.display()))?;
+        .with_context(|| format!("original not found: {}", src.display()))?;
+    if dest.exists() && !needs_copy(dest, &abs_src) {
+        return Ok(CopyOutcome::Skipped);
+    }
+    let bytes = std::fs::copy(&abs_src, dest)
+        .with_context(|| format!("copy {} -> {}", abs_src.display(), dest.display()))?;
+    Ok(CopyOutcome::Copied(bytes))
+}
 
-    match link_type {
-        LinkType::Symlink => {
-            if let Ok(existing) = std::fs::read_link(link_path) {
-                if existing == abs_original {
-                    return Ok(false); // already correct
-                }
-                std::fs::remove_file(link_path)
-                    .with_context(|| format!("replacing stale symlink {}", link_path.display()))?;
-            }
-            std::os::unix::fs::symlink(&abs_original, link_path).with_context(|| {
-                format!(
-                    "symlink {} -> {}",
-                    link_path.display(),
-                    abs_original.display()
-                )
-            })?;
-            Ok(true)
+/// Resolve the destination path for each planned item, de-duplicating basenames
+/// per directory. Returns `(dest, src)` pairs. Pure — touches no filesystem.
+fn resolve_dests(output_root: &Path, planned: &[PlannedLink]) -> Vec<(PathBuf, PathBuf)> {
+    use std::collections::{HashMap, HashSet};
+    let mut taken_per_dir: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut out = Vec::with_capacity(planned.len());
+    for link in planned {
+        let abs_dir = output_root.join(&link.rel_dir);
+        let basename = link
+            .original
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unnamed")
+            .to_string();
+        let taken = taken_per_dir.entry(abs_dir.clone()).or_default();
+        let name = dedupe_name(taken, &basename);
+        out.push((abs_dir.join(&name), link.original.clone()));
+    }
+    out
+}
+
+/// Sum the files/bytes a copy of `planned` into `output_root` would write,
+/// excluding destinations that are already current.
+fn estimate_copy(output_root: &Path, planned: &[PlannedLink]) -> CopyEstimate {
+    let mut est = CopyEstimate::default();
+    for (dest, src) in resolve_dests(output_root, planned) {
+        let Ok(abs_src) = src.canonicalize() else { continue };
+        if needs_copy(&dest, &abs_src) {
+            est.files += 1;
+            est.bytes += std::fs::metadata(&abs_src).map(|m| m.len()).unwrap_or(0);
         }
-        LinkType::Hardlink => {
-            if link_path.exists() {
-                // A regular file already present; assume it's our hardlink.
-                return Ok(false);
+    }
+    est
+}
+
+/// True if `root` is a photopipe-managed tree (has the marker at its root).
+fn is_managed_tree(root: &Path) -> bool {
+    root.join(TREE_MARKER).exists()
+}
+
+/// True if `dir` exists and contains no entries.
+fn dir_is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map(|mut r| r.next().is_none()).unwrap_or(false)
+}
+
+/// Refuse to write into an existing non-empty directory that is not a
+/// photopipe-managed tree (protects against pointing `--output` at real photos).
+fn ensure_safe_to_write(output_root: &Path) -> anyhow::Result<()> {
+    if !output_root.exists() || is_managed_tree(output_root) || dir_is_empty(output_root) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to write into {}: not a photopipe tree (missing {} marker). \
+         Delete it manually if you intend to replace it.",
+        output_root.display(),
+        TREE_MARKER
+    )
+}
+
+/// Remove a photopipe-managed tree wholesale. Refuses a non-empty directory
+/// that lacks the marker.
+fn remove_managed_tree(output_root: &Path) -> anyhow::Result<()> {
+    if !output_root.exists() {
+        return Ok(());
+    }
+    if !is_managed_tree(output_root) && !dir_is_empty(output_root) {
+        anyhow::bail!(
+            "refusing to delete {}: not a photopipe tree (missing {} marker). \
+             Delete it manually if you intend to replace it.",
+            output_root.display(),
+            TREE_MARKER
+        );
+    }
+    std::fs::remove_dir_all(output_root)
+        .map_err(|e| anyhow::anyhow!("remove tree {}: {e}", output_root.display()))
+}
+
+/// Materialize `planned` as copies under `output_root`. Writes the marker +
+/// `README.txt` at the root; when not regenerating, prunes entries no longer
+/// expected. Shared core for the review and keepers trees.
+fn materialize_copies(
+    output_root: &Path,
+    planned: &[PlannedLink],
+    regenerate: bool,
+    readme_body: &str,
+) -> anyhow::Result<CopyReport> {
+    use std::collections::HashSet;
+
+    let mut report = CopyReport::default();
+
+    if regenerate {
+        remove_managed_tree(output_root)?;
+        tracing::info!(root = %output_root.display(), "regenerate: removed existing tree");
+    } else {
+        ensure_safe_to_write(output_root)?;
+    }
+    std::fs::create_dir_all(output_root)
+        .map_err(|e| anyhow::anyhow!("create output root {}: {e}", output_root.display()))?;
+
+    let dests = resolve_dests(output_root, planned);
+    let mut expected: HashSet<PathBuf> = HashSet::new();
+
+    for (dest, src) in &dests {
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(dir = %parent.display(), error = %e, "create dir failed");
+                report.errors += 1;
+                continue;
             }
-            std::fs::hard_link(&abs_original, link_path).with_context(|| {
-                format!(
-                    "hardlink {} -> {} (cross-filesystem hardlinks are not supported)",
-                    link_path.display(),
-                    abs_original.display()
-                )
-            })?;
-            Ok(true)
+        }
+        match copy_file(dest, src) {
+            Ok(CopyOutcome::Copied(b)) => {
+                report.copied += 1;
+                report.bytes += b;
+            }
+            Ok(CopyOutcome::Skipped) => report.skipped += 1,
+            Err(e) => {
+                tracing::warn!(dest = %dest.display(), error = %e, "copy failed");
+                report.errors += 1;
+                continue;
+            }
+        }
+        expected.insert(dest.clone());
+    }
+
+    // Write the marker + README before pruning so they are preserved.
+    std::fs::write(output_root.join(TREE_MARKER), b"photopipe managed tree\n")
+        .map_err(|e| anyhow::anyhow!("write marker: {e}"))?;
+    std::fs::write(output_root.join(README_NAME), readme_body)
+        .map_err(|e| anyhow::anyhow!("write README.txt: {e}"))?;
+
+    if !regenerate {
+        prune_stale(output_root, &expected, &mut report);
+    }
+
+    Ok(report)
+}
+
+/// Within a managed tree, remove files (copies or stray symlinks) not in
+/// `expected` and now-empty directories; the root marker and README are kept.
+fn prune_stale(output_root: &Path, expected: &std::collections::HashSet<PathBuf>, report: &mut CopyReport) {
+    prune_dir(output_root, output_root, expected, report);
+}
+
+fn prune_dir(
+    root: &Path,
+    dir: &Path,
+    expected: &std::collections::HashSet<PathBuf>,
+    report: &mut CopyReport,
+) {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "prune read_dir failed");
+            report.errors += 1;
+            return;
+        }
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        // Preserve the root-level marker and README.
+        let is_root_meta = path.parent() == Some(root)
+            && matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(TREE_MARKER) | Some(README_NAME)
+            );
+        if is_root_meta {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_dir() {
+            prune_dir(root, &path, expected, report);
+            if dir_is_empty(&path) {
+                let _ = std::fs::remove_dir(&path);
+            }
+        } else if !expected.contains(&path) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => report.removed += 1,
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), error = %e, "prune remove failed");
+                    report.errors += 1;
+                }
+            }
         }
     }
 }
@@ -172,139 +364,18 @@ fn review_readme_body(db_path_hint: &str) -> String {
         "PhotoPipe Review Tree\n\
 =====================\n\
 \n\
-This directory was generated by photopipe.\n\
-DO NOT delete files in your photo library; this tree only contains links.\n\
-\n\
-The catalog at {db} is the source of truth.\n",
+This directory was generated by photopipe and contains COPIES of flagged photos.\n\
+Your originals are untouched; the catalog at {db} is the source of truth.\n\
+This tree is safe to delete and can be rebuilt.\n",
         db = db_path_hint,
     )
 }
 
-/// Materialize `planned` links under `output_root`, deduping basenames per
-/// directory and (when not regenerating) pruning managed symlinks no longer
-/// expected. Writes `readme_body` to `README.txt` at the root. This is the
-/// shared core used by both the review tree and the keepers tree.
-pub(crate) fn materialize_links(
-    output_root: &Path,
-    planned: &[PlannedLink],
-    link_type: LinkType,
-    regenerate: bool,
-    readme_body: &str,
-) -> anyhow::Result<MaterializeReport> {
-    use std::collections::{HashMap, HashSet};
-
-    let mut report = MaterializeReport::default();
-
-    if regenerate {
-        remove_managed_tree(output_root)?;
-        tracing::info!(root = %output_root.display(), "regenerate: removed existing tree");
-    }
-    std::fs::create_dir_all(output_root)
-        .map_err(|e| anyhow::anyhow!("create output root {}: {e}", output_root.display()))?;
-
-    let mut expected: HashSet<PathBuf> = HashSet::new();
-    let mut taken_per_dir: HashMap<PathBuf, HashSet<String>> = HashMap::new();
-
-    for link in planned {
-        let abs_dir = output_root.join(&link.rel_dir);
-        if let Err(e) = std::fs::create_dir_all(&abs_dir) {
-            tracing::warn!(dir = %abs_dir.display(), error = %e, "create dir failed");
-            report.errors += 1;
-            continue;
-        }
-        let basename = link
-            .original
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unnamed")
-            .to_string();
-        let taken = taken_per_dir.entry(abs_dir.clone()).or_default();
-        let name = dedupe_name(taken, &basename);
-        let link_path = abs_dir.join(&name);
-
-        match create_link(&link_path, &link.original, link_type) {
-            Ok(true) => report.created += 1,
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(link = %link_path.display(), error = %e, "create link failed");
-                report.errors += 1;
-                continue;
-            }
-        }
-        expected.insert(link_path);
-    }
-
-    if !regenerate {
-        // prune_stale_links counts removals into a ReviewTreeReport; adapt by
-        // using a local ReviewTreeReport and copying the removed count out.
-        let mut tmp = ReviewTreeReport::default();
-        prune_stale_links(output_root, &expected, &mut tmp)?;
-        report.removed = tmp.links_removed;
-    }
-
-    std::fs::write(output_root.join(README_NAME), readme_body)
-        .map_err(|e| anyhow::anyhow!("write README.txt: {e}"))?;
-
-    Ok(report)
-}
-
-/// Recursively delete a tree the tool manages. Refuses (errors, deletes
-/// nothing) if it encounters any regular file that is NOT a managed
-/// `README.txt` at the root — protecting against pointing the output at a
-/// real directory. Symlinks and directories are removed.
-fn remove_managed_tree(output_root: &Path) -> anyhow::Result<()> {
-    if !output_root.exists() {
-        return Ok(());
-    }
-    // First pass: verify there are no foreign regular files anywhere.
-    check_no_foreign_files(output_root, output_root)?;
-    // Safe to delete the whole subtree.
-    std::fs::remove_dir_all(output_root)
-        .map_err(|e| anyhow::anyhow!("remove tree {}: {e}", output_root.display()))
-}
-
-/// Walk `dir`; error if any entry is a regular (non-symlink) file other than
-/// the root-level README.txt.
-fn check_no_foreign_files(root: &Path, dir: &Path) -> anyhow::Result<()> {
-    for entry in
-        std::fs::read_dir(dir).map_err(|e| anyhow::anyhow!("read_dir {}: {e}", dir.display()))?
-    {
-        let entry = entry.map_err(|e| anyhow::anyhow!("dir entry: {e}"))?;
-        let path = entry.path();
-        // symlink_metadata does NOT follow symlinks.
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| anyhow::anyhow!("stat {}: {e}", path.display()))?;
-        let ft = meta.file_type();
-        if ft.is_symlink() {
-            continue; // managed link
-        }
-        if ft.is_dir() {
-            check_no_foreign_files(root, &path)?;
-            continue;
-        }
-        // Regular file: only a root-level README.txt is allowed.
-        let is_root_readme = path.parent() == Some(root)
-            && path.file_name().and_then(|n| n.to_str()) == Some(README_NAME);
-        if !is_root_readme {
-            anyhow::bail!(
-                "refusing to delete {}: contains a non-symlink regular file not created by photopipe",
-                root.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Build (or incrementally update) the review tree at `output_root`.
-///
-/// `regenerate = true` deletes the managed tree first, then rebuilds.
-/// `regenerate = false` ensures every expected link exists and prunes any
-/// managed symlink whose target is no longer expected (incremental).
-/// Non-destructive: only links/dirs inside `output_root` are ever touched.
+/// Build (or incrementally update) the review tree at `output_root` by copying
+/// flagged photos. Non-destructive: originals are only read.
 pub fn build_review_tree(
     catalog: &crate::catalog::Catalog,
     output_root: &Path,
-    cfg: &OutputConfig,
     include: &[String],
     regenerate: bool,
 ) -> anyhow::Result<ReviewTreeReport> {
@@ -318,17 +389,21 @@ pub fn build_review_tree(
         .count() as u64;
 
     let readme = review_readme_body("the photopipe catalog");
-    let core = materialize_links(output_root, &planned, cfg.link_type, regenerate, &readme)?;
+    let core = materialize_copies(output_root, &planned, regenerate, &readme)?;
 
     let report = ReviewTreeReport {
-        links_created: core.created,
-        links_removed: core.removed,
+        files_copied: core.copied,
+        files_skipped: core.skipped,
+        files_removed: core.removed,
+        bytes_copied: core.bytes,
         groups: group_count,
         errors: core.errors,
     };
     tracing::info!(
-        created = report.links_created,
-        removed = report.links_removed,
+        copied = report.files_copied,
+        skipped = report.files_skipped,
+        removed = report.files_removed,
+        bytes = report.bytes_copied,
         groups = report.groups,
         errors = report.errors,
         "review tree built"
@@ -336,103 +411,97 @@ pub fn build_review_tree(
     Ok(report)
 }
 
+/// Estimate the copy a `build_review_tree` would perform.
+pub fn estimate_review_copy(
+    catalog: &crate::catalog::Catalog,
+    output_root: &Path,
+    include: &[String],
+) -> anyhow::Result<CopyEstimate> {
+    let entries = catalog.review_entries()?;
+    let groups = catalog.duplicate_groups_for_review()?;
+    let planned = plan_links(&entries, &groups, include);
+    Ok(estimate_copy(output_root, &planned))
+}
+
 /// Summary of a keepers-tree build.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct KeepersReport {
-    pub links_created: u64,
-    pub links_removed: u64,
+    pub files_copied: u64,
+    pub files_skipped: u64,
+    pub files_removed: u64,
+    pub bytes_copied: u64,
     pub errors: u64,
 }
 
-/// Build (or incrementally update) the keepers export tree at `output_root`:
-/// `keepers/<YYYY-MM>/<original-name>` links to every file the user kept.
-pub fn build_keepers_tree(
-    catalog: &crate::catalog::Catalog,
-    output_root: &Path,
-    cfg: &OutputConfig,
-    regenerate: bool,
-) -> anyhow::Result<KeepersReport> {
-    let kept = catalog.keeper_files()?;
-    let planned: Vec<PlannedLink> = kept
+/// Plan the keepers copy set (kept files → `<YYYY-MM>/<name>`).
+fn keepers_plan(catalog: &crate::catalog::Catalog) -> anyhow::Result<Vec<PlannedLink>> {
+    Ok(catalog
+        .keeper_files()?
         .into_iter()
         .map(|k| PlannedLink {
             rel_dir: PathBuf::from(&k.year_month),
             original: k.path,
         })
-        .collect();
+        .collect())
+}
 
-    let readme = "PhotoPipe Keepers Export\n\
+const KEEPERS_README: &str = "PhotoPipe Keepers Export\n\
 ========================\n\
 \n\
-Links to the photos you kept in the review UI, organized by capture month.\n\
-This tree is regenerated from the catalog and is safe to delete.\n";
+COPIES of the photos you kept in the review UI, organized by capture month.\n\
+Your originals are untouched. This tree is regenerated from the catalog and\n\
+is safe to delete.\n";
 
-    let core = materialize_links(output_root, &planned, cfg.link_type, regenerate, readme)?;
+/// Build (or incrementally update) the keepers export tree at `output_root` by
+/// copying kept photos. Non-destructive: originals are only read.
+pub fn build_keepers_tree(
+    catalog: &crate::catalog::Catalog,
+    output_root: &Path,
+    regenerate: bool,
+) -> anyhow::Result<KeepersReport> {
+    let planned = keepers_plan(catalog)?;
+    let core = materialize_copies(output_root, &planned, regenerate, KEEPERS_README)?;
     let report = KeepersReport {
-        links_created: core.created,
-        links_removed: core.removed,
+        files_copied: core.copied,
+        files_skipped: core.skipped,
+        files_removed: core.removed,
+        bytes_copied: core.bytes,
         errors: core.errors,
     };
     tracing::info!(
-        created = report.links_created,
-        removed = report.links_removed,
+        copied = report.files_copied,
+        skipped = report.files_skipped,
+        removed = report.files_removed,
+        bytes = report.bytes_copied,
         errors = report.errors,
         "keepers tree built"
     );
     Ok(report)
 }
 
-/// Walk the tree; remove any symlink whose absolute path is not in `expected`.
-/// Then remove now-empty directories. Never removes regular files.
-fn prune_stale_links(
+/// Estimate the copy a `build_keepers_tree` would perform.
+pub fn estimate_keepers_copy(
+    catalog: &crate::catalog::Catalog,
     output_root: &Path,
-    expected: &std::collections::HashSet<PathBuf>,
-    report: &mut ReviewTreeReport,
-) -> anyhow::Result<()> {
-    prune_dir(output_root, output_root, expected, report)
+) -> anyhow::Result<CopyEstimate> {
+    let planned = keepers_plan(catalog)?;
+    Ok(estimate_copy(output_root, &planned))
 }
 
-fn prune_dir(
-    _root: &Path,
-    dir: &Path,
-    expected: &std::collections::HashSet<PathBuf>,
-    report: &mut ReviewTreeReport,
-) -> anyhow::Result<()> {
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(dir = %dir.display(), error = %e, "prune read_dir failed");
-            report.errors += 1;
-            return Ok(());
-        }
-    };
-    for entry in read {
-        let entry = entry.map_err(|e| anyhow::anyhow!("dir entry: {e}"))?;
-        let path = entry.path();
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| anyhow::anyhow!("stat {}: {e}", path.display()))?;
-        let ft = meta.file_type();
-        if ft.is_symlink() {
-            if !expected.contains(&path) {
-                if let Err(e) = std::fs::remove_file(&path) {
-                    tracing::warn!(link = %path.display(), error = %e, "prune remove failed");
-                    report.errors += 1;
-                } else {
-                    report.links_removed += 1;
-                }
-            }
-        } else if ft.is_dir() {
-            prune_dir(_root, &path, expected, report)?;
-            // Remove the directory if it is now empty.
-            if let Ok(mut it) = std::fs::read_dir(&path) {
-                if it.next().is_none() {
-                    let _ = std::fs::remove_dir(&path);
-                }
-            }
-        }
-        // Regular files (e.g. root README.txt) are left untouched here.
+/// Format a byte count as a short human-readable string (e.g. `9.7 GB`).
+pub fn humanize_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
     }
-    Ok(())
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 /// Return a collision-free link name for `basename` within a folder.
@@ -466,35 +535,52 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn remove_managed_tree_refuses_foreign_regular_file() {
+    fn remove_managed_tree_refuses_unmarked_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("_review");
-        std::fs::create_dir_all(root.join("rejected/blur/2023-06")).unwrap();
-        // A foreign regular file the tool did not create.
-        std::fs::write(root.join("rejected/blur/2023-06/notes.txt"), b"hi").unwrap();
-
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/photo.jpg"), b"real").unwrap();
+        // No .photopipe-tree marker -> refuse.
         let err = remove_managed_tree(&root).unwrap_err();
-        assert!(
-            err.to_string().contains("non-symlink regular file"),
-            "unexpected error: {err}"
-        );
-        // The foreign file must still exist.
-        assert!(root.join("rejected/blur/2023-06/notes.txt").exists());
+        assert!(err.to_string().contains("not a photopipe tree"), "unexpected: {err}");
+        assert!(root.join("sub/photo.jpg").exists());
     }
 
     #[test]
-    fn remove_managed_tree_deletes_symlinks_and_dirs() {
+    fn remove_managed_tree_removes_marked_tree() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("_review");
-        let target = dir.path().join("orig.jpg");
-        std::fs::write(&target, b"jpeg").unwrap();
-        std::fs::create_dir_all(root.join("rejected/blur/2023-06")).unwrap();
-        std::os::unix::fs::symlink(&target, root.join("rejected/blur/2023-06/orig.jpg")).unwrap();
-        std::fs::write(root.join("README.txt"), b"readme").unwrap();
-
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/copy.jpg"), b"copy").unwrap();
+        std::fs::write(root.join(TREE_MARKER), b"x").unwrap();
         remove_managed_tree(&root).unwrap();
-        assert!(!root.exists(), "tree root should be gone");
-        assert!(target.exists(), "original must be untouched");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn copy_file_copies_then_skips() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src.bin");
+        std::fs::write(&src, b"hello world").unwrap();
+        let dest = dir.path().join("out/dest.bin");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        match copy_file(&dest, &src).unwrap() {
+            CopyOutcome::Copied(n) => assert_eq!(n, 11),
+            CopyOutcome::Skipped => panic!("first copy should write"),
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello world");
+        // Second call: destination current -> skip.
+        assert!(matches!(copy_file(&dest, &src).unwrap(), CopyOutcome::Skipped));
+    }
+
+    #[test]
+    fn humanize_bytes_formats() {
+        assert_eq!(humanize_bytes(0), "0 B");
+        assert_eq!(humanize_bytes(512), "512 B");
+        assert_eq!(humanize_bytes(1024), "1.0 KB");
+        assert_eq!(humanize_bytes(1536), "1.5 KB");
+        assert_eq!(humanize_bytes(5 * 1024 * 1024), "5.0 MB");
     }
 
     #[test]

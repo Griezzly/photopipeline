@@ -6,7 +6,6 @@ use image::{ImageBuffer, Rgb};
 use pipeline::{
     build_review_tree,
     catalog::{Catalog, DuplicateMember},
-    config::{KeeperStrategy, LinkType, OutputConfig},
     defect::DefectFlag,
     ingest::{ExifData, FileFormat, IngestedFile},
 };
@@ -17,14 +16,6 @@ use tempfile::TempDir;
 fn make_synthetic_jpg(path: &Path, r: u8, g: u8, b: u8) {
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(32, 32, |_, _| Rgb([r, g, b]));
     img.save(path).expect("save test jpg");
-}
-
-fn out_cfg(link_type: LinkType) -> OutputConfig {
-    OutputConfig {
-        review_tree: "<library>/_review".into(),
-        link_type,
-        keeper_strategy: KeeperStrategy::Iqa,
-    }
 }
 
 /// Insert a file with a synthetic JPEG on disk; return its file_id.
@@ -137,24 +128,19 @@ fn rejected_and_uncertain_and_duplicates_are_built() {
 
     let out = lib.path().join("_review");
     let report =
-        build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
+        build_review_tree(&catalog, &out, &[], false).unwrap();
     assert!(
-        report.links_created >= 4,
-        "created {}",
-        report.links_created
+        report.files_copied >= 4,
+        "copied {}",
+        report.files_copied
     );
     assert_eq!(report.groups, 1);
 
-    // rejected/blur/2023-06/blur.jpg is a symlink resolving to the original.
+    // rejected/blur/2023-06/blur.jpg is a COPY of the original (byte-identical).
     let blur_link = out.join("rejected/blur/2023-06/blur.jpg");
-    assert!(fs::symlink_metadata(&blur_link)
-        .unwrap()
-        .file_type()
-        .is_symlink());
-    assert_eq!(
-        fs::canonicalize(&blur_link).unwrap(),
-        fs::canonicalize(&blur_path).unwrap()
-    );
+    assert!(blur_link.is_file());
+    assert!(!std::fs::symlink_metadata(&blur_link).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&blur_link).unwrap(), std::fs::read(&blur_path).unwrap());
 
     // low_iqa -> low_quality.
     assert!(out.join("rejected/low_quality/2023-06/lowq.jpg").exists());
@@ -164,10 +150,10 @@ fn rejected_and_uncertain_and_duplicates_are_built() {
 
     // duplicates keeper + others.
     let kdir = out.join(&group_dir).join("_keeper");
-    assert!(kdir.join("keeper.jpg").exists());
+    assert!(kdir.join("keeper.jpg").is_file());
     assert_eq!(
-        fs::canonicalize(kdir.join("keeper.jpg")).unwrap(),
-        fs::canonicalize(&keeper_path).unwrap()
+        std::fs::read(kdir.join("keeper.jpg")).unwrap(),
+        std::fs::read(&keeper_path).unwrap()
     );
     assert!(out.join(&group_dir).join("_others/other.jpg").exists());
 
@@ -195,17 +181,16 @@ fn non_destructive_originals_unchanged() {
 
     let before = count_originals(lib.path());
     let out = lib.path().join("_review");
-    build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
+    build_review_tree(&catalog, &out, &[], false).unwrap();
     // _review is a subdir of lib; count only the top-level .jpg originals (none moved).
     assert_eq!(count_originals(lib.path()), before);
 
-    // Delete a symlink -> original survives.
-    let link = out.join("rejected/blur/2023-06/a.jpg");
-    fs::remove_file(&link).unwrap();
-    assert!(
-        orig.exists(),
-        "deleting a symlink must not delete the original"
-    );
+    // Deleting a copy in the tree leaves the original intact.
+    let copy_in_tree = out.join("rejected/blur/2023-06/a.jpg");
+    assert!(copy_in_tree.is_file());
+    std::fs::remove_file(&copy_in_tree).unwrap();
+    assert!(orig.exists(), "deleting a copy must not delete the original");
+    assert!(!std::fs::read(&orig).unwrap().is_empty());
 }
 
 #[test]
@@ -234,17 +219,17 @@ fn regenerate_rebuilds_after_manual_deletion() {
             .unwrap();
     }
     let out = lib.path().join("_review");
-    let r1 = build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
-    assert_eq!(r1.links_created, 4);
+    let r1 = build_review_tree(&catalog, &out, &[], false).unwrap();
+    assert_eq!(r1.files_copied, 4);
 
     // Delete half the links by removing the whole month dir.
     fs::remove_dir_all(out.join("rejected/blur/2023-06")).unwrap();
 
     // --regenerate rebuilds all.
-    let r2 = build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], true).unwrap();
+    let r2 = build_review_tree(&catalog, &out, &[], true).unwrap();
     assert_eq!(
-        r2.links_created, 4,
-        "regenerate should recreate all 4 links"
+        r2.files_copied, 4,
+        "regenerate should recreate all 4 files"
     );
     let n = fs::read_dir(out.join("rejected/blur/2023-06"))
         .unwrap()
@@ -270,15 +255,15 @@ fn incremental_prunes_stale_links() {
         )
         .unwrap();
     let out = lib.path().join("_review");
-    build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
+    build_review_tree(&catalog, &out, &[], false).unwrap();
 
-    // Plant a stale symlink the planner would never produce.
+    // Plant a stale COPY the planner would never produce.
     let stale_dir = out.join("rejected/blur/2099-01");
     fs::create_dir_all(&stale_dir).unwrap();
-    std::os::unix::fs::symlink(lib.path().join("a.jpg"), stale_dir.join("ghost.jpg")).unwrap();
+    fs::write(stale_dir.join("ghost.jpg"), b"stale").unwrap();
 
-    let r = build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
-    assert_eq!(r.links_removed, 1, "stale link should be pruned");
+    let r = build_review_tree(&catalog, &out, &[], false).unwrap();
+    assert_eq!(r.files_removed, 1, "stale copy should be pruned");
     assert!(!stale_dir.join("ghost.jpg").exists());
 }
 
@@ -341,7 +326,7 @@ fn basename_collisions_get_distinct_links() {
     }
 
     let out = lib.path().join("_review");
-    build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
+    build_review_tree(&catalog, &out, &[], false).unwrap();
 
     let dir = out.join("rejected/blur/2023-06");
     let names: HashSet<String> = fs::read_dir(&dir)
@@ -377,7 +362,6 @@ fn include_filter_limits_categories() {
     build_review_tree(
         &catalog,
         &out,
-        &out_cfg(LinkType::Symlink),
         &["duplicates".to_string()],
         false,
     )
@@ -412,6 +396,6 @@ fn unknown_date_file_goes_to_unknown_date_folder() {
         )
         .unwrap();
     let out = lib.path().join("_review");
-    build_review_tree(&catalog, &out, &out_cfg(LinkType::Symlink), &[], false).unwrap();
+    build_review_tree(&catalog, &out, &[], false).unwrap();
     assert!(out.join("rejected/blur/unknown-date/nodate.jpg").exists());
 }

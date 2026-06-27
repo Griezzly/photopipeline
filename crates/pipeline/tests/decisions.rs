@@ -121,15 +121,6 @@ fn decision_counts_partition_total() {
 
 use image::{ImageBuffer, Rgb};
 use pipeline::build_keepers_tree;
-use pipeline::config::{KeeperStrategy, LinkType, OutputConfig};
-
-fn out_cfg() -> OutputConfig {
-    OutputConfig {
-        review_tree: "<library>/_review".into(),
-        link_type: LinkType::Symlink,
-        keeper_strategy: KeeperStrategy::Iqa,
-    }
-}
 
 #[test]
 fn keepers_tree_links_only_kept_files() {
@@ -138,7 +129,7 @@ fn keepers_tree_links_only_kept_files() {
     std::fs::create_dir_all(&lib).unwrap();
     let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
 
-    // Two real on-disk files so symlinks can canonicalize their targets.
+    // Two real on-disk files so copies have a source to read.
     let mut ids = Vec::new();
     for (name, hash) in [("keep.jpg", 1u128), ("drop.jpg", 2u128)] {
         let p = lib.join(name);
@@ -162,10 +153,10 @@ fn keepers_tree_links_only_kept_files() {
     catalog.set_decision(ids[1], Verdict::Reject, None).unwrap();
 
     let out = dir.path().join("_keepers");
-    let report = build_keepers_tree(&catalog, &out, &out_cfg(), false).unwrap();
-    assert_eq!(report.links_created, 1);
+    let report = build_keepers_tree(&catalog, &out, false).unwrap();
+    assert_eq!(report.files_copied, 1);
 
-    // exactly one symlink exists, named keep.jpg, under a YYYY-MM subdir
+    // exactly one file exists, named keep.jpg, under a YYYY-MM subdir
     let mut found = Vec::new();
     for month in std::fs::read_dir(&out).unwrap() {
         let month = month.unwrap().path();
@@ -177,9 +168,9 @@ fn keepers_tree_links_only_kept_files() {
     }
     assert_eq!(found, vec!["keep.jpg".to_string()]);
 
-    // idempotent: second run creates nothing new
-    let report2 = build_keepers_tree(&catalog, &out, &out_cfg(), false).unwrap();
-    assert_eq!(report2.links_created, 0);
+    // idempotent: second run copies nothing new
+    let report2 = build_keepers_tree(&catalog, &out, false).unwrap();
+    assert_eq!(report2.files_copied, 0);
 }
 
 use pipeline::defect::DefectFlag;
