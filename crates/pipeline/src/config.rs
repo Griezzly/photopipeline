@@ -20,8 +20,6 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CatalogConfig {
-    pub db_path: PathBuf,
-    pub cache_dir: PathBuf,
     pub write_batch_size: usize,
     pub enable_vss: bool,
 }
@@ -29,8 +27,6 @@ pub struct CatalogConfig {
 impl Default for CatalogConfig {
     fn default() -> Self {
         Self {
-            db_path: data_root().join("photopipe/catalog.duckdb"),
-            cache_dir: cache_root().join("photopipe"),
             write_batch_size: 64,
             enable_vss: false,
         }
@@ -259,18 +255,6 @@ fn config_root() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Per-OS data dir (Linux `~/.local/share`, macOS `~/Library/Application Support`,
-/// Windows `%APPDATA%`).
-fn data_root() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Per-OS cache dir (Linux `~/.cache`, macOS `~/Library/Caches`,
-/// Windows `%LOCALAPPDATA%`).
-fn cache_root() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."))
-}
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -278,30 +262,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_paths_are_absolute_and_namespaced() {
-        let cfg = Config::default();
-        assert!(
-            cfg.catalog.db_path.is_absolute(),
-            "db_path: {:?}",
-            cfg.catalog.db_path
-        );
-        assert!(
-            cfg.catalog.cache_dir.is_absolute(),
-            "cache_dir: {:?}",
-            cfg.catalog.cache_dir
-        );
-        assert!(cfg.catalog.db_path.to_string_lossy().contains("photopipe"));
-        assert!(cfg
-            .catalog
-            .cache_dir
-            .to_string_lossy()
-            .contains("photopipe"));
-        assert!(default_config_path()
-            .to_string_lossy()
-            .contains("photopipe"));
-        assert!(default_config_path()
-            .to_string_lossy()
-            .ends_with("photopipe.toml"));
+    fn legacy_catalog_paths_are_ignored() {
+        // Old configs carried db_path/cache_dir — they must parse without error.
+        let toml_str = r#"
+            [catalog]
+            db_path = "/old/catalog.duckdb"
+            cache_dir = "/old/cache"
+            write_batch_size = 32
+        "#;
+        let cfg: Config = toml::from_str(toml_str).expect("legacy keys should be ignored");
+        assert_eq!(cfg.catalog.write_batch_size, 32);
     }
 
     #[test]

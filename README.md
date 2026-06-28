@@ -61,16 +61,16 @@ photopipe doctor
 photopipe scan ~/Photos/2024
 
 # (optional) per-lens blur calibration once enough frames are scanned
-photopipe calibrate
+photopipe calibrate ~/Photos/2024
 
 # group near-duplicates
-photopipe dedupe
+photopipe dedupe ~/Photos/2024
 
 # review in the browser
-photopipe serve --port 8787      # open http://127.0.0.1:8787/
+photopipe serve ~/Photos/2024 --port 8787      # open http://127.0.0.1:8787/
 
 # export what you kept
-photopipe export-keepers ~/Photos/_keepers
+photopipe export-keepers ~/Photos/2024 ~/Photos/_keepers
 ```
 
 You can run `scan` without the ML models for a quick pass (classical defect
@@ -122,14 +122,18 @@ cargo build --release
 
 **Default data locations on Windows:**
 
-| Purpose | Default path |
+Each analyzed folder gets its own per-folder library stored in OS app-data
+(keyed by the folder path). `photopipe libraries` lists all known libraries.
+
+| Purpose | Default root |
 |---------|-------------|
-| Catalog (DuckDB) | `%APPDATA%\photopipe\catalog.duckdb` |
+| Catalog (DuckDB) | `%APPDATA%\photopipe\` |
 | Preview cache | `%LOCALAPPDATA%\photopipe\` |
 
-Override either in `photopipe.toml` (copy from `photopipe.example.toml`); the
-file lives at `%APPDATA%\photopipe\photopipe.toml` by default. Pass
-`--config <path>` to any command to override.
+Catalog paths are not configurable — each folder library is managed
+automatically. The config file lives at
+`%APPDATA%\photopipe\photopipe.toml` by default. Pass `--config <path>`
+to any command to override.
 
 **Reviewing on Windows:** run `photopipe serve` and open
 `http://127.0.0.1:8787/` in your browser. The review and keepers trees
@@ -231,7 +235,7 @@ Pass a different file with `--config <path>` on any command. See
 ### Web UI (recommended)
 
 ```bash
-photopipe serve --port 8787      # then open http://127.0.0.1:8787/
+photopipe serve ~/Photos/2024 --port 8787      # then open http://127.0.0.1:8787/
 ```
 
 The grid shows every photo **flagged-first** (defects and duplicates before clean
@@ -256,7 +260,7 @@ The footer shows live keep / reject / undecided counts. The server binds
 ### Review tree (file-manager browsing)
 
 ```bash
-photopipe review-tree ~/Photos/_review --include rejected,duplicates,uncertain
+photopipe review-tree ~/Photos/2024 ~/Photos/_review --include rejected,duplicates,uncertain
 ```
 
 Builds `rejected/<reason>/`, `uncertain/`, and `duplicates/group_NNNNN/` folders of
@@ -272,7 +276,7 @@ After reviewing, export the kept set — via the **Export keepers** button in th
 or the CLI:
 
 ```bash
-photopipe export-keepers ~/Photos/_keepers
+photopipe export-keepers ~/Photos/2024 ~/Photos/_keepers
 ```
 
 This builds a `<output>/YYYY-MM/` tree of **copies** of everything with a **keep**
@@ -288,7 +292,7 @@ web UI shows the estimate and asks you to confirm before copying.
 ```bash
 # Summary: file/flag counts, duplicate groups, per-camera & per-lens breakdown,
 # and catalog/cache disk usage.
-photopipe stats
+photopipe stats ~/Photos/2024
 
 # Everything the catalog knows about one file, as JSON.
 photopipe info ~/Photos/2024/DSC01234.arw
@@ -300,18 +304,34 @@ photopipe doctor
 
 ---
 
+## Libraries
+
+Each analyzed folder gets its own per-folder library stored in OS app-data
+(catalog in the data dir, previews in the cache dir), keyed by the folder
+path. Nothing is written into the photo folder itself.
+
+```bash
+photopipe libraries           # list all known libraries (folder, photo count, last analyzed)
+```
+
+Pre-existing single catalogs from older builds (e.g. `…/photopipe/catalog.duckdb`)
+are no longer used and can be deleted.
+
+---
+
 ## Command reference
 
 | Command | Purpose |
 |---------|---------|
 | `scan <PATH>...` | Ingest + analyse library roots. `--no-models`, `--reprocess`. |
-| `calibrate` | Rebuild per-lens sharpness baselines from the catalog. |
-| `dedupe` | Rebuild duplicate groups from current embeddings. |
-| `serve` | Launch the local review web UI. `--port` (default 8787). |
-| `review-tree <OUTPUT>` | Generate/update the review tree (copies). `--include`, `--regenerate`. |
-| `export-keepers <OUTPUT>` | Materialize the keepers export tree (copies). `--regenerate`. |
-| `info <FILE>` | Print all catalog data for one file as JSON. |
-| `stats` | Print catalog summary statistics. |
+| `calibrate <folder>` | Rebuild per-lens sharpness baselines for a folder's library. |
+| `dedupe <folder>` | Rebuild duplicate groups from current embeddings. |
+| `serve <folder>` | Launch the local review web UI. `--port` (default 8787). |
+| `review-tree <folder> <output>` | Generate/update the review tree (copies). `--include`, `--regenerate`. |
+| `export-keepers <folder> <output>` | Materialize the keepers export tree (copies). `--regenerate`. |
+| `info <FILE>` | Print all catalog data for one file as JSON (walks up to find the library). |
+| `stats <folder>` | Print catalog summary statistics for a folder's library. |
+| `libraries` | List all analyzed libraries (folder, photo count, last analyzed). |
 | `doctor` | Diagnose config, models, DB, and system health. |
 
 All commands accept `--config <path>`, `--log-level <level>`, and

@@ -2,8 +2,9 @@
 # All values shown are the compiled-in defaults; omitting any key uses the default.
 
 [catalog]
-db_path          = "~/.local/share/photopipe/catalog.duckdb"   # $XDG_DATA_HOME/photopipe/catalog.duckdb
-cache_dir        = "~/.cache/photopipe"                          # $XDG_CACHE_HOME/photopipe
+# Catalogs are per-folder libraries stored in OS app-data (data dir for the
+# catalog, cache dir for previews) — keyed by the analyzed folder's path.
+# There is no configurable catalog path.
 write_batch_size = 64
 enable_vss       = false   # DuckDB vss (HNSW) extension — experimental
 
@@ -49,6 +50,5 @@ min_group_size                 = 2
 review_tree    = "<library>/_review" # <library> is substituted with the scan root
 keeper_strategy = "iqa"              # "iqa" | "sharpness" | "iqa_then_sharpness"
 
-# photopipe serve reads catalog.db_path (above) and catalog.cache_dir for the
-# review web UI. The server port and the export output directory are passed as
-# CLI arguments (--port, and the <OUTPUT> positional) and are not config keys.
+# photopipe serve <folder> reads the per-folder library. The server port is
+# passed as --port (CLI argument) and is not a config key.
