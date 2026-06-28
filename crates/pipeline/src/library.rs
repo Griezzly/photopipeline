@@ -22,8 +22,12 @@ pub struct LibraryRoots {
 impl LibraryRoots {
     /// OS-appropriate roots: data dir + cache dir, each under `photopipe/`.
     pub fn from_dirs() -> Result<Self> {
-        let data = dirs::data_dir().context("cannot determine OS data dir")?.join("photopipe");
-        let cache = dirs::cache_dir().context("cannot determine OS cache dir")?.join("photopipe");
+        let data = dirs::data_dir()
+            .context("cannot determine OS data dir")?
+            .join("photopipe");
+        let cache = dirs::cache_dir()
+            .context("cannot determine OS cache dir")?
+            .join("photopipe");
         Ok(Self { data, cache })
     }
 
@@ -95,7 +99,11 @@ pub fn open_or_create_library(roots: &LibraryRoots, folder: &Path) -> Result<Lib
     catalog
         .set_library_meta(&folder_str, now_secs())
         .map_err(|e| anyhow::anyhow!("library_meta: {e}"))?;
-    Ok(Library { folder: folder.to_path_buf(), catalog, cache })
+    Ok(Library {
+        folder: folder.to_path_buf(),
+        catalog,
+        cache,
+    })
 }
 
 /// Open the library for `folder` only if it already exists.
@@ -107,7 +115,11 @@ pub fn open_existing_library(roots: &LibraryRoots, folder: &Path) -> Result<Opti
     }
     let catalog = Catalog::open(&catalog_path).map_err(|e| anyhow::anyhow!("catalog: {e}"))?;
     let cache = Cache::open(roots.cache_dir(&key)).context("cache")?;
-    Ok(Some(Library { folder: folder.to_path_buf(), catalog, cache }))
+    Ok(Some(Library {
+        folder: folder.to_path_buf(),
+        catalog,
+        cache,
+    }))
 }
 
 /// List all libraries by reading each catalog's `library_meta`.
@@ -159,7 +171,11 @@ pub fn list_libraries(roots: &LibraryRoots) -> Result<Vec<LibraryInfo>> {
 
 /// Find the nearest ancestor of `file` that has a library.
 pub fn find_library_for_file(roots: &LibraryRoots, file: &Path) -> Result<Option<PathBuf>> {
-    let mut cur = if file.is_dir() { Some(file) } else { file.parent() };
+    let mut cur = if file.is_dir() {
+        Some(file)
+    } else {
+        file.parent()
+    };
     while let Some(dir) = cur {
         if roots.catalog_path(&library_key(dir)).exists() {
             return Ok(Some(canonical_path(dir)));

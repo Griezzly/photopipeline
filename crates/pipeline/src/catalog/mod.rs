@@ -2391,8 +2391,11 @@ impl Catalog {
             .conn
             .lock()
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
-        conn.execute("UPDATE library_meta SET last_analyzed = ?", duckdb::params![ts])
-            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        conn.execute(
+            "UPDATE library_meta SET last_analyzed = ?",
+            duckdb::params![ts],
+        )
+        .map_err(|e| CatalogError::Db(e.to_string()))?;
         Ok(())
     }
 

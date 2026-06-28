@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn temp_roots(d: &TempDir) -> LibraryRoots {
-    LibraryRoots { data: d.path().join("data"), cache: d.path().join("cache") }
+    LibraryRoots {
+        data: d.path().join("data"),
+        cache: d.path().join("cache"),
+    }
 }
 
 #[test]
@@ -37,7 +40,10 @@ fn open_existing_is_none_until_created() {
     assert!(d.path().join("cache/libraries").exists());
     // Meta records the canonical folder path.
     let (fp, _, last) = lib.catalog.library_meta().unwrap().unwrap();
-    assert_eq!(fp, std::fs::canonicalize(&folder).unwrap().to_string_lossy());
+    assert_eq!(
+        fp,
+        std::fs::canonicalize(&folder).unwrap().to_string_lossy()
+    );
     assert_eq!(last, None);
     assert!(open_existing_library(&roots, &folder).unwrap().is_some());
 }
@@ -55,7 +61,9 @@ fn list_and_find() {
 
     let libs = list_libraries(&roots).unwrap();
     assert_eq!(libs.len(), 2);
-    assert!(libs.iter().any(|l| l.folder == std::fs::canonicalize(&a).unwrap()));
+    assert!(libs
+        .iter()
+        .any(|l| l.folder == std::fs::canonicalize(&a).unwrap()));
 
     // A file under `a` resolves to `a`; the deepest library wins.
     let f = a.join("sub/x.jpg");
