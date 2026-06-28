@@ -47,10 +47,8 @@ fn scan_then_stats_and_libraries() {
     assert!(scan.status.success(), "scan failed: {}", String::from_utf8_lossy(&scan.stderr));
 
     let stats = run_pp(&appdata, &cfg, &["stats", folder.to_str().unwrap()]);
-    // NOTE: `stats <folder>` is wired in Task 4; until then this asserts only
-    // that `scan` created a library (see libraries below). Re-enable the
-    // stats success assertion after Task 4.
-    let _ = stats;
+    assert!(stats.status.success(), "stats failed: {}", String::from_utf8_lossy(&stats.stderr));
+    assert!(String::from_utf8_lossy(&stats.stdout).contains("Total files"));
 
     let libs = run_pp(&appdata, &cfg, &["libraries"]);
     assert!(libs.status.success());
@@ -69,4 +67,32 @@ fn doctor_runs_without_a_catalog() {
     let out = run_pp(&appdata, &cfg, &["doctor"]);
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(!combined.to_lowercase().contains("db schema"), "doctor should not check a fixed catalog: {combined}");
+}
+
+#[test]
+fn read_only_commands_resolve_library() {
+    let t = tempfile::TempDir::new().unwrap();
+    let cfg = write_config(t.path());
+    let appdata = t.path().join("app");
+    let (folder, img) = photo_folder(t.path(), "trip");
+
+    run_pp(&appdata, &cfg, &["scan", "--no-models", folder.to_str().unwrap()]);
+
+    // stats <folder> succeeds and shows the one file.
+    let stats = run_pp(&appdata, &cfg, &["stats", folder.to_str().unwrap()]);
+    assert!(stats.status.success(), "stats failed: {}", String::from_utf8_lossy(&stats.stderr));
+    assert!(String::from_utf8_lossy(&stats.stdout).contains("Total files"));
+
+    // stats on an un-scanned folder errors non-zero.
+    let other = t.path().join("unscanned");
+    std::fs::create_dir_all(&other).unwrap();
+    let bad = run_pp(&appdata, &cfg, &["stats", other.to_str().unwrap()]);
+    assert!(!bad.status.success(), "stats on un-scanned folder should fail");
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("no library"), "expected 'no library' message");
+
+    // info <file> resolves the library by walking up to the folder.
+    let info = run_pp(&appdata, &cfg, &["info", img.to_str().unwrap()]);
+    assert!(info.status.success(), "info failed: {}", String::from_utf8_lossy(&info.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&info.stdout).expect("info JSON");
+    assert_eq!(v["file"]["path"], img.to_string_lossy().as_ref());
 }

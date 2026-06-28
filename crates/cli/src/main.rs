@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use photopipe::serve;
-use pipeline::catalog::Catalog;
 use pipeline::config;
 use pipeline::library::LibraryRoots;
 use pipeline::models::ModelHub;
@@ -121,25 +120,21 @@ enum Command {
     /// Run after a meaningful number of photos per lens have been scanned
     /// (~30+ per lens is the default sample threshold). Leaves over/underexposed
     /// flags untouched.
-    Calibrate,
+    Calibrate { folder: PathBuf },
 
     /// Rebuild duplicate groups using current embeddings.
     ///
     /// Compares DINOv2 embeddings across all scanned files using brute-force KNN
     /// (the DuckDB vss/HNSW backend is not yet implemented). Run after `scan` to
     /// assign duplicate-group IDs and elect one keeper per group.
-    Dedupe,
+    Dedupe { folder: PathBuf },
 
     /// Generate or update the review tree (copies flagged photos for browsing).
     ReviewTree {
-        /// Destination directory for the review tree.
+        folder: PathBuf,
         output: PathBuf,
-
-        /// Categories to include (e.g. rejected,duplicates,uncertain).
         #[arg(long, value_delimiter = ',')]
         include: Vec<String>,
-
-        /// Delete the tree and rebuild from scratch.
         #[arg(long)]
         regenerate: bool,
     },
@@ -147,8 +142,8 @@ enum Command {
     /// Print all catalog data for a single file as JSON.
     Info { file: PathBuf },
 
-    /// Print catalog summary statistics.
-    Stats,
+    /// Print catalog summary statistics for a folder's library.
+    Stats { folder: PathBuf },
 
     /// Check configuration, models, database, and system health.
     Doctor,
@@ -167,9 +162,8 @@ enum Command {
 
     /// Materialize a keepers export tree from recorded decisions.
     ExportKeepers {
-        /// Destination directory for the keepers tree.
+        folder: PathBuf,
         output: PathBuf,
-        /// Delete the tree and rebuild from scratch.
         #[arg(long)]
         regenerate: bool,
     },
@@ -191,15 +185,15 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Scan { paths, no_models, reprocess } => cmd_scan(paths, no_models, reprocess, &cfg, &roots),
-        Command::Calibrate => cmd_calibrate(&cfg),
-        Command::Dedupe => cmd_dedupe(&cfg),
-        Command::ReviewTree { output, include, regenerate } => cmd_review_tree(output, include, regenerate, &cfg),
-        Command::Info { file } => cmd_info(file, &cfg),
-        Command::Stats => cmd_stats(&cfg),
+        Command::Calibrate { folder } => cmd_calibrate(&folder, &cfg, &roots),
+        Command::Dedupe { folder } => cmd_dedupe(&folder, &cfg, &roots),
+        Command::ReviewTree { folder, output, include, regenerate } => cmd_review_tree(&folder, output, include, regenerate, &cfg, &roots),
+        Command::Info { file } => cmd_info(file, &cfg, &roots),
+        Command::Stats { folder } => cmd_stats(&folder, &cfg, &roots),
         Command::Doctor => cmd_doctor(&config_path, &cfg, &roots),
         Command::Libraries => cmd_libraries(&roots),
         Command::Serve { folder, port } => serve::run(&cfg, &folder, port),
-        Command::ExportKeepers { output, regenerate } => cmd_export_keepers(output, regenerate, &cfg),
+        Command::ExportKeepers { folder, output, regenerate } => cmd_export_keepers(&folder, output, regenerate, &cfg, &roots),
     }
 }
 
@@ -261,14 +255,25 @@ fn cmd_scan(
     Ok(())
 }
 
-fn cmd_calibrate(cfg: &config::Config) -> Result<()> {
-    use pipeline::catalog::Catalog;
+/// Open the library for `folder`, or bail with a clear message.
+fn require_library(
+    roots: &LibraryRoots,
+    folder: &std::path::Path,
+) -> Result<pipeline::library::Library> {
+    let folder = config::expand_tilde(folder);
+    match pipeline::library::open_existing_library(roots, &folder)? {
+        Some(lib) => Ok(lib),
+        None => anyhow::bail!(
+            "no library for {} — run 'photopipe scan {}' first",
+            folder.display(),
+            folder.display()
+        ),
+    }
+}
 
-    let catalog =
-        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
-
-    let report = pipeline::run_calibration(&catalog, &cfg.defect)?;
-
+fn cmd_calibrate(folder: &std::path::Path, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
+    let lib = require_library(roots, folder)?;
+    let report = pipeline::run_calibration(&lib.catalog, &cfg.defect)?;
     println!("Calibration complete:");
     println!("  Buckets built          : {}", report.buckets_built);
     println!("  Global sample count    : {}", report.global_n_samples);
@@ -276,29 +281,19 @@ fn cmd_calibrate(cfg: &config::Config) -> Result<()> {
     println!("  Flagged blur           : {}", report.flagged_blur);
     println!("  Flagged back-focus     : {}", report.flagged_back_focus);
     println!("  Flagged low-IQA        : {}", report.flagged_low_iqa);
-    println!(
-        "  Blur confidence bumped : {}",
-        report.blur_confidence_bumped
-    );
+    println!("  Blur confidence bumped : {}", report.blur_confidence_bumped);
     Ok(())
 }
 
-fn cmd_dedupe(cfg: &config::Config) -> Result<()> {
-    use pipeline::{catalog::Catalog, run_dedupe};
-
-    let db_path = &cfg.catalog.db_path;
-    let catalog = Catalog::open(db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
-
-    // Brute-force KNN only this phase; surface the vss omission rather than
-    // silently cap, when the user has opted into it via config.
+fn cmd_dedupe(folder: &std::path::Path, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
+    let lib = require_library(roots, folder)?;
     if cfg.catalog.enable_vss {
         tracing::warn!(
             "catalog.enable_vss = true, but the DuckDB vss/HNSW backend is not \
              implemented yet — falling back to brute-force KNN"
         );
     }
-
-    let report = run_dedupe(&catalog, &cfg.dedupe)?;
+    let report = pipeline::run_dedupe(&lib.catalog, &cfg.dedupe)?;
     println!("Dedupe complete:");
     println!("  Groups  : {}", report.groups);
     println!("  Members : {}", report.members);
@@ -307,38 +302,21 @@ fn cmd_dedupe(cfg: &config::Config) -> Result<()> {
 }
 
 fn cmd_review_tree(
+    folder: &std::path::Path,
     output: PathBuf,
     include: Vec<String>,
     regenerate: bool,
     cfg: &config::Config,
+    roots: &LibraryRoots,
 ) -> Result<()> {
-    use pipeline::{build_review_tree, catalog::Catalog};
-
+    let _ = cfg;
+    let lib = require_library(roots, folder)?;
     let output = config::expand_tilde(&output);
-
-    // The positional <OUTPUT> arg always wins as the destination root.
-    // cfg.output.review_tree (with its <library> token) is only a fallback
-    // default for callers/config; the CLI requires the arg directly.
-    let catalog =
-        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
-
-    let est = pipeline::estimate_review_copy(&catalog, &output, &include)?;
-    println!(
-        "Copying {} files ({}) → {} …",
-        est.files,
-        pipeline::humanize_bytes(est.bytes),
-        output.display()
-    );
-
-    tracing::info!(output = %output.display(), regenerate, "building review tree");
-    let report = build_review_tree(&catalog, &output, &include, regenerate)?;
-
+    let est = pipeline::estimate_review_copy(&lib.catalog, &output, &include)?;
+    println!("Copying {} files ({}) → {} …", est.files, pipeline::humanize_bytes(est.bytes), output.display());
+    let report = pipeline::build_review_tree(&lib.catalog, &output, &include, regenerate)?;
     println!("Review tree: {}", output.display());
-    println!(
-        "  Copied  : {} files ({})",
-        report.files_copied,
-        pipeline::humanize_bytes(report.bytes_copied)
-    );
+    println!("  Copied  : {} files ({})", report.files_copied, pipeline::humanize_bytes(report.bytes_copied));
     println!("  Skipped : {}", report.files_skipped);
     println!("  Removed : {}", report.files_removed);
     println!("  Groups  : {}", report.groups);
@@ -346,83 +324,66 @@ fn cmd_review_tree(
     Ok(())
 }
 
-fn cmd_export_keepers(output: PathBuf, regenerate: bool, cfg: &config::Config) -> Result<()> {
-    let catalog =
-        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
+fn cmd_export_keepers(
+    folder: &std::path::Path,
+    output: PathBuf,
+    regenerate: bool,
+    cfg: &config::Config,
+    roots: &LibraryRoots,
+) -> Result<()> {
+    let _ = cfg;
+    let lib = require_library(roots, folder)?;
     let out = config::expand_tilde(&output);
-    let est = pipeline::estimate_keepers_copy(&catalog, &out)?;
-    println!(
-        "Copying {} files ({}) → {} …",
-        est.files,
-        pipeline::humanize_bytes(est.bytes),
-        out.display()
-    );
-    let report = pipeline::build_keepers_tree(&catalog, &out, regenerate)?;
+    let est = pipeline::estimate_keepers_copy(&lib.catalog, &out)?;
+    println!("Copying {} files ({}) → {} …", est.files, pipeline::humanize_bytes(est.bytes), out.display());
+    let report = pipeline::build_keepers_tree(&lib.catalog, &out, regenerate)?;
     println!(
         "Copied {} files ({}), {} skipped, {} removed, {} errors → {}",
-        report.files_copied,
-        pipeline::humanize_bytes(report.bytes_copied),
-        report.files_skipped,
-        report.files_removed,
-        report.errors,
-        out.display()
+        report.files_copied, pipeline::humanize_bytes(report.bytes_copied),
+        report.files_skipped, report.files_removed, report.errors, out.display()
     );
     Ok(())
 }
 
-fn cmd_info(file: PathBuf, cfg: &config::Config) -> Result<()> {
-    let catalog =
-        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
-    match catalog
-        .dump_file(&file)
-        .map_err(|e| anyhow::anyhow!("info: {}", e))?
-    {
+fn cmd_info(file: PathBuf, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
+    let _ = cfg;
+    let file = config::expand_tilde(&file);
+    let folder = pipeline::library::find_library_for_file(roots, &file)?
+        .ok_or_else(|| anyhow::anyhow!("no analyzed library contains {} — run scan first", file.display()))?;
+    let lib = pipeline::library::open_existing_library(roots, &folder)?
+        .ok_or_else(|| anyhow::anyhow!("library for {} disappeared", folder.display()))?;
+    match lib.catalog.dump_file(&file).map_err(|e| anyhow::anyhow!("info: {}", e))? {
         Some(dump) => {
-            let json = serde_json::to_string_pretty(&dump)?;
-            println!("{json}");
+            println!("{}", serde_json::to_string_pretty(&dump)?);
             Ok(())
         }
-        None => {
-            anyhow::bail!("no catalog entry for {}", file.display());
-        }
+        None => anyhow::bail!("no catalog entry for {}", file.display()),
     }
 }
 
-fn cmd_stats(cfg: &config::Config) -> Result<()> {
-    let catalog =
-        Catalog::open(&cfg.catalog.db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
-
-    let s = catalog
-        .stats()
-        .map_err(|e| anyhow::anyhow!("stats: {}", e))?;
-    let flags = catalog
-        .flag_counts()
-        .map_err(|e| anyhow::anyhow!("flags: {}", e))?;
-    let cameras = catalog
-        .per_camera_counts()
-        .map_err(|e| anyhow::anyhow!("cameras: {}", e))?;
-    let lenses = catalog
-        .per_lens_counts()
-        .map_err(|e| anyhow::anyhow!("lenses: {}", e))?;
-
-    let db_size = file_size(&cfg.catalog.db_path);
-    let cache_size = dir_size(&cfg.catalog.cache_dir);
-
-    println!("PhotoPipe Stats");
+fn cmd_stats(folder: &std::path::Path, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
+    let _ = cfg;
+    let lib = require_library(roots, folder)?;
+    let catalog = &lib.catalog;
+    let s = catalog.stats().map_err(|e| anyhow::anyhow!("stats: {}", e))?;
+    let flags = catalog.flag_counts().map_err(|e| anyhow::anyhow!("flags: {}", e))?;
+    let cameras = catalog.per_camera_counts().map_err(|e| anyhow::anyhow!("cameras: {}", e))?;
+    let lenses = catalog.per_lens_counts().map_err(|e| anyhow::anyhow!("lenses: {}", e))?;
+    println!("PhotoPipe Stats — {}", lib.folder.display());
     println!("===============");
     println!("Total files          : {}", s.total_files);
-    println!("Embeddings           : {}", s.embedding_count);
-    println!("IQA scores           : {}", s.iqa_count);
     println!("Duplicate groups     : {}", s.duplicate_group_count);
     println!("Files in groups      : {}", s.grouped_file_count);
+    println!("Embeddings           : {}", s.embedding_count);
+    println!("IQA scores           : {}", s.iqa_count);
     println!();
     println!("Defect flags");
     println!("------------");
     if flags.is_empty() {
         println!("  (none)");
     } else {
-        for (ft, n) in &flags {
-            println!("  {ft:<14} {n}");
+        for (k, n) in &flags {
+            println!("  {k:<14} {n}");
         }
     }
     println!();
@@ -445,19 +406,6 @@ fn cmd_stats(cfg: &config::Config) -> Result<()> {
             println!("  {cam} / {lens:<28} {n}");
         }
     }
-    println!();
-    println!("Disk usage");
-    println!("----------");
-    println!(
-        "  Catalog : {:.1} MB ({})",
-        db_size as f64 / 1_048_576.0,
-        cfg.catalog.db_path.display()
-    );
-    println!(
-        "  Cache   : {:.1} MB ({})",
-        cache_size as f64 / 1_048_576.0,
-        cfg.catalog.cache_dir.display()
-    );
     Ok(())
 }
 
@@ -478,28 +426,6 @@ fn cmd_libraries(roots: &LibraryRoots) -> Result<()> {
     Ok(())
 }
 
-/// Size in bytes of a single file, or 0 if it can't be read.
-fn file_size(path: &std::path::Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
-
-/// Recursive byte size of a directory tree, ignoring entries it can't read.
-fn dir_size(dir: &std::path::Path) -> u64 {
-    let mut total = 0;
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return 0,
-    };
-    for entry in read.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total += dir_size(&entry.path());
-        } else {
-            total += meta.len();
-        }
-    }
-    total
-}
 
 fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
     println!("PhotoPipe Doctor");
