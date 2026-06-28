@@ -7,10 +7,9 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use photopipe::serve;
 use pipeline::catalog::Catalog;
 use pipeline::config;
+use pipeline::library::LibraryRoots;
 use pipeline::models::ModelHub;
 
-/// Schema version the binary expects the catalog to be at.
-const EXPECTED_SCHEMA_VERSION: u32 = 3;
 const MIN_FREE_DISK_GB: u64 = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,8 +153,13 @@ enum Command {
     /// Check configuration, models, database, and system health.
     Doctor,
 
-    /// Launch the local review web server.
+    /// List analyzed libraries (folder, last-analyzed, photo count).
+    Libraries,
+
+    /// Launch the local review web server for a folder's library.
     Serve {
+        /// Folder whose library to serve.
+        folder: PathBuf,
         /// Port to bind on 127.0.0.1.
         #[arg(long, default_value_t = 8787)]
         port: u16,
@@ -183,26 +187,19 @@ fn main() -> Result<()> {
     let cfg = config::load(&config_path)?;
     tracing::debug!(path = %config_path.display(), "config loaded");
 
+    let roots = LibraryRoots::from_dirs()?;
+
     match cli.command {
-        Command::Scan {
-            paths,
-            no_models,
-            reprocess,
-        } => cmd_scan(paths, no_models, reprocess, &cfg),
+        Command::Scan { paths, no_models, reprocess } => cmd_scan(paths, no_models, reprocess, &cfg, &roots),
         Command::Calibrate => cmd_calibrate(&cfg),
         Command::Dedupe => cmd_dedupe(&cfg),
-        Command::ReviewTree {
-            output,
-            include,
-            regenerate,
-        } => cmd_review_tree(output, include, regenerate, &cfg),
+        Command::ReviewTree { output, include, regenerate } => cmd_review_tree(output, include, regenerate, &cfg),
         Command::Info { file } => cmd_info(file, &cfg),
         Command::Stats => cmd_stats(&cfg),
-        Command::Doctor => cmd_doctor(&config_path, &cfg),
-        Command::Serve { port } => serve::run(&cfg, port),
-        Command::ExportKeepers { output, regenerate } => {
-            cmd_export_keepers(output, regenerate, &cfg)
-        }
+        Command::Doctor => cmd_doctor(&config_path, &cfg, &roots),
+        Command::Libraries => cmd_libraries(&roots),
+        Command::Serve { folder, port } => serve::run(&cfg, &folder, port),
+        Command::ExportKeepers { output, regenerate } => cmd_export_keepers(output, regenerate, &cfg),
     }
 }
 
@@ -213,19 +210,12 @@ fn cmd_scan(
     no_models: bool,
     _reprocess: bool,
     cfg: &config::Config,
+    roots: &LibraryRoots,
 ) -> Result<()> {
     use pipeline::{
-        analyze_defects, analyze_ml, cache::Cache, catalog::Catalog, ingest::ingest_directory,
+        analyze_defects, analyze_ml, ingest::ingest_directory, library::open_or_create_library,
         models::ModelHub,
     };
-
-    let db_path = &cfg.catalog.db_path;
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let catalog = Catalog::open(db_path).map_err(|e| anyhow::anyhow!("catalog: {}", e))?;
-    let cache =
-        Cache::open(cfg.catalog.cache_dir.clone()).map_err(|e| anyhow::anyhow!("cache: {}", e))?;
 
     let hub = if no_models {
         tracing::info!("--no-models: skipping model loading");
@@ -234,33 +224,40 @@ fn cmd_scan(
         ModelHub::from_config(&cfg.models).map_err(|e| anyhow::anyhow!("models: {}", e))?
     };
 
-    let report = ingest_directory(&paths, &catalog, &cache, &cfg.ingest)?;
-    println!("Scan complete:");
-    println!("  Processed : {}", report.processed);
-    println!("  Skipped   : {}", report.skipped);
-    println!("  Errored   : {}", report.errored);
+    for folder in &paths {
+        let folder = config::expand_tilde(folder);
+        println!("== {} ==", folder.display());
+        let lib = open_or_create_library(roots, &folder)?;
 
-    let defect_report = analyze_defects(&catalog, &cache, &hub, &cfg.defect)?;
-    println!("Defect analysis:");
-    println!("  Analyzed             : {}", defect_report.analyzed);
-    println!("  Errored              : {}", defect_report.errored);
-    println!(
-        "  Flagged overexposed  : {}",
-        defect_report.flagged_overexposed
-    );
-    println!(
-        "  Flagged underexposed : {}",
-        defect_report.flagged_underexposed
-    );
+        let report = ingest_directory(std::slice::from_ref(&folder), &lib.catalog, &lib.cache, &cfg.ingest)?;
+        println!("Scan complete:");
+        println!("  Processed : {}", report.processed);
+        println!("  Skipped   : {}", report.skipped);
+        println!("  Errored   : {}", report.errored);
 
-    let ml_report = analyze_ml(&catalog, &cache, &hub, cfg.catalog.write_batch_size)?;
-    if !hub.is_empty() {
-        println!("ML analysis:");
-        println!("  Embedded   : {}", ml_report.embedded);
-        println!("  IQA scored : {}", ml_report.iqa_scored);
-        println!("  Errored    : {}", ml_report.errored);
+        let defect_report = analyze_defects(&lib.catalog, &lib.cache, &hub, &cfg.defect)?;
+        println!("Defect analysis:");
+        println!("  Analyzed             : {}", defect_report.analyzed);
+        println!("  Errored              : {}", defect_report.errored);
+        println!("  Flagged overexposed  : {}", defect_report.flagged_overexposed);
+        println!("  Flagged underexposed : {}", defect_report.flagged_underexposed);
+
+        let ml_report = analyze_ml(&lib.catalog, &lib.cache, &hub, cfg.catalog.write_batch_size)?;
+        if !hub.is_empty() {
+            println!("ML analysis:");
+            println!("  Embedded   : {}", ml_report.embedded);
+            println!("  IQA scored : {}", ml_report.iqa_scored);
+            println!("  Errored    : {}", ml_report.errored);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        lib.catalog
+            .set_last_analyzed(now)
+            .map_err(|e| anyhow::anyhow!("library_meta: {e}"))?;
     }
-
     Ok(())
 }
 
@@ -464,6 +461,23 @@ fn cmd_stats(cfg: &config::Config) -> Result<()> {
     Ok(())
 }
 
+fn cmd_libraries(roots: &LibraryRoots) -> Result<()> {
+    let libs = pipeline::library::list_libraries(roots)?;
+    if libs.is_empty() {
+        println!("No analyzed libraries yet. Run `photopipe scan <folder>`.");
+        return Ok(());
+    }
+    println!("Analyzed libraries:");
+    for l in &libs {
+        let last = match l.last_analyzed {
+            Some(ts) => ts.to_string(),
+            None => "never".to_string(),
+        };
+        println!("  {}  ({} photos, last analyzed {})", l.folder.display(), l.photo_count, last);
+    }
+    Ok(())
+}
+
 /// Size in bytes of a single file, or 0 if it can't be read.
 fn file_size(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
@@ -487,7 +501,7 @@ fn dir_size(dir: &std::path::Path) -> u64 {
     total
 }
 
-fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()> {
+fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
     println!("PhotoPipe Doctor");
     println!("================");
     println!();
@@ -513,9 +527,8 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     println!("-------------");
 
     let mut checks: Vec<DoctorCheck> = Vec::new();
-    checks.push(doctor_check_schema(&cfg.catalog.db_path));
-    checks.push(doctor_check_cache_writable(&cfg.catalog.cache_dir));
-    checks.push(doctor_check_disk_free(&cfg.catalog.db_path));
+    checks.push(doctor_check_cache_writable(&roots.cache));
+    checks.push(doctor_check_disk_free(&roots.data));
 
     // Actually attempt to load models so we report which slots came up.
     match ModelHub::from_config(&cfg.models) {
@@ -545,37 +558,6 @@ fn cmd_doctor(config_path: &std::path::Path, cfg: &config::Config) -> Result<()>
     }
     println!("Result: healthy.");
     Ok(())
-}
-
-/// Open the catalog and verify its schema version matches what we expect.
-fn doctor_check_schema(db_path: &std::path::Path) -> DoctorCheck {
-    if !db_path.exists() {
-        // Not yet created is fine — `scan` creates it. Report, don't fail.
-        return DoctorCheck::warn(
-            "DB schema",
-            format!(
-                "no catalog yet at {} (run `scan` to create)",
-                db_path.display()
-            ),
-        );
-    }
-    match Catalog::open(db_path) {
-        Ok(catalog) => match catalog.schema_version() {
-            Ok(v) if v == EXPECTED_SCHEMA_VERSION => {
-                DoctorCheck::ok("DB schema", format!("version {v}"))
-            }
-            Ok(v) => DoctorCheck::fail_critical(
-                "DB schema",
-                format!(
-                    "version {v}, expected {EXPECTED_SCHEMA_VERSION} — DB is from a different photopipe build"
-                ),
-            ),
-            Err(e) => {
-                DoctorCheck::fail_critical("DB schema", format!("cannot read schema version: {e}"))
-            }
-        },
-        Err(e) => DoctorCheck::fail_critical("DB schema", format!("cannot open catalog: {e}")),
-    }
 }
 
 /// Verify the cache directory exists (creating it) and is writable by

@@ -39,13 +39,13 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Open the catalog + cache and serve on `127.0.0.1:port` until Ctrl-C.
-pub fn run(cfg: &Config, port: u16) -> anyhow::Result<()> {
-    let catalog = Catalog::open(&cfg.catalog.db_path)?;
-    let cache = Cache::open(cfg.catalog.cache_dir.clone())?;
+/// Open the folder's library and serve on `127.0.0.1:port` until Ctrl-C.
+pub fn run(cfg: &Config, folder: &std::path::Path, port: u16) -> anyhow::Result<()> {
+    let roots = pipeline::library::LibraryRoots::from_dirs()?;
+    let lib = pipeline::library::open_or_create_library(&roots, folder)?;
     let state = AppState {
-        catalog: Arc::new(catalog),
-        cache: Arc::new(cache),
+        catalog: Arc::new(lib.catalog),
+        cache: Arc::new(lib.cache),
         cfg: Arc::new(cfg.clone()),
     };
 
@@ -55,7 +55,7 @@ pub fn run(cfg: &Config, port: u16) -> anyhow::Result<()> {
     rt.block_on(async move {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!(%addr, "review server listening — open http://{addr}/ in your browser");
+        tracing::info!(%addr, folder = %folder.display(), "review server listening — open http://{addr}/");
         axum::serve(listener, router(state)).await?;
         Ok::<(), anyhow::Error>(())
     })
