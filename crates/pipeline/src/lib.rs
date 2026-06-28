@@ -6,11 +6,16 @@ pub mod dedupe;
 pub mod defect;
 pub mod error;
 pub mod ingest;
+pub mod library;
 pub mod ml;
 pub mod models;
 pub mod output;
 
 pub use calibration::{run_calibration, CalibrationReport};
+pub use library::{
+    find_library_for_file, library_key, list_libraries, open_existing_library,
+    open_or_create_library, Library, LibraryInfo, LibraryRoots,
+};
 pub use dedupe::{run_dedupe, DedupeReport};
 pub use defect::analyze_defects;
 pub use ingest::ingest_directory;
