@@ -3231,7 +3231,7 @@ mod tests {
     fn schema_version_reports_current_migration() {
         let (catalog, _dir) = make_catalog();
         // Migrations v1 (base schema) and v2 (decisions table) run at open().
-        assert_eq!(catalog.schema_version().unwrap(), 2);
+        assert_eq!(catalog.schema_version().unwrap(), 3);
     }
 
     /// Insert a file with the given path/hash and return its id.
