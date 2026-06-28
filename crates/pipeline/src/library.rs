@@ -118,6 +118,9 @@ pub fn list_libraries(roots: &LibraryRoots) -> Result<Vec<LibraryInfo>> {
         Err(_) => return Ok(out), // no libraries yet
     };
     for entry in rd.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
         let key = entry.file_name().to_string_lossy().into_owned();
         let catalog_path = entry.path().join("catalog.duckdb");
         if !catalog_path.exists() {
@@ -130,9 +133,16 @@ pub fn list_libraries(roots: &LibraryRoots) -> Result<Vec<LibraryInfo>> {
                 continue;
             }
         };
-        let Some((folder_path, created_at, last_analyzed)) = catalog.library_meta().ok().flatten()
-        else {
-            continue;
+        let (folder_path, created_at, last_analyzed) = match catalog.library_meta() {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                tracing::warn!(dir = %entry.path().display(), "library_meta row missing, skipping");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(dir = %entry.path().display(), error = %e, "library_meta query failed, skipping");
+                continue;
+            }
         };
         let photo_count = catalog.file_count().unwrap_or(0);
         out.push(LibraryInfo {
@@ -152,7 +162,7 @@ pub fn find_library_for_file(roots: &LibraryRoots, file: &Path) -> Result<Option
     let mut cur = if file.is_dir() { Some(file) } else { file.parent() };
     while let Some(dir) = cur {
         if roots.catalog_path(&library_key(dir)).exists() {
-            return Ok(Some(dir.to_path_buf()));
+            return Ok(Some(canonical_path(dir)));
         }
         cur = dir.parent();
     }
