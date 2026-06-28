@@ -30,7 +30,7 @@ elsewhere. The non-destructive contract is unchanged.
 | Default paths | Platform-aware via the `dirs` crate. |
 | Safety guard | Root **marker file** (`.photopipe-tree`), replacing the symlink-based guard. |
 | Data-volume awareness | Pre-flight message (CLI) + confirm-with-estimate (web UI), always. |
-| Windows validation | Compile-checked here via cross-target `cargo check`; runtime validation deferred to a real Windows machine. |
+| Windows validation | Compile-checked via cross-target `cargo check`; **confirmed building + running natively on Windows (MSVC) on 2026-06-28.** |
 
 ## 3. Behavior change: copy-always
 
@@ -169,10 +169,9 @@ small `humanize_bytes` helper formats sizes (B/KB/MB/GB).
 
 ## 10. Out of scope / deferred
 
-- **Runtime validation on native Windows** (MSVC build of bundled DuckDB + libwebp,
-  `%APPDATA%` path behavior, CUDA/cuDNN DLL discovery, the review UI in a Windows
-  browser). The build will be compile-validated here; functional Windows testing
-  requires a Windows machine and is a follow-up.
+- ~~**Runtime validation on native Windows**~~ — **DONE (2026-06-28):** photopipe
+  builds with the MSVC toolchain and runs on a native Windows host. (Originally
+  deferred: only compile-checked here via cross-target `cargo check`.)
 - Symlink/hardlink export modes (removed; not reintroduced as options).
 - Migrating pre-existing symlink trees (user deletes them manually).
 - Pre-copy free-disk-space check / abort threshold (the estimate message is the
