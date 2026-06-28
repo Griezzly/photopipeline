@@ -41,8 +41,9 @@ pub fn router(state: AppState) -> Router {
 
 /// Open the folder's library and serve on `127.0.0.1:port` until Ctrl-C.
 pub fn run(cfg: &Config, folder: &std::path::Path, port: u16) -> anyhow::Result<()> {
+    let folder = pipeline::config::expand_tilde(folder);
     let roots = pipeline::library::LibraryRoots::from_dirs()?;
-    let lib = pipeline::library::open_or_create_library(&roots, folder)?;
+    let lib = pipeline::library::open_or_create_library(&roots, &folder)?;
     let state = AppState {
         catalog: Arc::new(lib.catalog),
         cache: Arc::new(lib.cache),

@@ -135,7 +135,7 @@ automatically. The config file lives at
 `%APPDATA%\photopipe\photopipe.toml` by default. Pass `--config <path>`
 to any command to override.
 
-**Reviewing on Windows:** run `photopipe serve` and open
+**Reviewing on Windows:** run `photopipe serve <folder>` and open
 `http://127.0.0.1:8787/` in your browser. The review and keepers trees
 contain real **copied** files, so they open correctly in Windows Explorer and
 any photo tool.
