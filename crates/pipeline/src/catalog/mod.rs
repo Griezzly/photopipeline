@@ -2369,6 +2369,46 @@ impl Catalog {
             Some(loc) => self.dump_file(&loc.path),
         }
     }
+
+    /// Record the library's folder path once. No-op if a row already exists.
+    pub fn set_library_meta(&self, folder_path: &str, created_at: i64) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        conn.execute(
+            "INSERT INTO library_meta (folder_path, created_at, last_analyzed)
+             SELECT ?, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM library_meta)",
+            duckdb::params![folder_path, created_at],
+        )
+        .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Update the `last_analyzed` timestamp on the (single) meta row.
+    pub fn set_last_analyzed(&self, ts: i64) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        conn.execute("UPDATE library_meta SET last_analyzed = ?", duckdb::params![ts])
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Read `(folder_path, created_at, last_analyzed)` if present.
+    pub fn library_meta(&self) -> Result<Option<(String, i64, Option<i64>)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let row = conn.query_row(
+            "SELECT folder_path, created_at, last_analyzed FROM library_meta LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        optional_row(row)
+    }
 }
 
 /// Return (p10, p50, p90) of `samples` using linear interpolation between

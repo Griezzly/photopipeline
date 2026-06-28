@@ -10,7 +10,7 @@ use pipeline::config;
 use pipeline::models::ModelHub;
 
 /// Schema version the binary expects the catalog to be at.
-const EXPECTED_SCHEMA_VERSION: u32 = 2;
+const EXPECTED_SCHEMA_VERSION: u32 = 3;
 const MIN_FREE_DISK_GB: u64 = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

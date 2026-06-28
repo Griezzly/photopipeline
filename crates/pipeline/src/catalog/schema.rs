@@ -104,4 +104,13 @@ pub const MIGRATIONS: &[&str] = &[
      );
      CREATE INDEX idx_decisions_verdict ON decisions(verdict);
      COMMIT;",
+    // version 3 — per-folder library identity
+    "BEGIN TRANSACTION;
+     INSERT INTO schema_version VALUES (3);
+     CREATE TABLE library_meta (
+         folder_path   VARCHAR NOT NULL,
+         created_at    BIGINT  NOT NULL,
+         last_analyzed BIGINT
+     );
+     COMMIT;",
 ];
