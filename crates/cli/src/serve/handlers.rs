@@ -8,7 +8,7 @@ use pipeline::catalog::{DecisionCounts, ReviewFilter, ReviewGroup, ReviewListIte
 use pipeline::config::expand_tilde;
 use pipeline::{build_keepers_tree, KeepersReport};
 use rust_embed::RustEmbed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::{ActiveLibrary, AppState};
@@ -390,4 +390,189 @@ pub async fn get_export_estimate(
             tracing::warn!(error = %e, "export estimate failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+// ── Folder browser, libraries, open, active ──────────────────────────────────
+
+#[derive(Serialize)]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+    pub photo_count: u64,
+}
+
+#[derive(Serialize)]
+pub struct FsListing {
+    pub path: Option<String>,
+    pub parent: Option<String>,
+    pub entries: Vec<FsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FsQuery {
+    pub path: Option<String>,
+}
+
+/// List subdirectories of `path` (or roots when absent), each with a
+/// non-recursive photo count. Directories only.
+pub async fn get_fs(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<FsQuery>,
+) -> Result<Json<FsListing>, StatusCode> {
+    let exts = state.cfg.ingest.extensions.clone();
+    let count_photos = move |dir: &std::path::Path| -> u64 {
+        let mut n = 0u64;
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_file() {
+                    let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+                    if exts.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+
+    match q.path {
+        None => {
+            // Roots: drive letters on Windows, home + "/" on Unix.
+            let mut entries = Vec::new();
+            #[cfg(windows)]
+            for letter in b'A'..=b'Z' {
+                let root = format!("{}:\\", letter as char);
+                if std::path::Path::new(&root).exists() {
+                    entries.push(FsEntry {
+                        name: root.clone(),
+                        path: root,
+                        photo_count: 0,
+                    });
+                }
+            }
+            #[cfg(unix)]
+            {
+                if let Some(home) = dirs::home_dir() {
+                    entries.push(FsEntry {
+                        name: "~".into(),
+                        path: home.to_string_lossy().into_owned(),
+                        photo_count: 0,
+                    });
+                }
+                entries.push(FsEntry {
+                    name: "/".into(),
+                    path: "/".into(),
+                    photo_count: 0,
+                });
+            }
+            Ok(Json(FsListing {
+                path: None,
+                parent: None,
+                entries,
+            }))
+        }
+        Some(p) => {
+            let dir = expand_tilde(&PathBuf::from(&p));
+            let rd = std::fs::read_dir(&dir).map_err(|_| StatusCode::FORBIDDEN)?;
+            let mut entries: Vec<FsEntry> = rd
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| {
+                    let path = e.path();
+                    FsEntry {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        photo_count: count_photos(&path),
+                        path: path.to_string_lossy().into_owned(),
+                    }
+                })
+                .collect();
+            entries.sort_by_key(|a| a.name.to_lowercase());
+            Ok(Json(FsListing {
+                parent: dir.parent().map(|p| p.to_string_lossy().into_owned()),
+                path: Some(dir.to_string_lossy().into_owned()),
+                entries,
+            }))
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct LibraryEntry {
+    pub folder: String,
+    pub photo_count: i64,
+    pub last_analyzed: Option<i64>,
+}
+
+pub async fn get_libraries(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<LibraryEntry>>, StatusCode> {
+    let roots = (*state.roots).clone();
+    let libs = tokio::task::spawn_blocking(move || pipeline::list_libraries(&roots))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        libs.into_iter()
+            .map(|l| LibraryEntry {
+                folder: l.folder.to_string_lossy().into_owned(),
+                photo_count: l.photo_count,
+                last_analyzed: l.last_analyzed,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct ActiveInfo {
+    pub folder: String,
+}
+
+/// The active library, or `null` (200) when none.
+pub async fn get_active(State(state): State<AppState>) -> Json<Option<ActiveInfo>> {
+    Json(state.active.lock().unwrap().as_ref().map(|l| ActiveInfo {
+        folder: l.folder.to_string_lossy().into_owned(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenRequest {
+    pub folder: String,
+}
+
+#[derive(Serialize)]
+pub struct OpenResponse {
+    pub folder: String,
+    pub pending_new: u64,
+}
+
+/// Open an existing library, make it active, and report how many folder files
+/// are new/changed (drives the "Re-analyze" nudge). 404 if no library exists.
+pub async fn post_open(
+    State(state): State<AppState>,
+    Json(req): Json<OpenRequest>,
+) -> Result<Json<OpenResponse>, StatusCode> {
+    let folder = expand_tilde(&PathBuf::from(&req.folder));
+    let cfg = state.cfg.clone();
+    let s2 = state.clone();
+    let folder2 = folder.clone();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<(ActiveLibrary, u64)> {
+        let lib = s2.resolve_library(&folder2, false)?;
+        let pending = pipeline::count_pending(&lib.folder, &lib.catalog, &cfg.ingest)?;
+        Ok((lib, pending))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match res {
+        Ok((lib, pending_new)) => {
+            let folder_str = lib.folder.to_string_lossy().into_owned();
+            state.set_active(lib);
+            Ok(Json(OpenResponse {
+                folder: folder_str,
+                pending_new,
+            }))
+        }
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
 }

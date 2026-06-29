@@ -446,3 +446,97 @@ async fn review_endpoints_409_when_no_library_open() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn fs_open_and_active_flow() {
+    use axum::http::{Request, StatusCode};
+    use image::{ImageBuffer, Rgb};
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let folder = dir.path().join("trip");
+    std::fs::create_dir_all(&folder).unwrap();
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(20, 20, |_, _| Rgb([1, 2, 3]));
+    img.save(folder.join("a.jpg")).unwrap();
+
+    let mut cfg = pipeline::config::Config::default();
+    cfg.models.model_dir = dir.path().join("no-models");
+    let state = photopipe::serve::AppState {
+        cfg: std::sync::Arc::new(cfg),
+        roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
+            data: dir.path().join("data"),
+            cache: dir.path().join("cache"),
+        }),
+        active: std::sync::Arc::new(Mutex::new(None)),
+        job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
+    };
+    let app = photopipe::serve::router(state);
+
+    // /api/fs over the temp dir lists `trip` with photo_count 0 (folder itself has the jpg; its parent lists trip).
+    let (s, v) = get_json(
+        app.clone(),
+        &format!("/api/fs?path={}", dir.path().to_str().unwrap()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["name"] == "trip"));
+
+    // analyze the folder so a library exists.
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/analyze")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(format!(
+                    "{{\"folder\":{:?}}}",
+                    folder.to_str().unwrap()
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/analyze/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let b = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        if serde_json::from_slice::<serde_json::Value>(&b).unwrap()["stage"] == "done" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // /api/libraries shows it.
+    let (_s, libs) = get_json(app.clone(), "/api/libraries").await;
+    assert!(libs
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["folder"].as_str().unwrap().contains("trip")));
+
+    // /api/open returns pending_new 0 right after analyze.
+    let (s, ov) = post_json(
+        app.clone(),
+        "/api/open",
+        serde_json::json!({"folder": folder.to_str().unwrap()}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(ov["pending_new"], 0);
+}

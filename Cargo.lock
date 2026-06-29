@@ -2548,6 +2548,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "dirs",
  "image",
  "pipeline",
  "rust-embed",
