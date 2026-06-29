@@ -573,6 +573,9 @@ pub async fn post_open(
                 pending_new,
             }))
         }
-        Err(_) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::warn!(folder = %folder.display(), error = %e, "post_open failed");
+            Err(StatusCode::NOT_FOUND)
+        }
     }
 }
