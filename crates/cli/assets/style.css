@@ -38,3 +38,5 @@ button.primary { background: #2a6; color: #fff; border: none; padding: 10px 16px
 #banners { display: flex; flex-direction: column; }
 .banner { padding: 8px 12px; background: #3a3a1b; color: #eed; border-bottom: 1px solid #553; display: flex; gap: 12px; align-items: center; }
 .banner button { margin-left: auto; }
+.bar { height: 14px; background: #222; border-radius: 7px; overflow: hidden; margin: 10px 0; }
+.bar-fill { height: 100%; width: 0; background: #2a6; transition: width .3s; }
