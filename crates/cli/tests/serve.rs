@@ -540,3 +540,50 @@ async fn fs_open_and_active_flow() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(ov["pending_new"], 0);
 }
+
+/// While a job is in flight, both a concurrent analyze and an open of the same
+/// folder are rejected with 409 (rather than attempting a second DuckDB open).
+#[tokio::test]
+async fn busy_job_rejects_concurrent_analyze_and_open() {
+    use axum::http::StatusCode;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let folder = dir.path().join("shoot");
+    std::fs::create_dir_all(&folder).unwrap();
+
+    let state = photopipe::serve::AppState {
+        cfg: std::sync::Arc::new(pipeline::config::Config::default()),
+        roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
+            data: dir.path().join("data"),
+            cache: dir.path().join("cache"),
+        }),
+        active: std::sync::Arc::new(Mutex::new(None)),
+        job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
+    };
+
+    // Seed a running job on `folder` (simulates a fresh analyze in flight).
+    {
+        let mut j = state.job.lock().unwrap();
+        j.stage = "scanning".into();
+        j.folder = folder.to_string_lossy().into_owned();
+    }
+    let app = photopipe::serve::router(state);
+
+    // A second analyze (any folder) is rejected.
+    let (s, _) = post_json(
+        app.clone(),
+        "/api/analyze",
+        serde_json::json!({"folder": folder.to_str().unwrap()}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // Opening the in-flight folder is rejected (no second connection attempt).
+    let (s, _) = post_json(
+        app.clone(),
+        "/api/open",
+        serde_json::json!({"folder": folder.to_str().unwrap()}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+}

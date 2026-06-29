@@ -10,6 +10,7 @@ use pipeline::{build_keepers_tree, KeepersReport};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use super::{ActiveLibrary, AppState};
 
@@ -279,8 +280,6 @@ pub struct EstimateQuery {
     pub output: Option<String>,
 }
 
-use std::sync::{Arc, Mutex};
-
 /// ProgressSink that writes into the shared JobState.
 struct JobProgress(Arc<Mutex<super::JobState>>);
 impl pipeline::ProgressSink for JobProgress {
@@ -328,34 +327,50 @@ pub async fn post_analyze(
 
     let state2 = state.clone();
     std::thread::spawn(move || {
-        let result = (|| -> anyhow::Result<ActiveLibrary> {
-            let lib = state2.resolve_library(&folder, true)?;
-            let hub = pipeline::models::ModelHub::from_config(&state2.cfg.models)
-                .unwrap_or_else(|_| pipeline::models::ModelHub::empty());
-            state2.job.lock().unwrap().ml_ran = !hub.is_empty();
-            let progress = JobProgress(state2.job.clone());
-            pipeline::analyze_folder(
-                &lib.folder,
-                &lib.catalog,
-                &lib.cache,
-                &hub,
-                &state2.cfg,
-                &progress,
-            )?;
-            Ok(lib)
-        })();
-        match result {
-            Ok(lib) => {
+        // catch_unwind so a panic deep in the pipeline sets stage=failed rather
+        // than leaving the job stuck "running" (which would 409 every future
+        // analyze until the server restarts).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (|| -> anyhow::Result<ActiveLibrary> {
+                let lib = state2.resolve_library(&folder, true)?;
+                let hub = pipeline::models::ModelHub::from_config(&state2.cfg.models)
+                    .unwrap_or_else(|_| pipeline::models::ModelHub::empty());
+                state2.job.lock().unwrap().ml_ran = !hub.is_empty();
+                let progress = JobProgress(state2.job.clone());
+                pipeline::analyze_folder(
+                    &lib.folder,
+                    &lib.catalog,
+                    &lib.cache,
+                    &hub,
+                    &state2.cfg,
+                    &progress,
+                )?;
+                Ok(lib)
+            })()
+        }));
+        match outcome {
+            Ok(Ok(lib)) => {
                 state2.set_active(lib);
                 let mut j = state2.job.lock().unwrap();
                 j.stage = "done".into();
                 j.message = "complete".into();
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "analyze job failed");
                 let mut j = state2.job.lock().unwrap();
                 j.stage = "failed".into();
                 j.error = Some(e.to_string());
+            }
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "analyze panicked".into());
+                tracing::error!(panic = %msg, "analyze job panicked");
+                let mut j = state2.job.lock().unwrap();
+                j.stage = "failed".into();
+                j.error = Some(format!("internal error: {msg}"));
             }
         }
     });
@@ -553,6 +568,20 @@ pub async fn post_open(
     Json(req): Json<OpenRequest>,
 ) -> Result<Json<OpenResponse>, StatusCode> {
     let folder = expand_tilde(&PathBuf::from(&req.folder));
+
+    // If an analyze job is in flight on this same folder, the catalog is held by
+    // the analyze thread — opening a second connection would fail. Surface that
+    // as "busy" (409) rather than attempting the open and reporting a stale 404.
+    {
+        let job = state.job.lock().unwrap();
+        if job.running()
+            && pipeline::library_key(std::path::Path::new(&job.folder))
+                == pipeline::library_key(&folder)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
     let cfg = state.cfg.clone();
     let s2 = state.clone();
     let folder2 = folder.clone();
