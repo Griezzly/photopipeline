@@ -1,3 +1,4 @@
+pub mod analyze;
 pub mod cache;
 pub mod calibration;
 pub mod catalog;
@@ -11,6 +12,7 @@ pub mod ml;
 pub mod models;
 pub mod output;
 
+pub use analyze::{analyze_folder, count_pending, AnalyzeReport, ProgressSink};
 pub use calibration::{run_calibration, CalibrationReport};
 pub use dedupe::{run_dedupe, DedupeReport};
 pub use defect::analyze_defects;

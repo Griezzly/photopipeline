@@ -3,41 +3,33 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>photopipe review</title>
+  <title>photopipe</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <strong>photopipe review</strong>
-    <span class="spacer"></span>
-    <label>flag
-      <select id="flag-filter">
-        <option value="">any</option>
-        <option value="blur">blur</option>
-        <option value="back_focus">back_focus</option>
-        <option value="overexposed">overexposed</option>
-        <option value="underexposed">underexposed</option>
-        <option value="low_iqa">low_iqa</option>
-      </select>
-    </label>
-    <label>state
-      <select id="decided-filter">
-        <option value="">all</option>
-        <option value="false">undecided</option>
-        <option value="true">decided</option>
-      </select>
-    </label>
-    <button id="export-btn">Export keepers</button>
-  </header>
-
-  <main id="grid" class="grid"></main>
-
-  <div id="detail" class="detail hidden">
-    <img id="detail-img" alt="">
-    <aside id="detail-meta"></aside>
+  <div id="view-home" class="view"></div>
+  <div id="view-browse" class="view hidden"></div>
+  <div id="view-analyze" class="view hidden"></div>
+  <div id="view-review" class="view hidden">
+    <header>
+      <button id="home-btn">← Home</button>
+      <strong id="review-title">Review</strong>
+      <span class="spacer"></span>
+      <label>flag <select id="flag-filter">
+        <option value="">any</option><option value="blur">blur</option>
+        <option value="back_focus">back_focus</option><option value="overexposed">overexposed</option>
+        <option value="underexposed">underexposed</option><option value="low_iqa">low_iqa</option>
+      </select></label>
+      <label>state <select id="decided-filter">
+        <option value="">all</option><option value="false">undecided</option><option value="true">decided</option>
+      </select></label>
+      <button id="export-btn">Export keepers</button>
+    </header>
+    <div id="banners"></div>
+    <main id="grid" class="grid"></main>
+    <div id="detail" class="detail hidden"><img id="detail-img" alt=""><aside id="detail-meta"></aside></div>
+    <footer id="counts"></footer>
   </div>
-
-  <footer id="counts"></footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

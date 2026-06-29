@@ -155,10 +155,11 @@ enum Command {
     /// List analyzed libraries (folder, last-analyzed, photo count).
     Libraries,
 
-    /// Launch the local review web server for a folder's library.
+    /// Launch the local review web app. With a folder, opens its library
+    /// directly; without one, starts on the Home screen.
     Serve {
-        /// Folder whose library to serve.
-        folder: PathBuf,
+        /// Optional folder whose library to open on startup.
+        folder: Option<PathBuf>,
         /// Port to bind on 127.0.0.1.
         #[arg(long, default_value_t = 8787)]
         port: u16,
@@ -205,7 +206,7 @@ fn main() -> Result<()> {
         Command::Stats { folder } => cmd_stats(&folder, &cfg, &roots),
         Command::Doctor => cmd_doctor(&config_path, &cfg, &roots),
         Command::Libraries => cmd_libraries(&roots),
-        Command::Serve { folder, port } => serve::run(&cfg, &folder, port),
+        Command::Serve { folder, port } => serve::run(&cfg, folder, port),
         Command::ExportKeepers {
             folder,
             output,
@@ -245,6 +246,7 @@ fn cmd_scan(
             &lib.catalog,
             &lib.cache,
             &cfg.ingest,
+            None,
         )?;
         println!("Scan complete:");
         println!("  Processed : {}", report.processed);

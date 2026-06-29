@@ -99,6 +99,7 @@ pub fn ingest_directory(
     catalog: &Catalog,
     cache: &Cache,
     cfg: &IngestConfig,
+    progress: Option<&dyn crate::analyze::ProgressSink>,
 ) -> anyhow::Result<IngestReport> {
     let batch_size: usize = 64;
 
@@ -130,10 +131,17 @@ pub fn ingest_directory(
     // ── drop sidecar JPGs (RAW + same-name JPG → keep RAW only) ─────────────
     let paths = exclude_sidecar_jpgs(paths);
 
+    if let Some(p) = progress {
+        p.set_total(paths.len() as u64);
+    }
+
     // ── process in parallel ──────────────────────────────────────────────────
     let batch: Mutex<Vec<(IngestedFile, Option<ExifData>)>> = Mutex::new(Vec::new());
 
     paths.par_iter().for_each(|path| {
+        if let Some(p) = progress {
+            p.inc();
+        }
         match process_file(path, catalog, cache, cfg) {
             Ok(None) => {
                 skipped.fetch_add(1, Ordering::Relaxed);

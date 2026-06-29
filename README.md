@@ -230,6 +230,48 @@ Pass a different file with `--config <path>` on any command. See
 
 ---
 
+## Browser app
+
+`photopipe serve` has two entry points — with a folder or without:
+
+```bash
+photopipe serve                     # open http://127.0.0.1:8787/ — starts on the Home screen
+photopipe serve ~/Photos/2024       # open that library's Review grid directly
+photopipe serve --port 8808         # same, on a different port
+```
+
+**Home screen (no folder):** lists every previously-analyzed folder as a card
+(photo count, last-analyzed date). An **Analyze a folder** button opens an
+in-browser folder picker backed by the server's filesystem view.
+
+**Analyze flow (no CLI required):**
+
+1. Click **Analyze a folder**, navigate to your shoot in the browser picker, and
+   confirm with **Analyze this folder**.
+2. A progress bar tracks the three stages — **Scanning** (ingest + defect checks
+   + ML embeddings), **Calibrating** (per-lens sharpness baselines), and
+   **Deduplicating** (near-duplicate grouping).
+3. When analysis completes you land on the **Review** grid automatically.
+
+If the ML model files are absent (`models/` is empty), analysis still completes —
+the ML steps are silently skipped and a banner in the app tells you. You can add
+the models later and run an incremental re-analyze.
+
+**Re-analyze:** Re-opening a folder whose library already exists shows a
+**Re-analyze** button when new photos have been added since the last run. One
+click runs only the new files through the pipeline.
+
+**Export keepers:** the **Export keepers** button at the top of the Review grid
+copies your kept set to `<output>/YYYY-MM/` without leaving the browser.
+
+> **CLI and browser app are two front-ends over the same per-folder libraries.**
+> You can mix them freely: run `photopipe scan` from the CLI to pre-populate a
+> library, then open it in the browser for review; or do the full analyze flow in
+> the browser and inspect the catalog with `photopipe stats` / `photopipe info`
+> afterward. The catalog is a plain DuckDB file — decisions persist across both.
+
+---
+
 ## Reviewing your photos
 
 ### Web UI (recommended)
@@ -326,7 +368,7 @@ are no longer used and can be deleted.
 | `scan <PATH>...` | Ingest + analyse library roots. `--no-models`, `--reprocess`. |
 | `calibrate <folder>` | Rebuild per-lens sharpness baselines for a folder's library. |
 | `dedupe <folder>` | Rebuild duplicate groups from current embeddings. |
-| `serve <folder>` | Launch the local review web UI. `--port` (default 8787). |
+| `serve [folder]` | Launch the local review web UI. Without a folder, opens the Home screen. `--port` (default 8787). |
 | `review-tree <folder> <output>` | Generate/update the review tree (copies). `--include`, `--regenerate`. |
 | `export-keepers <folder> <output>` | Materialize the keepers export tree (copies). `--regenerate`. |
 | `info <FILE>` | Print all catalog data for one file as JSON (walks up to find the library). |

@@ -28,6 +28,7 @@ fn setup_with_files(n: usize) -> (Catalog, Cache, TempDir, TempDir, TempDir) {
         &catalog,
         &cache,
         &IngestConfig::default(),
+        None,
     )
     .unwrap();
 
