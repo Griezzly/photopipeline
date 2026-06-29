@@ -11,7 +11,7 @@ use rust_embed::RustEmbed;
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use super::AppState;
+use super::{ActiveLibrary, AppState};
 
 #[derive(RustEmbed)]
 #[folder = "assets/"]
@@ -62,20 +62,25 @@ pub async fn list_photos(
     State(state): State<AppState>,
     Query(q): Query<PhotoQuery>,
 ) -> Result<Json<Vec<ReviewListItem>>, StatusCode> {
+    let lib = state.active()?;
     let filter = ReviewFilter {
         flag_type: q.flag_type,
         decided: q.decided,
         limit: q.limit.unwrap_or(200),
         offset: q.offset.unwrap_or(0),
     };
-    state.catalog.review_list(&filter).map(Json).map_err(|e| {
+    lib.catalog.review_list(&filter).map(Json).map_err(|e| {
         tracing::warn!(error = %e, "review_list failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
 
 pub async fn photo_detail(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    match state.catalog.dump_file_by_id(id) {
+    let lib = match state.active() {
+        Ok(l) => l,
+        Err(s) => return s.into_response(),
+    };
+    match lib.catalog.dump_file_by_id(id) {
         Ok(Some(dump)) => Json(dump).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
@@ -88,8 +93,8 @@ pub async fn photo_detail(State(state): State<AppState>, Path(id): Path<i64>) ->
 pub async fn list_groups(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ReviewGroup>>, StatusCode> {
-    state
-        .catalog
+    let lib = state.active()?;
+    lib.catalog
         .duplicate_groups_for_review()
         .map(Json)
         .map_err(|e| {
@@ -118,11 +123,19 @@ fn webp_response(bytes: Vec<u8>) -> Response {
 }
 
 pub async fn thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    render_asset(state, id, true).await
+    let lib = match state.active() {
+        Ok(l) => l,
+        Err(s) => return s.into_response(),
+    };
+    render_asset(lib, id, true).await
 }
 
 pub async fn preview(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    render_asset(state, id, false).await
+    let lib = match state.active() {
+        Ok(l) => l,
+        Err(s) => return s.into_response(),
+    };
+    render_asset(lib, id, false).await
 }
 
 /// Locate the original by id and serve a WebP. Previews are served from (or
@@ -131,23 +144,23 @@ pub async fn preview(State(state): State<AppState>, Path(id): Path<i64>) -> Resp
 /// preview cannot be re-extracted on demand still get a thumbnail from the
 /// preview `scan` produced. Any failure falls back to the SVG placeholder.
 /// Runs the blocking DB + image work on a blocking thread.
-async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
+async fn render_asset(lib: ActiveLibrary, id: i64, is_thumb: bool) -> Response {
     let result = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-        let loc = state.catalog.lookup_file(id).ok()??;
+        let loc = lib.catalog.lookup_file(id).ok()??;
         let hash = loc.content_hash;
 
         if is_thumb {
             // Thumbnail already cached?
-            if state.cache.has_thumb(hash) {
-                if let Ok(bytes) = std::fs::read(state.cache.thumb_path(hash)) {
+            if lib.cache.has_thumb(hash) {
+                if let Ok(bytes) = std::fs::read(lib.cache.thumb_path(hash)) {
                     return Some(bytes);
                 }
             }
             // Derive the thumbnail from the preview rather than the original.
-            let preview = preview_bytes(&state, &loc.path, hash)?;
+            let preview = preview_bytes(&lib, &loc.path, hash)?;
             match pipeline::downscale_webp(&preview, THUMB_EDGE, THUMB_QUALITY) {
                 Ok(thumb) => {
-                    let _ = state.cache.write_thumb(hash, &thumb);
+                    let _ = lib.cache.write_thumb(hash, &thumb);
                     Some(thumb)
                 }
                 Err(e) => {
@@ -156,7 +169,7 @@ async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
                 }
             }
         } else {
-            preview_bytes(&state, &loc.path, hash)
+            preview_bytes(&lib, &loc.path, hash)
         }
     })
     .await
@@ -171,15 +184,15 @@ async fn render_asset(state: AppState, id: i64, is_thumb: bool) -> Response {
 /// Return the preview WebP for `hash`: the cached copy when present, otherwise
 /// rendered from the original and cached. `None` (with a warning) when the
 /// original cannot be rendered.
-fn preview_bytes(state: &AppState, original: &std::path::Path, hash: u128) -> Option<Vec<u8>> {
-    if state.cache.has(hash) {
-        if let Ok(bytes) = std::fs::read(state.cache.path(hash)) {
+fn preview_bytes(lib: &ActiveLibrary, original: &std::path::Path, hash: u128) -> Option<Vec<u8>> {
+    if lib.cache.has(hash) {
+        if let Ok(bytes) = std::fs::read(lib.cache.path(hash)) {
             return Some(bytes);
         }
     }
     match pipeline::render_webp(original, PREVIEW_EDGE, PREVIEW_QUALITY) {
         Ok(bytes) => {
-            let _ = state.cache.write(hash, &bytes);
+            let _ = lib.cache.write(hash, &bytes);
             Some(bytes)
         }
         Err(e) => {
@@ -201,23 +214,23 @@ pub async fn post_decision(
     State(state): State<AppState>,
     Json(req): Json<DecisionRequest>,
 ) -> Result<Json<DecisionCounts>, StatusCode> {
+    let lib = state.active()?;
     let r = match req.action.as_str() {
-        "keep" => state
+        "keep" => lib
             .catalog
             .set_decision(req.file_id, Verdict::Keep, req.note.as_deref()),
-        "reject" => state
+        "reject" => lib
             .catalog
             .set_decision(req.file_id, Verdict::Reject, req.note.as_deref()),
-        "undecide" => state.catalog.clear_decision(req.file_id),
-        "keeper" => state.catalog.pick_keeper(req.file_id),
+        "undecide" => lib.catalog.clear_decision(req.file_id),
+        "keeper" => lib.catalog.pick_keeper(req.file_id),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     r.map_err(|e| {
         tracing::warn!(error = %e, "decision write failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    state
-        .catalog
+    lib.catalog
         .decision_counts()
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -225,8 +238,8 @@ pub async fn post_decision(
 
 /// Read-only current counts (frontend loads this on startup).
 pub async fn get_counts(State(state): State<AppState>) -> Result<Json<DecisionCounts>, StatusCode> {
-    state
-        .catalog
+    let lib = state.active()?;
+    lib.catalog
         .decision_counts()
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -244,11 +257,12 @@ pub async fn post_export(
     State(state): State<AppState>,
     Json(req): Json<ExportRequest>,
 ) -> Result<Json<KeepersReport>, StatusCode> {
+    let lib = state.active()?;
     let out: PathBuf = req
         .output
         .map(|s| expand_tilde(&PathBuf::from(s)))
         .unwrap_or_else(|| PathBuf::from("_keepers"));
-    let catalog = state.catalog.clone();
+    let catalog = lib.catalog.clone();
     let regenerate = req.regenerate;
     tokio::task::spawn_blocking(move || build_keepers_tree(&catalog, &out, regenerate))
         .await
@@ -270,11 +284,12 @@ pub async fn get_export_estimate(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<EstimateQuery>,
 ) -> Result<axum::Json<pipeline::CopyEstimate>, StatusCode> {
+    let lib = state.active()?;
     let out: PathBuf = q
         .output
         .map(|s| expand_tilde(&PathBuf::from(s)))
         .unwrap_or_else(|| PathBuf::from("_keepers"));
-    let catalog = state.catalog.clone();
+    let catalog = lib.catalog.clone();
     tokio::task::spawn_blocking(move || pipeline::estimate_keepers_copy(&catalog, &out))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

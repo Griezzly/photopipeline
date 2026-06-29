@@ -1,4 +1,24 @@
-use std::sync::Arc;
+use std::sync::Mutex;
+
+/// Build an AppState with `catalog`/`cache` as the active library.
+fn app_state_active(
+    catalog: pipeline::catalog::Catalog,
+    cache: pipeline::cache::Cache,
+) -> photopipe::serve::AppState {
+    photopipe::serve::AppState {
+        cfg: std::sync::Arc::new(pipeline::config::Config::default()),
+        roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
+            data: std::path::PathBuf::from("/unused"),
+            cache: std::path::PathBuf::from("/unused"),
+        }),
+        active: std::sync::Arc::new(Mutex::new(Some(photopipe::serve::ActiveLibrary {
+            folder: std::path::PathBuf::from("/lib"),
+            catalog: std::sync::Arc::new(catalog),
+            cache: std::sync::Arc::new(cache),
+        }))),
+        job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
+    }
+}
 
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
@@ -9,11 +29,7 @@ async fn health_endpoint_returns_ok() {
     let dir = tempfile::TempDir::new().unwrap();
     let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
     let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
-    let state = photopipe::serve::AppState {
-        catalog: Arc::new(catalog),
-        cache: Arc::new(cache),
-        cfg: Arc::new(pipeline::config::Config::default()),
-    };
+    let state = app_state_active(catalog, cache);
     let app = photopipe::serve::router(state);
 
     let resp = app
@@ -55,7 +71,6 @@ async fn get_json(app: axum::Router, uri: &str) -> (axum::http::StatusCode, serd
 
 fn state_with_one_file() -> (tempfile::TempDir, photopipe::serve::AppState, i64) {
     use pipeline::ingest::{FileFormat, IngestedFile};
-    use std::sync::Arc;
     let dir = tempfile::TempDir::new().unwrap();
     let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
     let file = IngestedFile {
@@ -68,11 +83,7 @@ fn state_with_one_file() -> (tempfile::TempDir, photopipe::serve::AppState, i64)
     };
     let id = catalog.flush_batch(&[(file, None)]).unwrap()[0];
     let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
-    let state = photopipe::serve::AppState {
-        catalog: Arc::new(catalog),
-        cache: Arc::new(cache),
-        cfg: Arc::new(pipeline::config::Config::default()),
-    };
+    let state = app_state_active(catalog, cache);
     (dir, state, id)
 }
 
@@ -105,7 +116,6 @@ async fn thumb_renders_from_real_jpg_and_caches() {
     use axum::http::{Request, StatusCode};
     use image::{ImageBuffer, Rgb};
     use pipeline::ingest::{FileFormat, IngestedFile};
-    use std::sync::Arc;
     use tower::ServiceExt;
 
     let dir = tempfile::TempDir::new().unwrap();
@@ -126,11 +136,7 @@ async fn thumb_renders_from_real_jpg_and_caches() {
     };
     let id = catalog.flush_batch(&[(file, None)]).unwrap()[0];
     let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
-    let state = photopipe::serve::AppState {
-        catalog: Arc::new(catalog),
-        cache: Arc::new(cache),
-        cfg: Arc::new(pipeline::config::Config::default()),
-    };
+    let state = app_state_active(catalog, cache);
     let app = photopipe::serve::router(state);
 
     let resp = app
@@ -272,7 +278,16 @@ async fn thumb_derives_from_preview_cache_when_original_unrenderable() {
         ImageBuffer::from_fn(120, 90, |x, _| Rgb([(x % 256) as u8, 1, 2]));
     img.save(&jpg).unwrap();
     let preview = pipeline::render_webp(&jpg, 2048, 85).unwrap();
-    state.cache.write(0xABCD, &preview).unwrap();
+    // Access cache through the active library
+    {
+        let active = state.active.lock().unwrap();
+        active
+            .as_ref()
+            .unwrap()
+            .cache
+            .write(0xABCD, &preview)
+            .unwrap();
+    }
 
     let app = photopipe::serve::router(state);
     let resp = app
@@ -302,7 +317,6 @@ async fn export_estimate_reports_files_and_bytes() {
     use image::{ImageBuffer, Rgb};
     use pipeline::catalog::Verdict;
     use pipeline::ingest::{FileFormat, IngestedFile};
-    use std::sync::Arc;
 
     let dir = tempfile::TempDir::new().unwrap();
     let lib = dir.path().join("lib");
@@ -324,11 +338,7 @@ async fn export_estimate_reports_files_and_bytes() {
     catalog.set_decision(id, Verdict::Keep, None).unwrap();
 
     let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
-    let state = photopipe::serve::AppState {
-        catalog: Arc::new(catalog),
-        cache: Arc::new(cache),
-        cfg: Arc::new(pipeline::config::Config::default()),
-    };
+    let state = app_state_active(catalog, cache);
     let out = dir.path().join("_keepers");
     let uri = format!("/api/export/estimate?output={}", out.to_str().unwrap());
     let (s, v) = get_json(photopipe::serve::router(state), &uri).await;
@@ -338,4 +348,30 @@ async fn export_estimate_reports_files_and_bytes() {
         v["bytes"].as_u64().unwrap() > 0,
         "expected nonzero bytes: {v}"
     );
+}
+
+#[tokio::test]
+async fn review_endpoints_409_when_no_library_open() {
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    let dir = tempfile::TempDir::new().unwrap();
+    let state = photopipe::serve::AppState {
+        cfg: std::sync::Arc::new(pipeline::config::Config::default()),
+        roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
+            data: dir.path().join("d"),
+            cache: dir.path().join("c"),
+        }),
+        active: std::sync::Arc::new(Mutex::new(None)),
+        job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
+    };
+    let resp = photopipe::serve::router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/photos")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
