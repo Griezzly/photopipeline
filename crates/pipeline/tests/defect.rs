@@ -41,6 +41,7 @@ fn exposure_flags_correctly() {
         &catalog,
         &cache,
         &ingest_cfg,
+        None,
     )
     .unwrap();
     let hub = pipeline::models::ModelHub::empty();
@@ -81,6 +82,7 @@ fn sharpness_rows_written_for_all_files() {
         &catalog,
         &cache,
         &ingest_cfg,
+        None,
     )
     .unwrap();
     let hub = pipeline::models::ModelHub::empty();
@@ -112,6 +114,7 @@ fn analyze_defects_idempotent() {
         &catalog,
         &cache,
         &ingest_cfg,
+        None,
     )
     .unwrap();
 

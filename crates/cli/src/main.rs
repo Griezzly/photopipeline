@@ -245,6 +245,7 @@ fn cmd_scan(
             &lib.catalog,
             &lib.cache,
             &cfg.ingest,
+            None,
         )?;
         println!("Scan complete:");
         println!("  Processed : {}", report.processed);

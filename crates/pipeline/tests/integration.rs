@@ -29,7 +29,8 @@ fn first_scan_processes_all_second_skips() {
     let cfg = IngestConfig::default();
 
     // First scan — all 3 should be processed.
-    let report1 = ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg).unwrap();
+    let report1 =
+        ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg, None).unwrap();
     assert_eq!(
         report1.processed, 3,
         "first scan should process all 3 files"
@@ -37,7 +38,8 @@ fn first_scan_processes_all_second_skips() {
     assert_eq!(report1.errored, 0);
 
     // Second scan — must be a no-op (idempotency).
-    let report2 = ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg).unwrap();
+    let report2 =
+        ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg, None).unwrap();
     assert_eq!(report2.processed, 0, "second scan must be a no-op");
     assert_eq!(report2.skipped, 3);
 
@@ -63,7 +65,8 @@ fn corrupt_file_logs_and_continues() {
     let cache = Cache::open(cache_dir.path().to_owned()).unwrap();
     let cfg = IngestConfig::default();
 
-    let report = ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg).unwrap();
+    let report =
+        ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg, None).unwrap();
 
     // The scan must not panic or return a hard error.
     // The corrupt file may be counted as processed (hash OK, preview failed with warning)
@@ -92,7 +95,7 @@ fn cache_contains_webp_at_expected_path() {
     let cache = Cache::open(cache_dir.path().to_owned()).unwrap();
     let cfg = IngestConfig::default();
 
-    ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg).unwrap();
+    ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg, None).unwrap();
 
     // There should be exactly one .webp file in the cache.
     let webps: Vec<_> = WalkDir::new(cache_dir.path())
@@ -267,7 +270,8 @@ fn exif_round_trip_jpg() {
     let cache = Cache::open(cache_dir.path().to_owned()).unwrap();
     let cfg = IngestConfig::default();
 
-    let report = ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg).unwrap();
+    let report =
+        ingest_directory(&[input_dir.path().to_owned()], &catalog, &cache, &cfg, None).unwrap();
     assert_eq!(report.processed, 1, "should process the EXIF test JPEG");
     assert_eq!(report.errored, 0);
 
@@ -338,6 +342,7 @@ fn flush_failure_counts_as_errored() {
             &catalog,
             &cache,
             &IngestConfig::default(),
+            None,
         )
         .unwrap();
         assert_eq!(report.processed, 1, "seed scan");
@@ -357,6 +362,7 @@ fn flush_failure_counts_as_errored() {
         &catalog,
         &cache,
         &IngestConfig::default(),
+        None,
     )
     .unwrap();
 
