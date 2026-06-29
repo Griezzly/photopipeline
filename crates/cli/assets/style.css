@@ -24,3 +24,17 @@ button { cursor: pointer; }
 .detail aside { width: 320px; padding: 16px; overflow: auto; background: #1b1b1b; font-size: 13px; }
 .detail aside dt { color: #888; margin-top: 8px; }
 .detail aside dd { margin: 0; }
+.view.hidden { display: none; }
+.home, .browse { max-width: 880px; margin: 0 auto; padding: 24px; }
+.home h1 { margin: 0 0 16px; }
+button.primary { background: #2a6; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-size: 15px; cursor: pointer; }
+.lib-list { display: grid; gap: 8px; margin-top: 12px; }
+.lib-card, .fs-row { display: flex; justify-content: space-between; gap: 12px; width: 100%; text-align: left;
+  background: #1b1b1b; color: #ddd; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; cursor: pointer; }
+.lib-folder { font-weight: 600; } .lib-meta, .fs-count { color: #888; font-size: 13px; }
+.browse header, .browse footer { display: flex; gap: 12px; align-items: center; padding: 8px 0; }
+.crumb { color: #aaa; font-family: monospace; }
+.fs-list { display: grid; gap: 4px; }
+#banners { display: flex; flex-direction: column; }
+.banner { padding: 8px 12px; background: #3a3a1b; color: #eed; border-bottom: 1px solid #553; display: flex; gap: 12px; align-items: center; }
+.banner button { margin-left: auto; }
