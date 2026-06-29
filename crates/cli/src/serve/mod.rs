@@ -122,6 +122,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/counts", get(handlers::get_counts))
         .route("/api/export", post(handlers::post_export))
         .route("/api/export/estimate", get(handlers::get_export_estimate))
+        .route("/api/analyze", post(handlers::post_analyze))
+        .route("/api/analyze/status", get(handlers::get_analyze_status))
         .route("/:file", get(handlers::static_asset))
         .with_state(state)
 }

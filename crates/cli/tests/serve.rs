@@ -351,6 +351,77 @@ async fn export_estimate_reports_files_and_bytes() {
 }
 
 #[tokio::test]
+async fn analyze_job_runs_to_done_ml_skipped() {
+    use axum::http::{Request, StatusCode};
+    use image::{ImageBuffer, Rgb};
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let folder = dir.path().join("photos");
+    std::fs::create_dir_all(&folder).unwrap();
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(40, 30, |_, _| Rgb([4, 5, 6]));
+    img.save(folder.join("a.jpg")).unwrap();
+
+    // App-state with a models-less config (model_dir empty → ModelHub::empty()).
+    let mut cfg = pipeline::config::Config::default();
+    cfg.models.model_dir = dir.path().join("no-models");
+    let state = photopipe::serve::AppState {
+        cfg: std::sync::Arc::new(cfg),
+        roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
+            data: dir.path().join("data"),
+            cache: dir.path().join("cache"),
+        }),
+        active: std::sync::Arc::new(Mutex::new(None)),
+        job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
+    };
+    let app = photopipe::serve::router(state);
+
+    let start = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/analyze")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(format!(
+                    "{{\"folder\":{:?}}}",
+                    folder.to_str().unwrap()
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start.status(), StatusCode::ACCEPTED);
+
+    // Poll status until done (bounded).
+    let mut stage = String::new();
+    for _ in 0..200 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/analyze/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        stage = v["stage"].as_str().unwrap().to_string();
+        if stage == "done" || stage == "failed" {
+            assert_eq!(v["ml_ran"], false);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(stage, "done", "analyze did not reach done");
+}
+
+#[tokio::test]
 async fn review_endpoints_409_when_no_library_open() {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;

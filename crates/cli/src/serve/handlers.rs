@@ -279,6 +279,98 @@ pub struct EstimateQuery {
     pub output: Option<String>,
 }
 
+use std::sync::{Arc, Mutex};
+
+/// ProgressSink that writes into the shared JobState.
+struct JobProgress(Arc<Mutex<super::JobState>>);
+impl pipeline::ProgressSink for JobProgress {
+    fn stage(&self, stage: &str) {
+        let mut j = self.0.lock().unwrap();
+        j.stage = stage.to_string();
+        j.message = format!("{stage}…");
+    }
+    fn set_total(&self, total: u64) {
+        self.0.lock().unwrap().files_total = total;
+    }
+    fn inc(&self) {
+        self.0.lock().unwrap().files_done += 1;
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnalyzeRequest {
+    pub folder: String,
+}
+
+/// Start the background analyze job for `folder`. 409 if one is already running.
+pub async fn post_analyze(
+    State(state): State<AppState>,
+    Json(req): Json<AnalyzeRequest>,
+) -> Result<(StatusCode, Json<super::JobState>), StatusCode> {
+    let folder = expand_tilde(&PathBuf::from(req.folder));
+
+    // Guard: reject if a job is in flight; otherwise seed the job state.
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running() {
+            return Err(StatusCode::CONFLICT);
+        }
+        *job = super::JobState {
+            stage: "scanning".into(),
+            files_done: 0,
+            files_total: 0,
+            ml_ran: false,
+            folder: folder.to_string_lossy().into_owned(),
+            message: "starting…".into(),
+            error: None,
+        };
+    }
+
+    let state2 = state.clone();
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<ActiveLibrary> {
+            let lib = state2.resolve_library(&folder, true)?;
+            let hub = pipeline::models::ModelHub::from_config(&state2.cfg.models)
+                .unwrap_or_else(|_| pipeline::models::ModelHub::empty());
+            state2.job.lock().unwrap().ml_ran = !hub.is_empty();
+            let progress = JobProgress(state2.job.clone());
+            pipeline::analyze_folder(
+                &lib.folder,
+                &lib.catalog,
+                &lib.cache,
+                &hub,
+                &state2.cfg,
+                &progress,
+            )?;
+            Ok(lib)
+        })();
+        match result {
+            Ok(lib) => {
+                state2.set_active(lib);
+                let mut j = state2.job.lock().unwrap();
+                j.stage = "done".into();
+                j.message = "complete".into();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "analyze job failed");
+                let mut j = state2.job.lock().unwrap();
+                j.stage = "failed".into();
+                j.error = Some(e.to_string());
+            }
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(state.job.lock().unwrap().clone()),
+    ))
+}
+
+/// Current analyze job state (polled by the UI).
+pub async fn get_analyze_status(State(state): State<AppState>) -> Json<super::JobState> {
+    Json(state.job.lock().unwrap().clone())
+}
+
 /// Read-only estimate of the keepers copy (files + bytes that would be written).
 pub async fn get_export_estimate(
     State(state): State<AppState>,
