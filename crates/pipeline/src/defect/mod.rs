@@ -33,6 +33,7 @@ pub fn analyze_defects(
     cache: &crate::cache::Cache,
     hub: &crate::models::ModelHub,
     cfg: &crate::config::DefectConfig,
+    progress: Option<&dyn crate::analyze::ProgressSink>,
 ) -> anyhow::Result<DefectReport> {
     use rayon::prelude::*;
     use std::sync::{
@@ -41,6 +42,9 @@ pub fn analyze_defects(
     };
 
     let needing = catalog.files_needing_defect_analysis()?;
+    if let Some(p) = progress {
+        p.set_total(needing.len() as u64);
+    }
 
     let analyzed = AtomicU64::new(0);
     let errored = AtomicU64::new(0);
@@ -50,6 +54,9 @@ pub fn analyze_defects(
     let batch: Mutex<Vec<DefectRow>> = Mutex::new(Vec::new());
 
     needing.par_iter().for_each(|(file_id, path, hash)| {
+        if let Some(p) = progress {
+            p.inc();
+        }
         let preview_path = cache.path(*hash);
 
         if !preview_path.exists() {

@@ -14,12 +14,18 @@ use crate::models::ModelHub;
 
 /// Sink the orchestrator reports progress to. Implemented by the server's job
 /// state. `Send + Sync` because `inc()` is called from rayon worker threads.
+///
+/// Each heavy phase reports its own progress: it calls `stage()` (which resets
+/// the per-phase counter), then `set_total()` with that phase's item count, then
+/// `inc()` once per item. So the bar runs 0→100% *within every phase* rather than
+/// filling once during the scan and sitting at 100% while later phases work.
 pub trait ProgressSink: Send + Sync {
-    /// A coarse stage transition: "scanning" | "calibrating" | "deduping" | "done".
+    /// Begin a new phase (e.g. "scanning", "scoring quality", "done"). Resets the
+    /// per-phase file counter so the next `set_total`/`inc` calls start from zero.
     fn stage(&self, stage: &str);
-    /// Total files to ingest (set once, early in the scan stage).
+    /// Total items in the current phase. Set once, right after `stage()`.
     fn set_total(&self, total: u64);
-    /// One file processed (called per ingested file).
+    /// One item processed in the current phase.
     fn inc(&self);
 }
 
@@ -59,13 +65,23 @@ pub fn analyze_folder(
         Some(progress),
     )?;
 
-    let _defects = crate::defect::analyze_defects(catalog, cache, hub, &cfg.defect)?;
-    let _ml = crate::ml::analyze_ml(catalog, cache, hub, cfg.catalog.write_batch_size)?;
+    progress.stage("detecting defects");
+    let _defects =
+        crate::defect::analyze_defects(catalog, cache, hub, &cfg.defect, Some(progress))?;
+
+    progress.stage("scoring quality");
+    let _ml = crate::ml::analyze_ml(
+        catalog,
+        cache,
+        hub,
+        cfg.catalog.write_batch_size,
+        Some(progress),
+    )?;
 
     progress.stage("calibrating");
     let _cal = crate::calibration::run_calibration(catalog, &cfg.defect)?;
 
-    progress.stage("deduping");
+    progress.stage("grouping duplicates");
     let dedupe = crate::dedupe::run_dedupe(catalog, &cfg.dedupe)?;
 
     catalog

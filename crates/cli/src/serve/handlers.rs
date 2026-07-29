@@ -287,6 +287,9 @@ impl pipeline::ProgressSink for JobProgress {
         let mut j = self.0.lock().unwrap();
         j.stage = stage.to_string();
         j.message = format!("{stage}…");
+        // Each phase reports its own 0→100%; reset the counter at the boundary.
+        j.files_done = 0;
+        j.files_total = 0;
     }
     fn set_total(&self, total: u64) {
         self.0.lock().unwrap().files_total = total;

@@ -61,10 +61,14 @@ fn analyze_folder_runs_chain_ml_skipped_and_is_idempotent() {
 
     let stages = sink.stages.lock().unwrap().clone();
     assert!(stages.contains(&"scanning".to_string()));
+    assert!(stages.contains(&"detecting defects".to_string()));
+    assert!(stages.contains(&"scoring quality".to_string()));
     assert!(stages.contains(&"calibrating".to_string()));
-    assert!(stages.contains(&"deduping".to_string()));
+    assert!(stages.contains(&"grouping duplicates".to_string()));
     assert_eq!(*sink.total.lock().unwrap(), 2);
-    assert_eq!(*sink.ticks.lock().unwrap(), 2);
+    // Progress now spans multiple phases: 2 files ingested + 2 files defect-analyzed
+    // (ML skipped here — empty hub returns before reporting).
+    assert_eq!(*sink.ticks.lock().unwrap(), 4);
 
     // last_analyzed stamped.
     assert!(lib.catalog.library_meta().unwrap().unwrap().2.is_some());

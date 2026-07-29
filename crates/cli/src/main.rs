@@ -253,7 +253,7 @@ fn cmd_scan(
         println!("  Skipped   : {}", report.skipped);
         println!("  Errored   : {}", report.errored);
 
-        let defect_report = analyze_defects(&lib.catalog, &lib.cache, &hub, &cfg.defect)?;
+        let defect_report = analyze_defects(&lib.catalog, &lib.cache, &hub, &cfg.defect, None)?;
         println!("Defect analysis:");
         println!("  Analyzed             : {}", defect_report.analyzed);
         println!("  Errored              : {}", defect_report.errored);
@@ -266,7 +266,13 @@ fn cmd_scan(
             defect_report.flagged_underexposed
         );
 
-        let ml_report = analyze_ml(&lib.catalog, &lib.cache, &hub, cfg.catalog.write_batch_size)?;
+        let ml_report = analyze_ml(
+            &lib.catalog,
+            &lib.cache,
+            &hub,
+            cfg.catalog.write_batch_size,
+            None,
+        )?;
         if !hub.is_empty() {
             println!("ML analysis:");
             println!("  Embedded   : {}", ml_report.embedded);

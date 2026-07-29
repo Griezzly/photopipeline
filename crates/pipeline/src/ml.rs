@@ -24,6 +24,7 @@ pub fn analyze_ml(
     cache: &crate::cache::Cache,
     hub: &crate::models::ModelHub,
     batch_size: usize,
+    progress: Option<&dyn crate::analyze::ProgressSink>,
 ) -> anyhow::Result<MlReport> {
     if hub.is_empty() {
         tracing::info!("no ML models loaded — skipping analyze_ml");
@@ -53,6 +54,9 @@ pub fn analyze_ml(
 
     if need_emb.is_empty() && need_iqa.is_empty() {
         tracing::debug!("all files already have ML results — nothing to do");
+        if let Some(p) = progress {
+            p.set_total(0);
+        }
         return Ok(MlReport::default());
     }
 
@@ -88,6 +92,9 @@ pub fn analyze_ml(
         iqa = hub.iqa.is_some(),
         "starting ML analysis"
     );
+    if let Some(p) = progress {
+        p.set_total(work_items.len() as u64);
+    }
 
     let pending: Mutex<Vec<MlRow>> = Mutex::new(Vec::new());
     let embedded = AtomicU64::new(0);
@@ -97,6 +104,9 @@ pub fn analyze_ml(
     work_items
         .par_iter()
         .for_each(|(file_id, path, hash, want_emb, want_iqa)| {
+            if let Some(p) = progress {
+                p.inc();
+            }
             let preview_path = cache.path(*hash);
             if !preview_path.exists() {
                 tracing::warn!(

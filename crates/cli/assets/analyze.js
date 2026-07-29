@@ -21,10 +21,19 @@ export async function startAnalyze(folder) {
     let s;
     try { s = await api('GET', '/api/analyze/status'); } catch (_) { setTimeout(poll, 1000); return; }
     document.getElementById('an-stage').textContent = s.message || s.stage;
-    const pct = s.files_total ? Math.round((s.files_done / s.files_total) * 100) : 0;
-    document.getElementById('an-fill').style.width = `${pct}%`;
-    document.getElementById('an-detail').textContent =
-      s.stage === 'scanning' ? `${s.files_done} / ${s.files_total} files` : '';
+    const fill = document.getElementById('an-fill');
+    if (s.files_total > 0) {
+      // Countable phase (scan, defects, quality): show a real 0→100% bar.
+      const pct = Math.round((s.files_done / s.files_total) * 100);
+      fill.classList.remove('indeterminate');
+      fill.style.width = `${pct}%`;
+      document.getElementById('an-detail').textContent = `${s.files_done} / ${s.files_total}`;
+    } else {
+      // Phase with no per-item count (calibrating, grouping): show activity, not 100%.
+      fill.classList.add('indeterminate');
+      fill.style.width = '100%';
+      document.getElementById('an-detail').textContent = '';
+    }
     if (s.stage === 'done') { window.pp.openReview(s.folder, { ml_ran: s.ml_ran }); return; }
     if (s.stage === 'failed') { document.getElementById('an-stage').textContent = `Failed: ${s.error || 'unknown error'}`; return; }
     setTimeout(poll, 1000);

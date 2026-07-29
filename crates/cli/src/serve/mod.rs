@@ -25,7 +25,9 @@ pub struct ActiveLibrary {
 /// Live state of the (single) background analyze job. `idle` until one runs.
 #[derive(Clone, serde::Serialize)]
 pub struct JobState {
-    pub stage: String, // idle | scanning | calibrating | deduping | done | failed
+    // idle | scanning | detecting defects | scoring quality | calibrating |
+    // grouping duplicates | done | failed
+    pub stage: String,
     pub files_done: u64,
     pub files_total: u64,
     pub ml_ran: bool,
@@ -49,9 +51,10 @@ impl Default for JobState {
 }
 
 impl JobState {
-    /// True while a run is in flight.
+    /// True while a run is in flight — any stage that is not a terminal or the
+    /// initial idle state. (Kept name-agnostic so new phase labels stay covered.)
     pub fn running(&self) -> bool {
-        matches!(self.stage.as_str(), "scanning" | "calibrating" | "deduping")
+        !matches!(self.stage.as_str(), "idle" | "done" | "failed")
     }
 }
 

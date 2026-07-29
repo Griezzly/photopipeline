@@ -40,7 +40,7 @@ fn analyze_ml_no_models_is_noop() {
     let (catalog, cache, _input, _db, _cache_dir) = setup_with_files(3);
     let hub = ModelHub::empty();
 
-    let report = analyze_ml(&catalog, &cache, &hub, 64).unwrap();
+    let report = analyze_ml(&catalog, &cache, &hub, 64, None).unwrap();
 
     assert_eq!(report.embedded, 0, "no embedder → embedded == 0");
     assert_eq!(report.iqa_scored, 0, "no IQA → iqa_scored == 0");
@@ -54,8 +54,8 @@ fn analyze_ml_idempotent_no_models() {
     let (catalog, cache, _input, _db, _cache_dir) = setup_with_files(2);
     let hub = ModelHub::empty();
 
-    let r1 = analyze_ml(&catalog, &cache, &hub, 64).unwrap();
-    let r2 = analyze_ml(&catalog, &cache, &hub, 64).unwrap();
+    let r1 = analyze_ml(&catalog, &cache, &hub, 64, None).unwrap();
+    let r2 = analyze_ml(&catalog, &cache, &hub, 64, None).unwrap();
 
     // Both runs should be no-ops with an empty hub.
     assert_eq!(r1.embedded + r1.iqa_scored + r1.errored, 0);
@@ -88,13 +88,13 @@ fn analyze_ml_with_live_models_idempotent() {
     let (catalog, cache, _input, _db, _cache_dir) = setup_with_files(2);
 
     // First pass: should embed + score everything.
-    let r1 = analyze_ml(&catalog, &cache, &hub, 64).unwrap();
+    let r1 = analyze_ml(&catalog, &cache, &hub, 64, None).unwrap();
     assert_eq!(r1.embedded, 2, "first pass: should embed 2 files");
     assert_eq!(r1.iqa_scored, 2, "first pass: should IQA-score 2 files");
     assert_eq!(r1.errored, 0);
 
     // Second pass: no new work (idempotency).
-    let r2 = analyze_ml(&catalog, &cache, &hub, 64).unwrap();
+    let r2 = analyze_ml(&catalog, &cache, &hub, 64, None).unwrap();
     assert_eq!(r2.embedded, 0, "second pass: nothing to embed");
     assert_eq!(r2.iqa_scored, 0, "second pass: nothing to score");
 
