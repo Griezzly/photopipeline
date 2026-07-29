@@ -42,6 +42,7 @@ function wireChrome() {
   document.getElementById('home-btn').onclick = () => window.pp.renderHome();
   flagFilter().onchange = loadPhotos;
   decidedFilter().onchange = loadPhotos;
+  document.getElementById('dupes-btn').onclick = () => window.pp.openDuplicates(activeFolder);
   document.getElementById('export-btn').onclick = onExport;
   document.onkeydown = onKey;
 }

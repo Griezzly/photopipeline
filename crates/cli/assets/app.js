@@ -18,7 +18,7 @@ export function humanBytes(n) {
   return i ? `${v.toFixed(1)} ${u[i]}` : `${n} B`;
 }
 
-const VIEWS = ['home', 'browse', 'analyze', 'review'];
+const VIEWS = ['home', 'browse', 'analyze', 'review', 'duplicates'];
 export function show(view) {
   for (const v of VIEWS) {
     document.getElementById(`view-${v}`).classList.toggle('hidden', v !== view);
@@ -29,9 +29,10 @@ import { renderHome } from '/home.js';
 import { renderBrowse } from '/browse.js';
 import { startAnalyze } from '/analyze.js';
 import { openReview } from '/review.js';
+import { openDuplicates } from '/duplicates.js';
 
 // Exposed so views can navigate without circular imports.
-window.pp = { api, humanBytes, show, renderHome, renderBrowse, startAnalyze, openReview };
+window.pp = { api, humanBytes, show, renderHome, renderBrowse, startAnalyze, openReview, openDuplicates };
 
 async function boot() {
   // If a library is already active (serve <folder>), go straight to Review.

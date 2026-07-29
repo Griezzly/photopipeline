@@ -140,6 +140,34 @@ fn near_identical_within_window_group_orthogonal_stays_out() {
     );
 }
 
+/// The review-cluster query returns one cluster with the suggested keeper first,
+/// remaining members best-IQA-first, and the right suggested_keeper_id/count.
+#[test]
+fn duplicate_clusters_for_review_orders_keeper_first() {
+    let (catalog, _dir) = make_catalog();
+    let a = insert_file(&catalog, 0, Some(1000));
+    let b = insert_file(&catalog, 1, Some(1002));
+    let c = insert_file(&catalog, 2, Some(1004));
+    set_embedding(&catalog, a, vec![1.0, 0.0, 0.0]);
+    set_embedding(&catalog, b, vec![0.999, 0.044, 0.0]);
+    set_embedding(&catalog, c, vec![0.998, 0.0, 0.063]);
+    set_iqa(&catalog, a, 0.5);
+    set_iqa(&catalog, b, 0.6);
+    set_iqa(&catalog, c, 0.95); // best → suggested keeper
+
+    run_dedupe(&catalog, &test_cfg()).unwrap();
+
+    let clusters = catalog.duplicate_clusters_for_review().unwrap();
+    assert_eq!(clusters.len(), 1, "one duplicate group");
+    let cl = &clusters[0];
+    assert_eq!(cl.members.len(), 3);
+    assert_eq!(cl.suggested_keeper_id, Some(c));
+    // Suggested keeper first, then remaining members by descending IQA.
+    let order: Vec<i64> = cl.members.iter().map(|m| m.file_id).collect();
+    assert_eq!(order, vec![c, b, a], "keeper first, then IQA-desc; got {order:?}");
+    assert!(cl.members[0].iqa_score.unwrap() > 0.9);
+}
+
 /// Running dedupe twice yields identical group/member/keeper counts.
 #[test]
 fn dedupe_is_idempotent() {

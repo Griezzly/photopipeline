@@ -38,6 +38,25 @@ button.primary { background: #2a6; color: #fff; border: none; padding: 10px 16px
 #banners { display: flex; flex-direction: column; }
 .banner { padding: 8px 12px; background: #3a3a1b; color: #eed; border-bottom: 1px solid #553; display: flex; gap: 12px; align-items: center; }
 .banner button { margin-left: auto; }
+/* Duplicates view */
+.dup-list { display: flex; flex-direction: column; gap: 16px; padding: 12px; }
+.cluster { background: #181818; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 12px; }
+.cluster-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 8px; }
+.cluster-title { font-weight: 600; }
+.cluster-status { font-size: 13px; color: #c93; }
+.cluster-status.done { color: #6c6; }
+.cluster-row { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+.cluster-row .tile { flex: 0 0 200px; }
+.cluster-row .tile img { cursor: zoom-in; }
+.tile.suggested { border-color: #cc3; }
+.pick-btn {
+  position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+  font-size: 12px; white-space: nowrap; background: rgba(0,0,0,.78);
+  border: 1px solid #4a4; color: #cfc; border-radius: 4px; padding: 3px 8px;
+}
+.tile.keep .pick-btn { border-color: #3a3; color: #dfd; cursor: default; }
+#dup-box-meta .primary { margin-top: 12px; width: 100%; }
+
 .bar { height: 14px; background: #222; border-radius: 7px; overflow: hidden; margin: 10px 0; }
 .bar-fill { height: 100%; width: 0; background: #2a6; transition: width .3s; }
 .bar-fill.indeterminate {
