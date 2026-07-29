@@ -37,8 +37,10 @@ scan ──> calibrate ──> dedupe ──> serve / review-tree ──> export
   lens (run after you've scanned a few dozen frames per lens).
 - **`dedupe`** — group near-identical frames from the embeddings and elect a
   suggested keeper per group.
-- **`serve`** — the review UI: a grid of your photos (flagged/duplicates first),
-  keyboard-driven keep/reject, written through to the catalog.
+- **`serve`** — the review UI: a grid of your photos (flagged/duplicates first)
+  with keyboard-driven keep/reject, plus a **Duplicates** view that clusters each
+  near-duplicate group so you can pick the best shot in one click. Decisions are
+  written through to the catalog.
 - **`export-keepers`** — build a `keepers/YYYY-MM/` tree of copies of everything
   you kept, ready to hand to Lightroom / Capture One / a backup.
 
@@ -298,6 +300,15 @@ written through to the catalog immediately.
 
 The footer shows live keep / reject / undecided counts. The server binds
 `127.0.0.1` only — it is never exposed on the network.
+
+#### Duplicates view
+
+Click **Duplicates** in the review header for a per-group view of near-identical
+shots. Each group is a row with the pipeline's suggested keeper first (gold
+outline) and the rest ordered best-quality-first. Click a thumbnail to compare
+shots full-size (`←` / `→` to step through the group); **★ Keep this** keeps that
+shot and rejects the others in the group in one action — the same as pressing `K`
+on it in the grid.
 
 ### Review tree (file-manager browsing)
 
