@@ -8,10 +8,9 @@ fn write_config(dir: &Path) -> std::path::PathBuf {
     let cfg_path = dir.join("photopipe.toml");
     std::fs::write(
         &cfg_path,
-        format!(
-            "[models]\nmodel_dir = \"{}\"\n",
-            dir.join("models").display()
-        ),
+        // TOML *literal* string (single quotes): no escape processing, so a
+        // Windows path's backslashes (C:\Users\…) don't parse as \U escapes.
+        format!("[models]\nmodel_dir = '{}'\n", dir.join("models").display()),
     )
     .unwrap();
     cfg_path
