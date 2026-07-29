@@ -182,6 +182,18 @@ pub struct ReviewListItem {
     pub is_keeper: bool,
 }
 
+/// One duplicate cluster for the review UI: the group plus its member files as
+/// full review rows, ordered suggested-keeper-first then best-IQA-first.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewCluster {
+    pub group_id: i64,
+    /// "YYYY-MM-DD" from the suggested keeper's `captured_at`, or "unknown-date".
+    pub date: String,
+    /// file_id of the pipeline's suggested keeper, if the group has one.
+    pub suggested_keeper_id: Option<i64>,
+    pub members: Vec<ReviewListItem>,
+}
+
 /// Per-file inputs to the dedupe `quality_score` formula.
 pub struct QualityInputs {
     /// IQA score (`iqa.score`), or `None` when no IQA row exists.
@@ -994,6 +1006,97 @@ impl Catalog {
             }
         }
         Ok(groups)
+    }
+
+    /// Every duplicate cluster with its member files as full review rows, for the
+    /// browser's Duplicates view. Members are ordered suggested-keeper-first, then
+    /// best-IQA-first (nulls last), then by path. Each member carries its flags,
+    /// IQA, decision verdict, and keeper flag so the grid can render + act without
+    /// a second round-trip.
+    pub fn duplicate_clusters_for_review(&self) -> Result<Vec<ReviewCluster>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.group_id,
+                        f.id,
+                        f.path,
+                        f.content_hash,
+                        COALESCE(
+                            strftime(CAST(to_timestamp(e.captured_at) AS TIMESTAMP), '%Y-%m'),
+                            'unknown-date') AS ym,
+                        iq.score AS iqa,
+                        (SELECT string_agg(d.flag_type, ',')
+                           FROM defect_flags d WHERE d.file_id = f.id) AS flags,
+                        (SELECT max(d.confidence)
+                           FROM defect_flags d WHERE d.file_id = f.id) AS maxconf,
+                        dec.verdict,
+                        COALESCE(dec.is_keeper, false) AS is_keeper,
+                        m.is_suggested_keeper,
+                        COALESCE(
+                            strftime(CAST(to_timestamp(ke.captured_at) AS TIMESTAMP), '%Y-%m-%d'),
+                            'unknown-date') AS group_date
+                 FROM duplicate_members m
+                 JOIN files f ON f.id = m.file_id
+                 LEFT JOIN exif e ON e.file_id = f.id
+                 LEFT JOIN iqa iq ON iq.file_id = f.id
+                 LEFT JOIN decisions dec ON dec.file_id = f.id
+                 LEFT JOIN duplicate_members km
+                        ON km.group_id = m.group_id AND km.is_suggested_keeper = TRUE
+                 LEFT JOIN exif ke ON ke.file_id = km.file_id
+                 ORDER BY m.group_id, m.is_suggested_keeper DESC, iqa DESC NULLS LAST, f.path",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let flags_str: Option<String> = row.get(6)?;
+                let flags = flags_str
+                    .map(|s| s.split(',').map(|x| x.to_string()).collect())
+                    .unwrap_or_default();
+                let group_id: i64 = row.get(0)?;
+                let is_suggested_keeper: bool = row.get(10)?;
+                let group_date: String = row.get(11)?;
+                let item = ReviewListItem {
+                    file_id: row.get(1)?,
+                    path: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    year_month: row.get(4)?,
+                    iqa_score: row.get(5)?,
+                    flags,
+                    max_confidence: row.get(7)?,
+                    group_id: Some(group_id),
+                    verdict: row.get(8)?,
+                    is_keeper: row.get(9)?,
+                };
+                Ok((group_id, item, is_suggested_keeper, group_date))
+            })
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+
+        let mut clusters: Vec<ReviewCluster> = Vec::new();
+        for row in rows {
+            let (group_id, item, is_suggested_keeper, group_date) =
+                row.map_err(|e| CatalogError::Db(e.to_string()))?;
+            let c = match clusters.last_mut() {
+                Some(c) if c.group_id == group_id => c,
+                _ => {
+                    clusters.push(ReviewCluster {
+                        group_id,
+                        date: group_date,
+                        suggested_keeper_id: None,
+                        members: Vec::new(),
+                    });
+                    clusters.last_mut().unwrap()
+                }
+            };
+            if is_suggested_keeper {
+                c.suggested_keeper_id = Some(item.file_id);
+            }
+            c.members.push(item);
+        }
+        Ok(clusters)
     }
 
     /// All files the user decided to keep, dated "YYYY-MM" (or "unknown-date").

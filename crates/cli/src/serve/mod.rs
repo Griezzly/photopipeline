@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/photos", get(handlers::list_photos))
         .route("/api/photos/:id", get(handlers::photo_detail))
         .route("/api/groups", get(handlers::list_groups))
+        .route("/api/clusters", get(handlers::list_clusters))
         .route("/thumb/:id", get(handlers::thumb))
         .route("/preview/:id", get(handlers::preview))
         .route("/", get(handlers::index))

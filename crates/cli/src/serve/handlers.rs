@@ -4,7 +4,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pipeline::catalog::{DecisionCounts, ReviewFilter, ReviewGroup, ReviewListItem, Verdict};
+use pipeline::catalog::{
+    DecisionCounts, ReviewCluster, ReviewFilter, ReviewGroup, ReviewListItem, Verdict,
+};
 use pipeline::config::expand_tilde;
 use pipeline::{build_keepers_tree, KeepersReport};
 use rust_embed::RustEmbed;
@@ -100,6 +102,20 @@ pub async fn list_groups(
         .map(Json)
         .map_err(|e| {
             tracing::warn!(error = %e, "duplicate_groups_for_review failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// Duplicate clusters with full member review rows, for the Duplicates view.
+pub async fn list_clusters(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ReviewCluster>>, StatusCode> {
+    let lib = state.active()?;
+    lib.catalog
+        .duplicate_clusters_for_review()
+        .map(Json)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "duplicate_clusters_for_review failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }
