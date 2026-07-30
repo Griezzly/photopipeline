@@ -71,6 +71,9 @@
 .btn-danger { border-color: var(--reject); background: var(--reject-soft); color: var(--reject-fg); }
 .btn-icon { width: 32px; height: 32px; padding: 0; }
 .btn.sm { padding: 7px 11px; font-size: 12.5px; }
+/* .btn.sm's two-class padding otherwise outranks .btn-icon's one-class padding:0,
+   squeezing the icon inside the still-32x32 box (1b:145 wants a 28x28 icon button). */
+.btn-icon.sm { width: 28px; height: 28px; padding: 0; }
 .btn.on {
   border-color: var(--accent-edge); background: var(--accent-soft); color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
