@@ -587,3 +587,97 @@ async fn busy_job_rejects_concurrent_analyze_and_open() {
     .await;
     assert_eq!(s, StatusCode::CONFLICT);
 }
+
+/// The embedded font must be served as a font, not application/octet-stream —
+/// `static_asset` matches on extension and had no arm for `ttf`.
+#[tokio::test]
+async fn font_is_served_with_font_content_type() {
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let app = photopipe::serve::router(app_state_active(catalog, cache));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/Manrope.ttf")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "font/ttf"
+    );
+}
+
+/// Every asset `index.html` references must resolve through the `/:file` route.
+/// Catches a renamed or forgotten module before it ships as a blank screen.
+#[tokio::test]
+async fn every_asset_referenced_by_index_resolves() {
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let state = app_state_active(catalog, cache);
+
+    let index = {
+        let app = photopipe::serve::router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        String::from_utf8(to_bytes(resp.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap()
+    };
+
+    // Pull every root-relative href/src out of index.html.
+    let mut refs: Vec<String> = Vec::new();
+    for attr in ["href=\"/", "src=\"/"] {
+        let mut rest = index.as_str();
+        while let Some(i) = rest.find(attr) {
+            rest = &rest[i + attr.len()..];
+            let end = rest
+                .find('"')
+                .expect("unterminated attribute in index.html");
+            let path = &rest[..end];
+            if !path.is_empty() && !path.starts_with("api/") {
+                refs.push(path.to_string());
+            }
+            rest = &rest[end..];
+        }
+    }
+    assert!(
+        refs.len() >= 3,
+        "expected index.html to reference the stylesheets and app.js, found {refs:?}"
+    );
+
+    for path in refs {
+        let app = photopipe::serve::router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{path}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "/{path} did not resolve");
+    }
+}

@@ -1,37 +1,31 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>photopipe</title>
+  <script>
+    // Inline and blocking: set the theme before first paint to avoid a flash.
+    try {
+      var t = localStorage.getItem('pp-theme');
+      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    } catch (e) { /* private mode — keep the dark default */ }
+  </script>
+  <link rel="stylesheet" href="/tokens.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div id="view-home" class="view"></div>
-  <div id="view-browse" class="view hidden"></div>
-  <div id="view-analyze" class="view hidden"></div>
-  <div id="view-review" class="view hidden">
-    <header>
-      <button id="home-btn">← Home</button>
-      <strong id="review-title">Review</strong>
-      <span class="spacer"></span>
-      <label>flag <select id="flag-filter">
-        <option value="">any</option><option value="blur">blur</option>
-        <option value="back_focus">back_focus</option><option value="overexposed">overexposed</option>
-        <option value="underexposed">underexposed</option><option value="low_iqa">low_iqa</option>
-      </select></label>
-      <label>state <select id="decided-filter">
-        <option value="">all</option><option value="false">undecided</option><option value="true">decided</option>
-      </select></label>
-      <button id="dupes-btn">Duplicates</button>
-      <button id="export-btn">Export keepers</button>
-    </header>
-    <div id="banners"></div>
-    <main id="grid" class="grid"></main>
-    <div id="detail" class="detail hidden"><img id="detail-img" alt=""><aside id="detail-meta"></aside></div>
-    <footer id="counts"></footer>
+  <div class="app">
+    <nav id="rail" class="rail"></nav>
+    <div class="stage">
+      <div id="view-libraries"  class="view"></div>
+      <div id="view-analyze"    class="view hidden"></div>
+      <div id="view-review"     class="view hidden"></div>
+      <div id="view-duplicates" class="view hidden"></div>
+    </div>
   </div>
-  <div id="view-duplicates" class="view hidden"></div>
+  <div id="modal-host"></div>
+  <div id="toast-host" class="toast-host"></div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
