@@ -60,9 +60,11 @@
   --keep:          #16A34A;
   --keep-soft:     #DCFCE7;
   --keep-fg:       #14532D;
+  --keep-on:       #FFFFFF;   /* text/glyph on a solid --keep fill */
   --reject:        #BA1A1A;
   --reject-soft:   #FFDAD6;
   --reject-fg:     #410002;
+  --reject-on:     #FFFFFF;   /* text/glyph on a solid --reject fill */
   --keeper:        #007A8A;
 
   --warn-edge:     rgba(182,137,0,.35);
@@ -77,6 +79,12 @@
   --hatch:         rgba(0,0,0,.07);
   --kbd-bg:        rgba(0,0,0,.06);
   --kbd-edge:      rgba(0,0,0,.14);
+
+  /* Photo wells render neutral in both themes, so text painted directly over
+     a photo (flag chips, dup labels, score readouts, meter tracks) is
+     theme-invariant white — never re-tinted by the light/dark toggle. */
+  --overlay-fg:    #FFFFFF;
+  --overlay-track: rgba(255,255,255,.12);
 }
 
 /* ── Dark (default) ────────────────────────────────────────────────────── */
@@ -111,9 +119,11 @@
   --keep:          #4ADE80;
   --keep-soft:     rgba(74,222,128,.18);
   --keep-fg:       #B7F1C7;
+  --keep-on:       #04240F;   /* text/glyph on a solid --keep fill */
   --reject:        #FF6B66;
   --reject-soft:   rgba(255,107,102,.10);
   --reject-fg:     #FF9990;
+  --reject-on:     #2D0808;   /* text/glyph on a solid --reject fill */
   --keeper:        #09B2C7;
 
   --warn-edge:     rgba(182,137,0,.45);
@@ -128,6 +138,12 @@
   --hatch:         rgba(255,255,255,.07);
   --kbd-bg:        rgba(255,255,255,.07);
   --kbd-edge:      rgba(255,255,255,.14);
+
+  /* Photo wells render neutral in both themes, so text painted directly over
+     a photo (flag chips, dup labels, score readouts, meter tracks) is
+     theme-invariant white — never re-tinted by the light/dark toggle. */
+  --overlay-fg:    #FFFFFF;
+  --overlay-track: rgba(255,255,255,.12);
 }
 
 html, body {

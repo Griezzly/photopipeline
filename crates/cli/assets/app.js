@@ -62,6 +62,7 @@ async function boot() {
   if (window.pp.openLibraries) await window.pp.openLibraries();
 }
 
-// Task 2 imports rail.js here; Tasks 3-10 add their screen imports. Keeping the
-// import list in one place means index.html never changes again.
-import('/rail.js').then(() => boot());
+// Task 2 imports rail.js and toast.js here; Tasks 3-10 add their screen
+// imports. Keeping the import list in one place means index.html never
+// changes again.
+Promise.all([import('/rail.js'), import('/toast.js')]).then(() => boot());
