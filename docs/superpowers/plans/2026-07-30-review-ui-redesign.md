@@ -16,7 +16,7 @@ Copied from `docs/superpowers/specs/2026-07-30-review-ui-redesign-design.md` and
 - **No JavaScript build step, bundler, framework, or npm dependency.** Plain ES modules served as-is.
 - **Flat asset directory.** The `/:file` route (`crates/cli/src/serve/mod.rs:135`) matches a single path segment, so `crates/cli/assets/` must have no subdirectories.
 - **No `alert()`, `confirm()`, or `prompt()`.** The design replaces all three with the modal and toast components.
-- **Every colour goes through a token.** No literal hex in `style.css` or in any `*.js`. Only `tokens.css` holds hex values. This is what makes the theme toggle work.
+- **Every colour goes through a token.** No literal hex in `style.css` or in any `*.js`; only `tokens.css` holds hex values. This is what makes the theme toggle work. Two narrow exceptions, both theme-independent by intent and both audited in Task 11: the drop-shadow `rgba()` values inside the `--shadow-*` tokens in `tokens.css`, and the drop-shadow under a photo (`.detail-img`, `.cmp-img`) — a shadow cast by an image is not chrome and does not re-tint per theme. Anything else with a literal colour is a defect.
 - **`font-variant-numeric: tabular-nums` globally** — counts and scores must not jitter as they update.
 - **Photos never carry the accent.** Onboard cyan is chrome-only. Photo wells are `--well` / `--well-2`.
 - **Defect flags are monochrome** — white monospace on a black scrim, never hued. Codes are two or three characters: `BLR`, `BF`, `OE`, `UE`, `IQA`.
