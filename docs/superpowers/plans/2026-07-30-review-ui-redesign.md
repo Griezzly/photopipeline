@@ -1192,12 +1192,16 @@ export async function openPicker(startPath) {
     m.el.querySelector('#pk-cur').textContent = cur || 'Pick a drive or location';
 
     // Breadcrumbs from the path itself; the last segment is the current folder.
+    // A POSIX root ("/") has no non-empty segments, so it needs its own case —
+    // otherwise filter(Boolean) yields [] and the strip renders blank.
     const crumbs = m.el.querySelector('#pk-crumbs');
     if (cur) {
       const parts = cur.split(/[\\/]/).filter(Boolean);
-      crumbs.innerHTML = parts.map((p, i) =>
-        `<span class="crumb-seg${i === parts.length - 1 ? ' on' : ''}">${p}</span>`
-      ).join('<span class="crumb-sep">/</span>');
+      crumbs.innerHTML = parts.length
+        ? parts.map((p, i) =>
+            `<span class="crumb-seg${i === parts.length - 1 ? ' on' : ''}">${p}</span>`
+          ).join('<span class="crumb-sep">/</span>')
+        : '<span class="crumb-seg on">/</span>';
     } else {
       crumbs.innerHTML = '<span class="crumb-seg">Locations</span>';
     }
