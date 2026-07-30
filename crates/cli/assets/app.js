@@ -67,4 +67,5 @@ async function boot() {
 // changes again.
 Promise.all([
   import('/rail.js'), import('/toast.js'), import('/libraries.js'), import('/picker.js'),
+  import('/analyze.js'),
 ]).then(() => boot());
