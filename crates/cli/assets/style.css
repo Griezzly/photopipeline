@@ -278,7 +278,7 @@
 }
 .toast.warn, .notice.warn {
   border-color: var(--warn-edge); background: var(--warn-bg);
-  background-image: radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--warn-fg) 10%, transparent), transparent 55%);
+  background-image: radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--warn) 14%, transparent), transparent 55%);
 }
 .toast.info, .notice.info {
   border-color: var(--accent-edge);

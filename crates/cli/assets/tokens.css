@@ -67,6 +67,7 @@
   --reject-on:     #FFFFFF;   /* text/glyph on a solid --reject fill */
   --keeper:        #007A8A;
 
+  --warn:          #B68900;   /* opaque amber — the --keep/--reject/--accent-style solid, for washes/mixes */
   --warn-edge:     rgba(182,137,0,.35);
   --warn-bg:       #FFFBEB;
   --warn-soft:     #FFF1B8;
@@ -126,6 +127,7 @@
   --reject-on:     #2D0808;   /* text/glyph on a solid --reject fill */
   --keeper:        #09B2C7;
 
+  --warn:          #B68900;   /* opaque amber — the --keep/--reject/--accent-style solid, for washes/mixes */
   --warn-edge:     rgba(182,137,0,.45);
   --warn-bg:       rgba(182,137,0,.10);
   --warn-soft:     rgba(255,241,184,.16);
