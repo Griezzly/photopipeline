@@ -1,10 +1,14 @@
 import { api, show, state } from '/app.js';
 import { icon } from '/icons.js';
 
+// Each divisor is paired with the unit it converts INTO, not the unit it
+// converts from — dividing seconds by 60 yields minutes, so that row is
+// labelled 'minute'. Pairing it with 'second' makes every label one
+// conversion step stale ("1 hour ago" for a day-old library).
 function relTime(unixSecs) {
   if (!unixSecs) return 'never';
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
-  const steps = [[60, 'second'], [60, 'minute'], [24, 'hour'], [7, 'day'], [4.35, 'week'], [12, 'month']];
+  const steps = [[60, 'minute'], [60, 'hour'], [24, 'day'], [7, 'week'], [4.35, 'month'], [12, 'year']];
   let v = s, unit = 'second';
   for (const [span, name] of steps) {
     if (v < span) break;
