@@ -1308,7 +1308,6 @@ The design's central rule: **counted stages get a determinate bar and an `n / to
 
 ```js
 import { api, show, state } from '/app.js';
-import { icon } from '/icons.js';
 
 // The server reports one stage string at a time. The checklist's done/active/
 // pending state is derived from position in this ordered list — these strings
@@ -1343,9 +1342,20 @@ export async function startAnalyze(folder, opts = {}) {
   poll(folder);
 }
 
+// Remembers how far the run actually got, so a terminal or unrecognised stage
+// string does not regress the checklist. `failed` is set server-side without
+// resetting files_done/files_total (see handlers.rs), so falling back to index 0
+// would redraw completed stages as "queued" underneath a failure toast.
+let lastStageIdx = 0;
+
 function stageIndex(stage) {
+  if (stage === 'done') return STAGES.length;
   const i = STAGES.findIndex(s => s.key === stage);
-  return i === -1 ? (stage === 'done' ? STAGES.length : 0) : i;
+  if (i !== -1) {
+    lastStageIdx = i;
+    return i;
+  }
+  return lastStageIdx;
 }
 
 function render(folder, s) {
