@@ -474,3 +474,87 @@
 }
 .an-note { flex: 1; font: 400 12.5px/1.4 var(--font); color: var(--text-muted); }
 .pill-run { background: var(--accent-tint); color: var(--accent-tint-fg); }
+
+/* ── 18. Review grid (1e:262-380, 1f:382-459, 1g:461-508) ─────────────── */
+/* The shortcut sheet and the filter popovers are positioned against this
+   wrapper, not the viewport, so they stay inside the review screen and out of
+   the fixed toast host's corner. */
+.review-root { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.topbar-count { font: 500 12px/1 var(--font); color: var(--text-dim); }
+.review-banners:not(:empty) { padding: 12px 20px 0; }
+
+.review-stats {
+  display: flex; align-items: center; gap: 26px; padding: 16px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.stat-decided-wrap { flex: none; }
+.stat-decided { display: flex; align-items: baseline; gap: 8px; }
+.stat-decided-n { font: 700 32px/1 var(--font); letter-spacing: -.02em; color: var(--text); }
+.stat-decided-of { font: 600 14px/1 var(--font); color: var(--text-dim); }
+.legend { display: flex; align-items: center; gap: 14px; margin-top: 9px; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 12px/1 var(--font); color: var(--text-muted);
+}
+.legend-sw { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.legend-sw.keep { background: var(--keep); }
+.legend-sw.reject { background: var(--reject); }
+.legend-sw.keeper { background: var(--keeper); }
+.decide-wrap { flex: 1; min-width: 0; }
+.decide-legend {
+  display: flex; justify-content: space-between; margin-top: 8px;
+  font: 500 11px/1 var(--font); color: var(--text-dim);
+}
+.flag-chips {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding-left: 24px; border-left: 1px solid var(--border);
+}
+.chip-n { font: 700 12px/1 var(--font); color: var(--text); }
+
+.filter-n { font: 700 11px/1 var(--mono); opacity: .75; }
+.filter-count { font: 500 12px/1 var(--font); color: var(--text-dim); white-space: nowrap; }
+.filter-anchor { position: relative; }
+.filter-pop { position: absolute; top: calc(100% + 7px); left: 0; z-index: 60; }
+.menu-list { padding: 6px; }
+.menu-label { flex: 1; min-width: 0; font: 500 13px/1.2 var(--font); color: var(--text); }
+.menu-n { font: 600 12px/1 var(--font); color: var(--text-dim); }
+
+.grid-wrap { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; background: var(--well); }
+/* Aspect ratio lives here rather than on .tile because 1i/1j reuse .tile at
+   other sizes (tileStyles() takes a `size` override for exactly that reason). */
+.grid .tile, .grid .skeleton { aspect-ratio: 3 / 2; }
+.grid .tile { cursor: pointer; }
+.tile-foot-gap { flex: 1; }
+.grid-loading-note { margin-top: 14px; font: 500 12px/1 var(--font); color: var(--text-dim); }
+.empty.grid-empty { height: 100%; }
+
+.complete-card {
+  display: flex; align-items: center; gap: 14px; margin-bottom: 16px; padding: 14px 16px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-card); background: var(--surface);
+}
+.complete-ico {
+  flex: none; background: var(--keep-soft); color: var(--keep);
+  border-color: color-mix(in srgb, var(--keep) 35%, transparent);
+}
+.complete-text { flex: 1; min-width: 0; }
+.complete-acts { display: flex; gap: 8px; }
+.complete-note { flex: none; font: 500 12px/1 var(--font); color: var(--text-dim); }
+
+.sheet {
+  position: absolute; right: 22px; bottom: 22px; width: 336px; z-index: 40; overflow: hidden;
+  border-radius: var(--radius-card); border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(20px); box-shadow: var(--shadow-float);
+}
+.sheet-head {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.sheet-title { flex: 1; font: 700 13px/1 var(--font); color: var(--text); }
+.sheet-hint { font: 500 11px/1 var(--font); color: var(--text-dim); }
+.sheet-body { padding: 6px 8px 10px; }
+.sheet-row { display: flex; align-items: center; gap: 10px; padding: 7px 6px; }
+.sheet-label { flex: 1; font: 500 12.5px/1.2 var(--font); color: var(--text); }
+.sheet-label.dim { color: var(--text-muted); }
+.sheet-keys { display: flex; gap: 4px; }
+.sheet-note { padding: 8px 6px 2px; font: 400 11.5px/1.4 var(--font); color: var(--text-dim); }
