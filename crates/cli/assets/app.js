@@ -65,4 +65,6 @@ async function boot() {
 // Task 2 imports rail.js and toast.js here; Tasks 3-10 add their screen
 // imports. Keeping the import list in one place means index.html never
 // changes again.
-Promise.all([import('/rail.js'), import('/toast.js')]).then(() => boot());
+Promise.all([
+  import('/rail.js'), import('/toast.js'), import('/libraries.js'),
+]).then(() => boot());
