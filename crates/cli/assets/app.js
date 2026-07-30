@@ -66,5 +66,5 @@ async function boot() {
 // imports. Keeping the import list in one place means index.html never
 // changes again.
 Promise.all([
-  import('/rail.js'), import('/toast.js'), import('/libraries.js'),
+  import('/rail.js'), import('/toast.js'), import('/libraries.js'), import('/picker.js'),
 ]).then(() => boot());
