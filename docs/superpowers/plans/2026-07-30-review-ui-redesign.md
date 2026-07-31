@@ -1593,7 +1593,7 @@ Then these functions, in this order:
    - `loading` → 12 `.skeleton` tiles plus a "Loading thumbnails" line.
    - `all.length === 0` → the "No photos here yet" empty state with an "Analyze folder" button.
    - `photos.length === 0` → "Nothing matches these filters", listing the active filters, with "Drop last filter" and "Clear all".
-   - `counts.undecided === 0 && all.length > 0` → render the grid, and additionally show the "All n decided" completion card above it with "Review keepers" and "Export n keepers", plus the muted "Develop to JPEG — coming later" line.
+   - `counts.undecided === 0 && all.length > 0` → render the grid, and additionally show the "All n decided" completion card above it with "Review keepers" and "Export n photos", plus the muted "Develop to JPEG — coming later" line.
    Sets `--cols` on `.grid` from the active density. Scrolls the cursor tile into view with `block: 'nearest'`.
 9. `renderShortcutSheet()` — the floating panel from 1e, bottom-right, listing the keyboard model from the spec. The keeper row renders `⇧K`.
 10. `load()` — `GET /api/photos?limit=100000` into `all`, `GET /api/counts` into `counts`, clear `loading`, then `applyFilters()` and render everything.
@@ -1602,9 +1602,17 @@ Then these functions, in this order:
     - `reject` → `verdict = 'reject'`, `is_keeper = false`
     - `keeper` → the target gets `verdict = 'keep'`, `is_keeper = true`; **every other member of its `group_id` gets `verdict = 'reject'`, `is_keeper = false`** — `pick_keeper` rejects the siblings server-side, and the UI must mirror it or the grid lies until reload
     - `undecide` → `verdict = null`, `is_keeper = false`
-    Take `counts` from the POST response. Repaint stats and the affected tiles.
-12. `onKey(e)` — active only when `state.view === 'review'`, no modal is mounted (`#modal-host` has no children), and the event target is not an input. Bindings per the spec's keyboard table: `ArrowRight`/`j` and `ArrowLeft`/`k` move; `ArrowDown`/`ArrowUp` move by the column count; `Space` keeps; `x` rejects; `u` undecides; `Shift+K` sets the keeper; `f` opens the detail view; `c` opens compare; `?` toggles the sheet; `Esc` closes the sheet or the menu. Deciding advances the cursor **unless Shift is held**. `Space` must `preventDefault()` to stop the page scrolling.
-13. `openReview(folder, opts)` — set `state.activeFolder`, `show('review')`, paint the chrome (top bar with library name, photo count, theme toggle, and "Export n keepers"), render the `pendingNew` banner when `opts.pendingNew > 0` with a "Re-analyze" action calling `window.pp.startAnalyze(folder)`, wire the keydown listener, then `load()`.
+    Take `counts` from the POST response. Repaint stats and the affected tiles —
+    and additionally re-render the grid and the filter bar whenever
+    `counts.undecided` crosses into or out of zero, or the filter bar's own
+    counts would go stale. Repainting only stats and one tile makes the 1g
+    "All n decided" completion card unreachable through the normal cull path
+    (it would appear only after a re-open or a filter toggle) and lets the
+    `Undecided only <n>` pill freeze at its last full-render value.
+    `renderGrid()` does not re-filter, so calling it does not make the grid
+    jump under the cursor.
+12. `onKey(e)` — active only when `state.view === 'review'`, no modal is mounted (`#modal-host` has no children), and the event target is not an input. **Return early on `e.ctrlKey || e.metaKey || e.altKey`** — without that guard the single-letter bindings hijack standard browser chords and perform silent, unlogged data writes: `Ctrl/Cmd+X` (cut) posts a reject, `Ctrl+U` (view source) posts an undecide, `Ctrl/Cmd+F` (find) opens the detail view. Bindings per the spec's keyboard table: `ArrowRight`/`j` and `ArrowLeft`/`k` move; `ArrowDown`/`ArrowUp` move by the column count; `Space` keeps; `x` rejects; `u` undecides; `Shift+K` sets the keeper; `f` opens the detail view; `c` opens compare; `?` toggles the sheet; `Esc` closes the sheet or the menu. Deciding advances the cursor **unless Shift is held**. `Space` must `preventDefault()` to stop the page scrolling.
+13. `openReview(folder, opts)` — set `state.activeFolder`, `show('review')`, paint the chrome (top bar with library name, photo count, theme toggle, and "Export n photos"), render the `pendingNew` banner when `opts.pendingNew > 0` with a "Re-analyze" action calling `window.pp.startAnalyze(folder)`, wire the keydown listener, then `load()`.
 14. `reviewIqaRank(score)` — percentile of `score` within `all`'s non-null `iqa_score` values, returned as `'top N%'`; `null` when there is no distribution.
 
 Register at the bottom:
@@ -1993,7 +2001,7 @@ Add `import('/export.js')` to the `Promise.all` list.
 
 - [ ] **Step 4: Verify in the browser**
 
-- The rail's Export cell and the grid's "Export n keepers" button both open the dialog.
+- The rail's Export cell and the grid's "Export n photos" button both open the dialog.
 - The photo count and byte figure match `curl -s localhost:8899/api/export/estimate`.
 - There are **two** stat tiles, no "Change" button, and no sidecar checkbox.
 - With no keepers decided, the info toast appears instead of the dialog.
