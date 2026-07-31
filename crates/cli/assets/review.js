@@ -68,6 +68,14 @@ let loadError = null;
 let dupPos = new Map();
 let keysWired = false;
 let scoreBannerShown = false;
+// Whether the last `renderGrid()` painted the 1g completion card. A decision
+// that flips this has to repaint the grid, not just the tile it touched.
+let lastComplete = false;
+// One decision in flight at a time. Held `Space` repeats far faster than the
+// round trip, and `onKey` reads `photos[cursor]` synchronously, so without this
+// several repeats would all decide the *same* photo while the cursor advanced
+// once per resolution — leaving the photos in between silently undecided.
+let deciding = false;
 // The folder the loaded rows belong to. Re-opening the same library (coming
 // back from the detail or duplicates screens) keeps the user's filters;
 // switching to a different one drops them, since "keepers only" or a flag
@@ -237,7 +245,9 @@ function renderStats() {
   const count = el('rv-photos');
   if (count) count.textContent = plural(all.length, 'photo');
   const exp = el('rv-export');
-  if (exp) exp.innerHTML = `${icon('download', 14, 2)}Export ${plural(counts.kept, 'keeper')}`;
+  // "photos", not "keepers": export copies every `verdict='keep'` row, which is
+  // a different population from the `is_keeper` count in the legend above.
+  if (exp) exp.innerHTML = `${icon('download', 14, 2)}Export ${plural(counts.kept, 'photo')}`;
 }
 
 function toggleFlag(key) {
@@ -454,6 +464,9 @@ function dropLastFilter() {
 function renderGrid() {
   const host = el('rv-grid');
   if (!host) return;
+  // Every early return below paints a state without the completion card; the
+  // one path that can paint it sets this again just before it does.
+  lastComplete = false;
 
   if (loading) {
     host.innerHTML = `
@@ -520,6 +533,7 @@ function renderGrid() {
   const total = counts.kept + counts.rejected + counts.undecided;
   const keepers = all.filter(p => p.is_keeper).length;
   const complete = counts.undecided === 0 && all.length > 0;
+  lastComplete = complete;
   host.innerHTML = `
     ${complete ? `
       <div class="complete-card">
@@ -532,7 +546,7 @@ function renderGrid() {
         <div class="complete-acts">
           <button class="btn" id="rv-keepers">Review keepers</button>
           <button class="btn btn-primary" id="rv-export-2">${icon('download', 14, 2)}Export
-            ${plural(counts.kept, 'keeper')}</button>
+            ${plural(counts.kept, 'photo')}</button>
         </div>
         <div class="complete-note">Develop to JPEG — coming later</div>
       </div>` : ''}
@@ -672,6 +686,7 @@ function renderScoreBanner() {
  * than being recomputed locally.
  */
 async function reviewApply(fileId, action) {
+  const prev = counts;
   let c;
   try {
     c = await api('POST', '/api/decisions', { file_id: fileId, action });
@@ -703,11 +718,40 @@ async function reviewApply(fileId, action) {
   }
 
   renderStats();
-  for (const id of touched) repaintTile(id);
+
+  // The filter bar's "Undecided only n" pill and the 1g completion card read
+  // from `counts`, not from the tiles, so repainting one tile is not enough:
+  // without this, deciding the last undecided photo never raises the "All n
+  // decided" card, and `u` while complete leaves the card claiming "0
+  // undecided" beside a header reading "1 undecided".
+  //
+  // Neither call re-filters, so the tile under the cursor still cannot jump
+  // away mid-cull.
+  //
+  // `complete || lastComplete` covers the case the undecided count misses:
+  // flipping an already-decided photo while the card is up leaves `undecided`
+  // at 0 but changes the keep/reject/keeper numbers the card prints.
+  const complete = counts.undecided === 0 && all.length > 0;
+  if (counts.undecided !== prev.undecided || complete || lastComplete) {
+    renderFilterBar();
+    renderGrid();
+  } else {
+    for (const id of touched) repaintTile(id);
+  }
 }
 
 async function decide(p, action, stay) {
-  await reviewApply(p.file_id, action);
+  // Drop the key rather than queueing it: with at most one POST outstanding the
+  // server's counts can never arrive out of order, so the completion card is
+  // always computed from the newest response. The cursor only advances once the
+  // write has landed, so no photo is ever passed over undecided.
+  if (deciding) return;
+  deciding = true;
+  try {
+    await reviewApply(p.file_id, action);
+  } finally {
+    deciding = false;
+  }
   if (!stay) moveCursor(cursor + 1);
 }
 
@@ -741,6 +785,12 @@ function onKey(e) {
     return;
   }
   if (k === '?') { ui.sheet = !ui.sheet; renderShortcutSheet(); return; }
+  // Below this line every key writes to the catalog or navigates, and there is
+  // no undo history on this screen. Browser chords must not be hijacked:
+  // Ctrl/Cmd+X (cut) would post a *reject* and advance, Ctrl+U (view source) an
+  // *undecide*, Ctrl/Cmd+F (find) would open the detail view. Placed after Esc
+  // and `?` so both still work with a modifier held.
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (!photos.length) return;
 
   switch (k) {
