@@ -7,7 +7,7 @@
 // never disagree. Everything that row does not carry (EXIF, file size/format,
 // per-flag confidence, duplicate-group membership) comes from a dedicated
 // GET /api/photos/:id fetch ("the dump") issued each time the photo changes.
-import { api, humanBytes } from '/app.js';
+import { api, humanBytes, state } from '/app.js';
 import { icon } from '/icons.js';
 
 // Mirrors review.js's FLAG_META exactly (not exported from there, so this is
@@ -31,11 +31,33 @@ let deciding = false; // one decision in flight at a time, as in review.js
 // only lists the group ids a file belongs to). That count only exists on
 // GET /api/photos (ReviewListItem.group_id, one row per file) or
 // GET /api/clusters. Rather than add either call to every detail open, the
-// full list is fetched once, lazily, the first time a grouped photo is shown,
-// and cached for the rest of the session — group membership does not change
-// while the user is deciding photos.
+// full list is fetched lazily, the first time a grouped photo is shown, and
+// cached for the rest of the time the user stays on that library.
+//
+// The cache MUST be scoped to the active library: group_id comes from a
+// per-catalog SEQUENCE (schema.rs), so every library numbers its groups from
+// 1 — library A's group 1 and library B's group 1 are unrelated. Switching
+// libraries is a pure SPA transition (no location.reload anywhere), so this
+// module's state survives it, and a cache keyed only by group_id would print
+// a real-looking but fabricated frame count for the new library. `state`
+// (imported from app.js) is updated synchronously by openReview() before any
+// photo in the new library can be opened, so comparing against
+// `state.activeFolder` is sufficient to detect the switch.
 let groupSizeCache = null;
 let groupSizePromise = null;
+let groupSizeFolder = null; // the folder groupSizeCache/groupSizePromise were built for
+
+/** Synchronously drop the cache the instant it's known to belong to a
+ *  different library than the one now active. Called both before reading the
+ *  cache in render() and before deciding whether to fetch, so there is no
+ *  window where a stale cross-library count can reach the screen. */
+function invalidateGroupSizesIfStale() {
+  if (state.activeFolder !== groupSizeFolder) {
+    groupSizeCache = null;
+    groupSizePromise = null;
+    groupSizeFolder = state.activeFolder;
+  }
+}
 
 const el = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s)
@@ -62,6 +84,7 @@ function decisionOf(p) {
 }
 
 async function ensureGroupSizes() {
+  invalidateGroupSizesIfStale();
   if (groupSizeCache) return groupSizeCache;
   if (!groupSizePromise) {
     groupSizePromise = api('GET', '/api/photos?limit=100000')
@@ -99,7 +122,12 @@ async function loadDump() {
     window.pp.toast({ kind: 'error', title: 'Could not load photo details', body: e.message });
   }
   render();
-  if (dumpState === 'ready' && dump.duplicate_groups.length && !groupSizeCache) {
+  // Always route through ensureGroupSizes (not a `!groupSizeCache` shortcut):
+  // that shortcut previously skipped the fetch — and the staleness check
+  // inside it — whenever a cache from a *different* library was still
+  // sitting there from an earlier visit, which is exactly how the fabricated
+  // cross-library frame count happened.
+  if (dumpState === 'ready' && dump.duplicate_groups.length) {
     ensureGroupSizes().then(() => render());
   }
 }
@@ -267,6 +295,12 @@ function renderAnalysisSection() {
 
     const gid = dump.duplicate_groups.length ? dump.duplicate_groups[0] : null;
     if (gid != null) {
+      // Synchronous staleness check before the read: without this, a render()
+      // that runs before the async ensureGroupSizes() from loadDump() settles
+      // could still see a cache built for the *previous* library (group ids
+      // collide across libraries — each catalog numbers its own groups from
+      // 1 — so a stale hit here is a wrong-but-plausible number, not a miss).
+      invalidateGroupSizesIfStale();
       const n = groupSizeCache ? groupSizeCache.get(gid) : null;
       dupBlock = `<div class="dup-card">
         <span style="color:var(--accent-tint-fg)">${icon('layers', 15, 1.9)}</span>
