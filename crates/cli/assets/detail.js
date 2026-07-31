@@ -87,17 +87,34 @@ async function ensureGroupSizes() {
   invalidateGroupSizesIfStale();
   if (groupSizeCache) return groupSizeCache;
   if (!groupSizePromise) {
+    // The library the fetch is *for*, fixed at the moment it starts. If the
+    // user switches libraries while this is in flight, invalidateGroupSizesIfStale()
+    // will already have moved groupSizeFolder on — but this specific promise's
+    // result still belongs to `forFolder`, and must never be written into the
+    // (by-then-different) current cache. Without this guard, a late-arriving
+    // response from the *previous* library can silently overwrite the cache
+    // the *new* library just correctly populated, reopening the same
+    // fabricated-frame-count bug through a narrower, timing-dependent door.
+    const forFolder = state.activeFolder;
     groupSizePromise = api('GET', '/api/photos?limit=100000')
       .then((rows) => {
         const m = new Map();
         for (const r of rows) {
           if (r.group_id != null) m.set(r.group_id, (m.get(r.group_id) || 0) + 1);
         }
+        if (forFolder !== state.activeFolder) return null; // stale: discard, don't cache
         groupSizeCache = m;
         return m;
       })
       .catch(() => {
-        groupSizePromise = null; // allow a retry on the next grouped photo
+        // Same guard as the .then above, applied to the shared `groupSizePromise`
+        // slot rather than the cache: if a *newer* fetch (for the folder that's
+        // current now) is already sitting in that slot, a failing stale fetch
+        // must not clear it out from under it — that would just force a
+        // redundant refetch, not a wrong number, but the discipline of "only
+        // touch shared state if you're still the relevant fetch" should be
+        // applied uniformly rather than only where a wrong number was proven.
+        if (forFolder === state.activeFolder) groupSizePromise = null; // allow a retry
         return null;
       });
   }
