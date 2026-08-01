@@ -458,6 +458,11 @@ function wire() {
 // ── Keyboard ─────────────────────────────────────────────────────────────
 
 function onKey(e) {
+  // Stand down while another layer (compare) is mounted above this one in
+  // #modal-host. review.js and duplicates.js do the equivalent; without it,
+  // keys typed over compare also reach the photo hidden underneath.
+  const host = el('modal-host');
+  if (host && root && host.lastElementChild !== root) return;
   if (e.key === 'Escape') { closeDetail(); return; }
   // Same guard as review.js: modifier chords are browser/OS shortcuts
   // (Ctrl+X cut, Ctrl+U view-source, Cmd+F find, …), never decisions.

@@ -194,7 +194,7 @@ function paneHtml(f, i, betterI) {
           </div>
           <div style="display:flex;align-items:center;gap:5px;margin-top:8px;flex-wrap:wrap">
             ${chips}
-            <span class="cmp-exif">${exifText}</span>
+            <span class="cmp-exif" id="cmp-exif-${i}">${exifText}</span>
           </div>
         </div>
         <button class="btn ${better ? 'btn-primary' : ''} sm" data-keeper="${item.file_id}">
@@ -269,6 +269,26 @@ async function setKeeper(fileId) {
   else window.pp.reviewReload();
 }
 
+/** Writes the two panes' EXIF text nodes directly, without going through
+ *  render(). The EXIF fetch resolves ~1s after open — a full re-render at
+ *  that point would blow away any pan/scroll the user has already set (both
+ *  .cmp-stage elements get a fresh innerHTML subtree, so their scrollLeft/Top
+ *  reset to 0) and would re-run wireStageSync(), needlessly re-attaching
+ *  listeners onto (new) DOM nodes. EXIF never affects score, Sharper marking,
+ *  or zoom sizing, so nothing else on the pane needs to change when it
+ *  arrives — patching the two text nodes is sufficient and keeps the scroll
+ *  listeners attached to the exact elements the user has been scrolling. */
+function patchExifText() {
+  for (let i = 0; i < frames.length; i++) {
+    const span = el(`cmp-exif-${i}`);
+    const f = frames[i];
+    if (!span || !f) continue;
+    // textContent, not innerHTML: no esc() needed, and it can't reintroduce
+    // markup even if a future EXIF field ever contained "<"/"&".
+    span.textContent = f.exifLoaded ? (f.exif || '') : 'Loading…';
+  }
+}
+
 async function loadExif() {
   const forFolder = openedFolder;
   const results = await Promise.all(
@@ -281,7 +301,7 @@ async function loadExif() {
       frames[i].exifLoaded = true;
     }
   });
-  render();
+  patchExifText();
 }
 
 // ── Keyboard ─────────────────────────────────────────────────────────────
