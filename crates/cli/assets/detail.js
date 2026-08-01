@@ -23,6 +23,7 @@ const FLAG_META = [
 let root = null; // the mounted .detail element, or null when closed
 let idx = 0;
 let dump = null; // the /api/photos/:id response for the current photo
+let shownFileId = null; // the file `dump` and the stage belong to
 let dumpState = 'loading'; // 'loading' | 'ready' | 'error'
 let zoom = 'fit'; // 'fit' | 1 | 2
 let deciding = false; // one decision in flight at a time, as in review.js
@@ -62,7 +63,10 @@ function invalidateGroupSizesIfStale() {
 const el = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+// Group counts are thousands-separated here exactly as in review.js and
+// duplicates.js — a 1234-frame group must not read "1234 frames" on this
+// screen and "1,234 frames" on the next one.
+const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? '' : 's'}`;
 
 function basename(path) {
   const s = String(path || '');
@@ -127,6 +131,7 @@ async function ensureGroupSizes() {
 async function loadDump() {
   const p = current();
   if (!p) return;
+  shownFileId = p.file_id;
   dumpState = 'loading';
   dump = null;
   render();
@@ -175,6 +180,7 @@ export function closeDetail() {
   root.remove();
   root = null;
   dump = null;
+  shownFileId = null;
   dumpState = 'loading';
 }
 
@@ -252,7 +258,13 @@ function renderDecisionSection(p) {
   else if (dec === 'reject') pills.push('<span class="pill-reject">Reject</span>');
   else pills.push('<span class="pill-undecided">Undecided</span>');
   if (p.is_keeper) {
-    pills.push(`<span class="pill-keeper">${icon('spark', 12, 2.2)}Keeper of group ${esc(p.group_id)}</span>`);
+    // `pick_keeper` sets is_keeper unconditionally, including for a file in no
+    // duplicate group (Shift+K on an ungrouped photo). esc(null) renders as ''
+    // so no literal "null" reaches the DOM, but "Keeper of group " truncates
+    // mid-sentence — and it is permanent, because keeper outranks everything in
+    // decisionOf(). Name the group only when there is one.
+    const label = p.group_id != null ? `Keeper of group ${esc(p.group_id)}` : 'Keeper';
+    pills.push(`<span class="pill-keeper">${icon('spark', 12, 2.2)}${label}</span>`);
   }
   return `<div class="side-sec">
     <div class="section-label">Decision</div>
@@ -463,15 +475,22 @@ function onKey(e) {
   // keys typed over compare also reach the photo hidden underneath.
   const host = el('modal-host');
   if (host && root && host.lastElementChild !== root) return;
-  if (e.key === 'Escape') { closeDetail(); return; }
+  // stopPropagation for the same reason as the `f` branch below: without it a
+  // single Escape closes this overlay *and* reaches review.js's handler, which
+  // then also shuts the shortcut sheet or a filter popover the user left open
+  // behind the overlay. One Escape, one layer.
+  if (e.key === 'Escape') { e.stopPropagation(); closeDetail(); return; }
   // Same guard as review.js: modifier chords are browser/OS shortcuts
   // (Ctrl+X cut, Ctrl+U view-source, Cmd+F find, …), never decisions.
   if (e.ctrlKey || e.metaKey || e.altKey) return;
 
   const k = e.key;
   switch (k) {
-    case 'ArrowRight': case 'j': move(1); return;
-    case 'ArrowLeft': case 'k': move(-1); return;
+    // preventDefault as review.js does: at 100%/200% the stage is scrollable,
+    // so an unswallowed ArrowLeft/Right both navigates to the next photo and
+    // nudges the outgoing image sideways first.
+    case 'ArrowRight': case 'j': e.preventDefault(); move(1); return;
+    case 'ArrowLeft': case 'k': e.preventDefault(); move(-1); return;
     default: break;
   }
   if (k === ' ') { e.preventDefault(); decide('keep', e.shiftKey); return; }
@@ -486,4 +505,38 @@ function onKey(e) {
   if (k === 'c' || k === 'C') { compare(); }
 }
 
-Object.assign(window.pp, { openDetail, closeDetail });
+/**
+ * Repaint the overlay against whatever `window.pp.reviewPhotos()` now returns.
+ * A no-op when detail is closed, so callers never have to know.
+ *
+ * This exists for compare.js: a keeper set from compare closes compare and
+ * reloads the review list, but when compare was opened from *this* screen with
+ * `c`, the .detail underneath is still mounted and would otherwise keep showing
+ * the pre-decision state — "Undecided" for a frame that is now keeper or
+ * reject — while `idx` indexes into a freshly replaced array behind stale DOM.
+ * The header comment on this module claims the decision bar here and the tile
+ * behind it can never disagree; this is what keeps that true across compare.
+ */
+export function detailRefresh() {
+  if (!root) return;
+  const list = window.pp.reviewPhotos();
+  if (!list.length) { closeDetail(); return; }
+  // Re-anchor on the file, not the index. reviewReload() rebuilds and re-filters
+  // the list, so with "undecided only" active the frames compare just decided
+  // drop out of it and every later index shifts — leaving `idx` pointing at a
+  // different photo than the `dump` (EXIF, flags, group) already on screen.
+  const i = shownFileId == null ? -1 : list.findIndex((p) => p.file_id === shownFileId);
+  if (i >= 0) {
+    idx = i;
+    window.pp.reviewSetIndex(idx);
+    render(); // same photo, same dump — only the decision changed
+    return;
+  }
+  // The photo left the filtered list. Stay open on whatever occupies that slot
+  // now, but refetch the dump so the side panel is never another photo's.
+  idx = Math.max(0, Math.min(list.length - 1, idx));
+  window.pp.reviewSetIndex(idx);
+  loadDump();
+}
+
+Object.assign(window.pp, { openDetail, closeDetail, detailRefresh });

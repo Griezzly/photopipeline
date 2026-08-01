@@ -309,12 +309,13 @@ Keyboard shortcuts (also shown in-app via `?`):
 | Action | Keys |
 |---|---|
 | Move between photos | `←` `→` `j` `k` |
+| Move a row up or down (grid) | `↑` `↓` |
 | Keep | `Space` |
 | Reject | `x` |
-| Undo the last decision (undecide) | `u` |
+| Clear the decision | `u` |
 | Mark as **keeper** of its duplicate group | `Shift+K` |
 | Open / close the detail panel | `f` |
-| Compare selected frames | `c` |
+| Compare the duplicate group | `c` |
 | Exit / close the current overlay | `Esc` |
 | Toggle this shortcut sheet | `?` |
 
@@ -322,7 +323,10 @@ Deciding a photo (`Space`, `x`, `u`) advances the cursor to the next one; holdin
 `Shift` while deciding keeps the cursor in place instead, so you can, say, reject
 a run of photos in place without them scrolling away as fast. `Shift+K` for
 keeper is the exception where Shift is inherent to the shortcut itself, not an
-advance/stay modifier.
+advance/stay modifier. There is no decision history, so `u` clears the decision
+on the photo under the cursor rather than undoing the last one you made. There
+is no multi-select either: `c` opens compare on the duplicate group of the photo
+under the cursor, showing that group's first two frames.
 
 **Duplicates.** Click **Duplicates** in the rail for a per-cluster view of
 near-identical shots, one card per group. The pipeline's suggested keeper is

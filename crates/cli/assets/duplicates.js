@@ -516,6 +516,12 @@ function onKey(e) {
   if (host && host.children.length) return; // a true modal (e.g. Accept-all's confirm) owns input
   if (e.target && e.target.closest
       && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+  // Stand down while `clusters` is not (yet) this library's. The folder-change
+  // block in openDuplicates() already empties it, so nothing here could write a
+  // cross-library keeper today — but the same guard as review.js's onKey states
+  // the invariant directly instead of relying on that one indirection, and it
+  // also covers the same-library reload window where load() is mid-flight.
+  if (loading || loadError) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
 
   if (confirming) {

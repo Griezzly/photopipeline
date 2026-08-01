@@ -417,6 +417,10 @@ function tile(p, i) {
   const flagText = (p.flags || []).map(f => CODE[f] ?? f.toUpperCase()).join(' ');
   // No score means the IQA model never ran for this file. Show a dash and an
   // empty meter — never 0.00, which would read as "scored, and terrible".
+  // The meter track stays (so the tiles keep a uniform footer height) but the
+  // fill element is omitted entirely rather than emitted at width:0%, which
+  // renders identically to a genuine 0.00. detail.js does the same for the
+  // same question: absent, not zero-width.
   const hasScore = p.iqa_score != null;
   const pct = hasScore ? Math.max(0, Math.min(100, Math.round(p.iqa_score * 100))) : 0;
   const dl = dupPos.get(p.file_id) || '';
@@ -429,7 +433,7 @@ function tile(p, i) {
       <span class="tile-foot-gap"></span>
       <span class="tile-score">${hasScore ? p.iqa_score.toFixed(2) : '—'}</span>
     </div>
-    <div class="tile-meter"><div class="tile-meter-fill" style="width:${pct}%"></div></div>
+    <div class="tile-meter">${hasScore ? `<div class="tile-meter-fill" style="width:${pct}%"></div>` : ''}</div>
   </div>`;
 }
 
@@ -644,6 +648,11 @@ async function load() {
     counts = c;
   } catch (e) {
     all = [];
+    // `counts` has to go with `all`. renderStats() runs unconditionally below,
+    // and on a failed load it would otherwise print the *previous* successful
+    // load's "N of M decided", legend and "% culled" under the new library's
+    // name — numbers that describe a library the user is not looking at.
+    counts = { kept: 0, rejected: 0, undecided: 0 };
     loadError = e.message;
     window.pp.toast({ kind: 'error', title: 'Could not load this library', body: e.message });
   }
@@ -775,6 +784,15 @@ function onKey(e) {
   if (state.view !== 'review') return;
   const host = el('modal-host');
   if (host && host.children.length) return;
+  // Stand down while the rows on screen are not (yet) this library's. `photos`
+  // is only trustworthy between a settled load() and the next one: during the
+  // /api/photos + /api/counts round trip it is either empty (a library switch,
+  // which clears it in openReview) or the pre-reload snapshot of the *same*
+  // library that load() is about to replace. Either way, deciding from it here
+  // would post a file_id resolved against whatever catalog the server has open
+  // now. The skeleton is on screen for this entire window, so there is nothing
+  // for the user to aim at anyway.
+  if (loading || loadError) return;
   if (e.target && e.target.closest
       && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
 
@@ -865,6 +883,25 @@ export async function openReview(folder, opts = {}) {
     ui.menu = false;
     ui.sortMenu = false;
     cursor = 0;
+    // The critical half: the *data* has to go too, not just the filters.
+    // `show('review')` above already set state.view = 'review' synchronously,
+    // and libraries.js has already POSTed /api/open, so the server's active
+    // library is the new one — but `load()` is only awaited at the very end of
+    // this function. Through that whole round trip `all`/`photos` still hold
+    // the *previous* library's rows, whose file_id values are meaningless
+    // against the new catalog (each catalog's file_id sequence restarts at 1,
+    // so a stale id lands on a real, unrelated photo). Without this reset a
+    // keypress in that window posts a decision onto the wrong library's
+    // catalog, with no undo path. duplicates.js:571-588 does the same for its
+    // `clusters`. The `loading = true` matters just as much: renderGrid() and
+    // the onKey guard below both stand down on it.
+    all = [];
+    photos = [];
+    dupPos = new Map();
+    counts = { kept: 0, rejected: 0, undecided: 0 };
+    lastComplete = false;
+    loading = true;
+    loadError = null;
     lastFolder = folder;
   }
   scoreBannerShown = false;

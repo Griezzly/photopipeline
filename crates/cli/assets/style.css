@@ -48,13 +48,6 @@
 .topbar-title { font: 600 14px/1 var(--font); color: var(--text); }
 .topbar-gap { flex: 1; min-width: 0; }
 
-/* Generic path-segment breadcrumb (folder picker, 1b:148-152). */
-.crumb {
-  font: 500 12.5px/1 var(--mono); padding: 5px 7px; border-radius: 6px;
-  color: var(--text-dim);
-}
-.crumb.on { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
-
 /* ── 2. Buttons (1a:77-82, 1e:314-320, 1f:410-412) ───────────────────── */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -404,10 +397,10 @@
   display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
   font: 500 12.5px/1 var(--mono);
 }
-/* Path-segment breadcrumb, distinct from the top bar's .crumb (added in
-   Task 2 for the same mockup screen) because picker.js's markup — fixed by
-   the brief — emits .crumb-seg/.crumb-sep rather than .crumb. See the task
-   report for the duplication this creates. */
+/* Path-segment breadcrumb for the folder picker (1b:148-152). An earlier note
+   here proposed consolidating this onto a generic `.crumb` rule; that rule was
+   never emitted by any module and has been deleted instead. The top bar's own
+   crumb is `.topbar-crumb`. */
 .crumb-seg {
   padding: 5px 7px; border-radius: var(--radius-tile); color: var(--text-dim);
 }

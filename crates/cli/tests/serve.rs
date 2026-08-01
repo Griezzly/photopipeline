@@ -682,51 +682,77 @@ async fn every_asset_referenced_by_index_resolves() {
     }
 }
 
+/// GET `/{path}` through a fresh router, asserting 200, and return the body as
+/// text. Used by the asset-manifest tests below.
+async fn fetch_asset(state: &photopipe::serve::AppState, path: &str) -> String {
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let app = photopipe::serve::router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/{path}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "/{path} is not embedded");
+    String::from_utf8(to_bytes(resp.into_body(), 1 << 22).await.unwrap().to_vec()).unwrap()
+}
+
+/// Every `import('/x.js')` in app.js, in source order. app.js is the single
+/// place the screen modules are listed, so parsing it is the whole manifest —
+/// a module added there and not embedded fails the test that calls this
+/// without anyone having to remember to update a list.
+fn dynamic_imports_of(app_js: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = app_js;
+    while let Some(i) = rest.find("import('/") {
+        rest = &rest[i + "import('/".len()..];
+        let end = rest.find('\'').expect("unterminated import() in app.js");
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    out
+}
+
 /// Every module the app dynamically imports must be embedded. `index.html`
 /// only references app.js, so a missing screen module would otherwise surface
 /// as a blank view at runtime rather than a failing build.
+///
+/// The manifest is *derived* from app.js's own `import()` calls rather than
+/// hardcoded here: a hardcoded copy is exactly the drift this test exists to
+/// catch. `index.html`'s own references (the two stylesheets, the font,
+/// app.js) are covered by `every_asset_referenced_by_index_resolves`.
 #[tokio::test]
 async fn every_screen_module_is_embedded() {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
-
-    const MODULES: &[&str] = &[
-        "tokens.css",
-        "style.css",
-        "index.html",
-        "app.js",
-        "icons.js",
-        "rail.js",
-        "toast.js",
-        "libraries.js",
-        "picker.js",
-        "analyze.js",
-        "review.js",
-        "detail.js",
-        "duplicates.js",
-        "compare.js",
-        "export.js",
-        "Manrope.ttf",
-    ];
 
     let dir = tempfile::TempDir::new().unwrap();
     let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
     let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
     let state = app_state_active(catalog, cache);
 
-    for m in MODULES {
-        let app = photopipe::serve::router(state.clone());
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/{m}"))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "/{m} is not embedded");
+    let app_js = fetch_asset(&state, "app.js").await;
+    let modules = dynamic_imports_of(&app_js);
+    assert!(
+        modules.len() >= 8,
+        "expected app.js to dynamically import the screen modules, found {modules:?}"
+    );
+
+    for m in &modules {
+        // fetch_asset asserts 200 for us.
+        let body = fetch_asset(&state, m).await;
+        assert!(!body.is_empty(), "/{m} is embedded but empty");
     }
+
+    // icons.js is imported statically by the screen modules rather than
+    // dynamically by app.js, so it never appears in the manifest above.
+    fetch_asset(&state, "icons.js").await;
 
     // And nothing stale is left behind from the previous UI.
     for gone in ["home.js", "browse.js"] {
@@ -746,4 +772,126 @@ async fn every_screen_module_is_embedded() {
             "/{gone} should have been deleted"
         );
     }
+}
+
+/// The `{ ... }` block that follows the first occurrence of `needle`, or None.
+/// Brace-counted from the first `{` after the needle; the blocks it is used on
+/// below contain no braces inside string literals or comments.
+fn block_after<'a>(src: &'a str, needle: &str) -> Option<&'a str> {
+    let start = src.find(needle)?;
+    let open = start + src[start..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open..open + i + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A deliberately crude grep-over-the-embedded-assets test.
+///
+/// Normally a string search for a code pattern is a bad test. It earns its
+/// place here because one specific defect — module-level state from the
+/// previously-open library surviving a switch, and a keypress in the load
+/// window then writing a decision with the old library's `file_id` against the
+/// new library's catalog (every catalog numbers `file_id` and `group_id` from
+/// 1, so the stale id hits a real, unrelated photo) — shipped five separate
+/// times on this branch and was missed by every per-module review. It is
+/// invisible to a serial UI test, because it only exists between the
+/// synchronous `show()`/repaint and the awaited `load()`. It *is* trivially
+/// visible to grep. So: grep.
+///
+/// Two invariants, both stated positively so a module that stops matching
+/// shows up as a dropped count rather than a silent pass:
+///
+///  1. A module that registers a document-level `keydown` handler and can
+///     write a decision must carry a stand-down guard, and — if it has a
+///     `loading` flag of its own — must also stand down while that is set.
+///  2. Every `!== lastFolder` block must clear the rows it cached for the
+///     previous library, not just the UI state layered on top of them.
+///
+/// These match on exact source strings. If a future refactor renames the
+/// guards, update the markers here in the same commit — do not delete the
+/// test.
+#[tokio::test]
+async fn keyboard_modules_carry_cross_library_stand_down_guards() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let state = app_state_active(catalog, cache);
+
+    let app_js = fetch_asset(&state, "app.js").await;
+    let modules = dynamic_imports_of(&app_js);
+
+    let mut guarded: Vec<&str> = Vec::new();
+    let mut reset: Vec<&str> = Vec::new();
+
+    for m in &modules {
+        if !m.ends_with(".js") {
+            continue;
+        }
+        let src = fetch_asset(&state, m).await;
+
+        // (1) Anything that can turn a keystroke into a catalog write.
+        let listens = src.contains("document.addEventListener('keydown'");
+        let writes = src.contains("reviewApply") || src.contains("/api/decisions");
+        if listens && writes {
+            assert!(
+                src.contains("host.lastElementChild !== root")
+                    || src.contains("host.children.length")
+                    || src.contains("state.view !=="),
+                "{m} turns keys into catalog writes but has no stand-down guard: \
+                 it must ignore keys when it is not the layer/view in focus"
+            );
+            if src.contains("let loading") {
+                assert!(
+                    src.contains("if (loading || loadError) return;"),
+                    "{m} has its own loading flag but its keydown handler does not stand \
+                     down on it — keys pressed during the load window would act on the \
+                     rows of whichever library was open before"
+                );
+            }
+            guarded.push(m);
+        }
+
+        // (2) Switching libraries must drop the previous library's data, not
+        // just its filters.
+        if let Some(block) = block_after(&src, "!== lastFolder") {
+            assert!(
+                block.contains("= [];"),
+                "{m}'s folder-change block does not clear its cached rows; \
+                 the previous library's file_id/group_id values would stay live \
+                 until the new library's fetch resolves"
+            );
+            assert!(
+                block.contains("loading = true;"),
+                "{m}'s folder-change block does not set loading, so the screen \
+                 (and its keydown guard) would not know the data is stale"
+            );
+            reset.push(m);
+        }
+    }
+
+    // Guards against the whole test passing vacuously because a marker string
+    // drifted: these are the modules that must be covered by each invariant.
+    guarded.sort_unstable();
+    assert_eq!(
+        guarded,
+        ["compare.js", "detail.js", "duplicates.js", "review.js"],
+        "unexpected set of decision-writing keyboard modules"
+    );
+    reset.sort_unstable();
+    assert_eq!(
+        reset,
+        ["duplicates.js", "review.js"],
+        "unexpected set of modules with a lastFolder comparison"
+    );
 }

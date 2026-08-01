@@ -265,8 +265,15 @@ async function setKeeper(fileId) {
   const wasOnDuplicates = state.view === 'duplicates';
   closeCompare();
   if (!stillSameFolder) return; // switched libraries mid-write; nothing safe to refresh
-  if (wasOnDuplicates) window.pp.openDuplicates(state.activeFolder);
-  else window.pp.reviewReload();
+  if (wasOnDuplicates) { window.pp.openDuplicates(state.activeFolder); return; }
+  // Await the reload, then repaint the detail overlay if one is still mounted
+  // underneath (compare can be opened from detail with `c`). Without this the
+  // panel behind keeps reading "Undecided" for a frame that is now keeper or
+  // reject, and its `idx` indexes the array reviewReload() just replaced.
+  // detailRefresh is a no-op when detail is closed; `?.` covers the load order
+  // where detail.js has not registered it yet.
+  await window.pp.reviewReload();
+  window.pp.detailRefresh?.();
 }
 
 /** Writes the two panes' EXIF text nodes directly, without going through
@@ -307,7 +314,19 @@ async function loadExif() {
 // ── Keyboard ─────────────────────────────────────────────────────────────
 
 function onKey(e) {
-  if (e.key === 'Escape') { closeCompare(); return; }
+  // Stand down unless this overlay is the topmost layer in #modal-host, same
+  // guard detail.js carries. `.cmp` is position:fixed;inset:0;z-index:130 and
+  // today nothing can stack above it — but "nothing stacks above it" was the
+  // argument for detail.js not needing the guard either, right up until compare
+  // proved it wrong. `a`/`d` write a keeper; they do not get to run on
+  // faith about the layer stack.
+  const host = el('modal-host');
+  if (host && root && host.lastElementChild !== root) return;
+  if (e.target && e.target.closest
+      && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+  // stopPropagation so one Escape closes one layer: detail.js sits underneath
+  // when compare was opened with `c`, and would otherwise close too.
+  if (e.key === 'Escape') { e.stopPropagation(); closeCompare(); return; }
   // Modifier chords are browser/OS shortcuts, never this screen's own.
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;

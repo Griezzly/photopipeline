@@ -1,12 +1,14 @@
 import { icon } from '/icons.js';
 
 const HOST = () => document.getElementById('toast-host');
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const KIND_ICON = { success: 'check', error: 'error', warn: 'warn', info: 'refresh' };
 const AUTO_MS = { success: 6000, info: 6000 };
 
 function actionsHtml(actions) {
   return (actions || [])
-    .map((a, i) => `<button class="btn btn-ghost sm" data-act="${i}">${a.label}</button>`)
+    .map((a, i) => `<button class="btn btn-ghost sm" data-act="${i}">${esc(a.label)}</button>`)
     .join('');
 }
 
@@ -19,11 +21,18 @@ function wireActions(el, actions, close) {
   if (x) x.onclick = close;
 }
 
+// `title` and `body` are escaped here, once, rather than at each of the ~30
+// call sites. They are interpolated user data as often as not — duplicates.js
+// puts a photo *filename* in the title, picker/analyze put folder names and
+// server error strings in the body — and none of the call sites passes
+// intentional markup (all of them build plain strings; only the icons and the
+// action buttons this module renders itself are markup). Escaping at the sink
+// means a future caller cannot reintroduce the hole by forgetting.
 function noticeHtml(kind, title, body, actions, inline) {
   return `<span class="notice-ico">${icon(KIND_ICON[kind] || 'info', 15, 2.1)}</span>
     <div class="notice-text">
-      <div class="notice-title">${title}</div>
-      ${body ? `<div class="notice-body">${body}</div>` : ''}
+      <div class="notice-title">${esc(title)}</div>
+      ${body ? `<div class="notice-body">${esc(body)}</div>` : ''}
       ${inline && actions && actions.length ? `<div class="notice-acts">${actionsHtml(actions)}</div>` : ''}
     </div>
     ${!inline ? actionsHtml(actions) : ''}
