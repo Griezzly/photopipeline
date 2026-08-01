@@ -103,6 +103,53 @@ fn pick_keeper_keeps_one_rejects_siblings() {
 }
 
 #[test]
+fn set_decision_clears_a_previously_picked_keeper() {
+    let dir = TempDir::new().unwrap();
+    let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let a = add_file(&catalog, "a.jpg", 1);
+    let b = add_file(&catalog, "b.jpg", 2);
+
+    let gid = catalog.insert_duplicate_group("time+embed", 0).unwrap();
+    catalog
+        .insert_duplicate_members(
+            gid,
+            &[
+                DuplicateMember {
+                    file_id: a,
+                    is_suggested_keeper: true,
+                    quality_score: 1.0,
+                },
+                DuplicateMember {
+                    file_id: b,
+                    is_suggested_keeper: false,
+                    quality_score: 0.5,
+                },
+            ],
+        )
+        .unwrap();
+
+    catalog.pick_keeper(a).unwrap();
+    assert!(catalog.get_decision(a).unwrap().unwrap().is_keeper);
+
+    // Changing your mind about a keeper must retire the star along with the
+    // verdict. In the UI keeper outranks every other state, so a stale flag
+    // paints a rejected photo as the keeper of its group.
+    catalog.set_decision(a, Verdict::Reject, None).unwrap();
+    let d = catalog.get_decision(a).unwrap().unwrap();
+    assert_eq!(d.verdict, Verdict::Reject);
+    assert!(!d.is_keeper);
+
+    // review_list is what the client actually refetches.
+    let row = catalog
+        .review_list(&ReviewFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|r| r.file_id == a)
+        .unwrap();
+    assert!(!row.is_keeper);
+}
+
+#[test]
 fn decision_counts_partition_total() {
     let dir = TempDir::new().unwrap();
     let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
