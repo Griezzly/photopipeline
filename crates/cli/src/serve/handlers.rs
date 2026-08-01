@@ -44,6 +44,8 @@ pub async fn static_asset(Path(file): Path<String>) -> Response {
                 Some("js") => "text/javascript; charset=utf-8",
                 Some("css") => "text/css; charset=utf-8",
                 Some("html") => "text/html; charset=utf-8",
+                Some("ttf") => "font/ttf",
+                Some("svg") => "image/svg+xml; charset=utf-8",
                 _ => "application/octet-stream",
             };
             ([(header::CONTENT_TYPE, ct)], f.data.into_owned()).into_response()

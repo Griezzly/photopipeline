@@ -164,7 +164,11 @@ fn duplicate_clusters_for_review_orders_keeper_first() {
     assert_eq!(cl.suggested_keeper_id, Some(c));
     // Suggested keeper first, then remaining members by descending IQA.
     let order: Vec<i64> = cl.members.iter().map(|m| m.file_id).collect();
-    assert_eq!(order, vec![c, b, a], "keeper first, then IQA-desc; got {order:?}");
+    assert_eq!(
+        order,
+        vec![c, b, a],
+        "keeper first, then IQA-desc; got {order:?}"
+    );
     assert!(cl.members[0].iqa_score.unwrap() > 0.9);
 }
 

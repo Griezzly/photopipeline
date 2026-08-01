@@ -16,7 +16,7 @@ Copied from `docs/superpowers/specs/2026-07-30-review-ui-redesign-design.md` and
 - **No JavaScript build step, bundler, framework, or npm dependency.** Plain ES modules served as-is.
 - **Flat asset directory.** The `/:file` route (`crates/cli/src/serve/mod.rs:135`) matches a single path segment, so `crates/cli/assets/` must have no subdirectories.
 - **No `alert()`, `confirm()`, or `prompt()`.** The design replaces all three with the modal and toast components.
-- **Every colour goes through a token.** No literal hex in `style.css` or in any `*.js`. Only `tokens.css` holds hex values. This is what makes the theme toggle work.
+- **Every colour goes through a token.** No literal hex in `style.css` or in any `*.js`; only `tokens.css` holds hex values. This is what makes the theme toggle work. Two narrow exceptions, both theme-independent by intent and both audited in Task 11: the drop-shadow `rgba()` values inside the `--shadow-*` tokens in `tokens.css`, and the drop-shadow under a photo (`.detail-img`, `.cmp-img`) — a shadow cast by an image is not chrome and does not re-tint per theme. Anything else with a literal colour is a defect.
 - **`font-variant-numeric: tabular-nums` globally** — counts and scores must not jitter as they update.
 - **Photos never carry the accent.** Onboard cyan is chrome-only. Photo wells are `--well` / `--well-2`.
 - **Defect flags are monochrome** — white monospace on a black scrim, never hued. Codes are two or three characters: `BLR`, `BF`, `OE`, `UE`, `IQA`.
@@ -935,10 +935,14 @@ Read `docs/design/mockups/Photopipe.dc.html:67-131`.
 import { api, show, state } from '/app.js';
 import { icon } from '/icons.js';
 
+// Each divisor is paired with the unit it converts INTO, not the unit it
+// converts from — dividing seconds by 60 yields minutes, so that row is
+// labelled 'minute'. Pairing it with 'second' makes every label one
+// conversion step stale ("1 hour ago" for a day-old library).
 function relTime(unixSecs) {
   if (!unixSecs) return 'never';
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
-  const steps = [[60, 'second'], [60, 'minute'], [24, 'hour'], [7, 'day'], [4.35, 'week'], [12, 'month']];
+  const steps = [[60, 'minute'], [60, 'hour'], [24, 'day'], [7, 'week'], [4.35, 'month'], [12, 'year']];
   let v = s, unit = 'second';
   for (const [span, name] of steps) {
     if (v < span) break;
@@ -1188,12 +1192,16 @@ export async function openPicker(startPath) {
     m.el.querySelector('#pk-cur').textContent = cur || 'Pick a drive or location';
 
     // Breadcrumbs from the path itself; the last segment is the current folder.
+    // A POSIX root ("/") has no non-empty segments, so it needs its own case —
+    // otherwise filter(Boolean) yields [] and the strip renders blank.
     const crumbs = m.el.querySelector('#pk-crumbs');
     if (cur) {
       const parts = cur.split(/[\\/]/).filter(Boolean);
-      crumbs.innerHTML = parts.map((p, i) =>
-        `<span class="crumb-seg${i === parts.length - 1 ? ' on' : ''}">${p}</span>`
-      ).join('<span class="crumb-sep">/</span>');
+      crumbs.innerHTML = parts.length
+        ? parts.map((p, i) =>
+            `<span class="crumb-seg${i === parts.length - 1 ? ' on' : ''}">${p}</span>`
+          ).join('<span class="crumb-sep">/</span>')
+        : '<span class="crumb-seg on">/</span>';
     } else {
       crumbs.innerHTML = '<span class="crumb-seg">Locations</span>';
     }
@@ -1300,7 +1308,6 @@ The design's central rule: **counted stages get a determinate bar and an `n / to
 
 ```js
 import { api, show, state } from '/app.js';
-import { icon } from '/icons.js';
 
 // The server reports one stage string at a time. The checklist's done/active/
 // pending state is derived from position in this ordered list — these strings
@@ -1335,9 +1342,20 @@ export async function startAnalyze(folder, opts = {}) {
   poll(folder);
 }
 
+// Remembers how far the run actually got, so a terminal or unrecognised stage
+// string does not regress the checklist. `failed` is set server-side without
+// resetting files_done/files_total (see handlers.rs), so falling back to index 0
+// would redraw completed stages as "queued" underneath a failure toast.
+let lastStageIdx = 0;
+
 function stageIndex(stage) {
+  if (stage === 'done') return STAGES.length;
   const i = STAGES.findIndex(s => s.key === stage);
-  return i === -1 ? (stage === 'done' ? STAGES.length : 0) : i;
+  if (i !== -1) {
+    lastStageIdx = i;
+    return i;
+  }
+  return lastStageIdx;
 }
 
 function render(folder, s) {
@@ -1575,7 +1593,7 @@ Then these functions, in this order:
    - `loading` → 12 `.skeleton` tiles plus a "Loading thumbnails" line.
    - `all.length === 0` → the "No photos here yet" empty state with an "Analyze folder" button.
    - `photos.length === 0` → "Nothing matches these filters", listing the active filters, with "Drop last filter" and "Clear all".
-   - `counts.undecided === 0 && all.length > 0` → render the grid, and additionally show the "All n decided" completion card above it with "Review keepers" and "Export n keepers", plus the muted "Develop to JPEG — coming later" line.
+   - `counts.undecided === 0 && all.length > 0` → render the grid, and additionally show the "All n decided" completion card above it with "Review keepers" and "Export n photos", plus the muted "Develop to JPEG — coming later" line.
    Sets `--cols` on `.grid` from the active density. Scrolls the cursor tile into view with `block: 'nearest'`.
 9. `renderShortcutSheet()` — the floating panel from 1e, bottom-right, listing the keyboard model from the spec. The keeper row renders `⇧K`.
 10. `load()` — `GET /api/photos?limit=100000` into `all`, `GET /api/counts` into `counts`, clear `loading`, then `applyFilters()` and render everything.
@@ -1584,9 +1602,17 @@ Then these functions, in this order:
     - `reject` → `verdict = 'reject'`, `is_keeper = false`
     - `keeper` → the target gets `verdict = 'keep'`, `is_keeper = true`; **every other member of its `group_id` gets `verdict = 'reject'`, `is_keeper = false`** — `pick_keeper` rejects the siblings server-side, and the UI must mirror it or the grid lies until reload
     - `undecide` → `verdict = null`, `is_keeper = false`
-    Take `counts` from the POST response. Repaint stats and the affected tiles.
-12. `onKey(e)` — active only when `state.view === 'review'`, no modal is mounted (`#modal-host` has no children), and the event target is not an input. Bindings per the spec's keyboard table: `ArrowRight`/`j` and `ArrowLeft`/`k` move; `ArrowDown`/`ArrowUp` move by the column count; `Space` keeps; `x` rejects; `u` undecides; `Shift+K` sets the keeper; `f` opens the detail view; `c` opens compare; `?` toggles the sheet; `Esc` closes the sheet or the menu. Deciding advances the cursor **unless Shift is held**. `Space` must `preventDefault()` to stop the page scrolling.
-13. `openReview(folder, opts)` — set `state.activeFolder`, `show('review')`, paint the chrome (top bar with library name, photo count, theme toggle, and "Export n keepers"), render the `pendingNew` banner when `opts.pendingNew > 0` with a "Re-analyze" action calling `window.pp.startAnalyze(folder)`, wire the keydown listener, then `load()`.
+    Take `counts` from the POST response. Repaint stats and the affected tiles —
+    and additionally re-render the grid and the filter bar whenever
+    `counts.undecided` crosses into or out of zero, or the filter bar's own
+    counts would go stale. Repainting only stats and one tile makes the 1g
+    "All n decided" completion card unreachable through the normal cull path
+    (it would appear only after a re-open or a filter toggle) and lets the
+    `Undecided only <n>` pill freeze at its last full-render value.
+    `renderGrid()` does not re-filter, so calling it does not make the grid
+    jump under the cursor.
+12. `onKey(e)` — active only when `state.view === 'review'`, no modal is mounted (`#modal-host` has no children), and the event target is not an input. **Return early on `e.ctrlKey || e.metaKey || e.altKey`** — without that guard the single-letter bindings hijack standard browser chords and perform silent, unlogged data writes: `Ctrl/Cmd+X` (cut) posts a reject, `Ctrl+U` (view source) posts an undecide, `Ctrl/Cmd+F` (find) opens the detail view. Bindings per the spec's keyboard table: `ArrowRight`/`j` and `ArrowLeft`/`k` move; `ArrowDown`/`ArrowUp` move by the column count; `Space` keeps; `x` rejects; `u` undecides; `Shift+K` sets the keeper; `f` opens the detail view; `c` opens compare; `?` toggles the sheet; `Esc` closes the sheet or the menu. Deciding advances the cursor **unless Shift is held**. `Space` must `preventDefault()` to stop the page scrolling.
+13. `openReview(folder, opts)` — set `state.activeFolder`, `show('review')`, paint the chrome (top bar with library name, photo count, theme toggle, and "Export n photos"), render the `pendingNew` banner when `opts.pendingNew > 0` with a "Re-analyze" action calling `window.pp.startAnalyze(folder)`, wire the keydown listener, then `load()`.
 14. `reviewIqaRank(score)` — percentile of `score` within `all`'s non-null `iqa_score` values, returned as `'top N%'`; `null` when there is no distribution.
 
 Register at the bottom:
@@ -1975,7 +2001,7 @@ Add `import('/export.js')` to the `Promise.all` list.
 
 - [ ] **Step 4: Verify in the browser**
 
-- The rail's Export cell and the grid's "Export n keepers" button both open the dialog.
+- The rail's Export cell and the grid's "Export n photos" button both open the dialog.
 - The photo count and byte figure match `curl -s localhost:8899/api/export/estimate`.
 - There are **two** stat tiles, no "Change" button, and no sidecar checkbox.
 - With no keepers decided, the info toast appears instead of the dialog.

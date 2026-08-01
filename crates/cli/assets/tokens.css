@@ -1,0 +1,164 @@
+/* Manrope, SIL Open Font License 1.1, (c) 2019 The Manrope Project Authors.
+   Full licence: docs/design/Manrope-OFL.txt */
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("/Manrope.ttf") format("truetype-variations"),
+       url("/Manrope.ttf") format("truetype");
+}
+
+:root {
+  --font: "Manrope", system-ui, sans-serif;
+  --mono: ui-monospace, Menlo, Consolas, monospace;
+
+  --radius-tile: 8px;
+  --radius-ctl: 8px;
+  --radius-card: 12px;
+  --radius-panel: 16px;
+  --radius-pill: 999px;
+
+  --rail-w: 56px;
+
+  --shadow-pop: 0 1px 1px rgba(3,7,18,.01), 0 5px 5px rgba(3,7,18,.02),
+                0 12px 12px rgba(3,7,18,.03), 0 20px 20px rgba(3,7,18,.04),
+                0 32px 32px rgba(3,7,18,.05);
+  --shadow-float: 0 24px 48px rgba(0,0,0,.55);
+  --shadow-toast: 0 4px 12px rgba(0,0,0,.06), 0 2px 4px rgba(0,0,0,.04);
+}
+
+/* ── Light ─────────────────────────────────────────────────────────────── */
+:root[data-theme="light"] {
+  --bg:            #EFEEED;
+  --surface:       #FFFFFF;
+  --surface-2:     #FAF9F9;
+  --inset:         #F1F0F0;
+  --well:          #F7F7F7;   /* grid background */
+  --well-2:        #FFFFFF;   /* photo stage */
+
+  --border:        rgba(0,0,0,.08);
+  --border-strong: #D8D8D8;
+  --border-faint:  rgba(0,0,0,.05);
+
+  --text:          #0A0A0A;
+  --text-muted:    #525253;
+  --text-dim:      #6B6C6C;
+  --text-faint:    #909191;
+  --text-ghost:    #B4B4B4;
+
+  --accent:        #007A8A;
+  --accent-hover:  #005F6B;
+  --accent-on:     #FFFFFF;   /* text on an accent fill */
+  --accent-soft:   rgba(9,178,199,.12);
+  --accent-edge:   rgba(0,122,138,.40);
+  --accent-tint:   #D2F7FF;
+  --accent-tint-fg:#003138;
+  --accent-glow:   #007A8A;
+
+  --keep:          #16A34A;
+  --keep-soft:     #DCFCE7;
+  --keep-fg:       #14532D;
+  --keep-on:       #FFFFFF;   /* text/glyph on a solid --keep fill */
+  --reject:        #BA1A1A;
+  --reject-soft:   #FFDAD6;
+  --reject-fg:     #410002;
+  --reject-on:     #FFFFFF;   /* text/glyph on a solid --reject fill */
+  --keeper:        #007A8A;
+
+  --warn:          #B68900;   /* opaque amber — the --keep/--reject/--accent-style solid, for washes/mixes */
+  --warn-edge:     rgba(182,137,0,.35);
+  --warn-bg:       #FFFBEB;
+  --warn-soft:     #FFF1B8;
+  --warn-fg:       #2A1E00;
+
+  --scrim:         rgba(0,0,0,.34);
+  --flag-scrim:    rgba(0,0,0,.82);
+  --cursor-ring:   #0A0A0A;
+  --cursor-gap:    #FFFFFF;
+  --hatch:         rgba(0,0,0,.07);
+  --kbd-bg:        rgba(0,0,0,.06);
+  --kbd-edge:      rgba(0,0,0,.14);
+
+  /* Photo wells render neutral in both themes, so text painted directly over
+     a photo (flag chips, dup labels, score readouts, meter tracks) is
+     theme-invariant white — never re-tinted by the light/dark toggle. */
+  --overlay-fg:    #FFFFFF;
+  --overlay-track: rgba(255,255,255,.12);
+}
+
+/* ── Dark (default) ────────────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  --bg:            #121414;
+  --surface:       #1A1C1C;
+  --surface-2:     #161818;
+  --inset:         #0E0E0E;
+  --well:          #121414;
+  --well-2:        #1A1C1C;
+
+  --border:        rgba(255,255,255,.07);
+  --border-strong: rgba(255,255,255,.12);
+  --border-faint:  rgba(255,255,255,.05);
+
+  --text:          #E3E2E2;
+  --text-muted:    #ABABAB;
+  --text-dim:      #6E7E8B;
+  --text-faint:    #4F5C68;
+  --text-ghost:    #4F5C68;
+
+  --accent:        #09B2C7;
+  --accent-hover:  #51D7ED;
+  --accent-on:     #00262B;
+  --accent-soft:   rgba(9,178,199,.14);
+  --accent-edge:   rgba(9,178,199,.45);
+  --accent-tint:   rgba(9,178,199,.18);
+  --accent-tint-fg:#51D7ED;
+  --accent-glow:   #7BF0E3;
+
+  --keep:          #4ADE80;
+  --keep-soft:     rgba(74,222,128,.18);
+  --keep-fg:       #B7F1C7;
+  --keep-on:       #04240F;   /* text/glyph on a solid --keep fill */
+  --reject:        #FF6B66;
+  --reject-soft:   rgba(255,107,102,.10);
+  --reject-fg:     #FF9990;
+  --reject-on:     #2D0808;   /* text/glyph on a solid --reject fill */
+  --keeper:        #09B2C7;
+
+  --warn:          #B68900;   /* opaque amber — the --keep/--reject/--accent-style solid, for washes/mixes */
+  --warn-edge:     rgba(182,137,0,.45);
+  --warn-bg:       rgba(182,137,0,.10);
+  --warn-soft:     rgba(255,241,184,.16);
+  --warn-fg:       #FFE9A3;
+
+  --scrim:         rgba(0,0,0,.55);
+  --flag-scrim:    rgba(0,0,0,.72);
+  --cursor-ring:   #FFFFFF;
+  --cursor-gap:    #121414;
+  --hatch:         rgba(255,255,255,.07);
+  --kbd-bg:        rgba(255,255,255,.07);
+  --kbd-edge:      rgba(255,255,255,.14);
+
+  /* Photo wells render neutral in both themes, so text painted directly over
+     a photo (flag chips, dup labels, score readouts, meter tracks) is
+     theme-invariant white — never re-tinted by the light/dark toggle. */
+  --overlay-fg:    #FFFFFF;
+  --overlay-track: rgba(255,255,255,.12);
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+@keyframes pp-indet { 0% { transform: translateX(-70%) } 100% { transform: translateX(170%) } }
+@keyframes pp-shim  { 0% { opacity: .5 } 50% { opacity: 1 } 100% { opacity: .5 } }
+@keyframes pp-spin  { to { transform: rotate(360deg) } }
