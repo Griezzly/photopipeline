@@ -218,6 +218,12 @@
 .tile-tag.suggested { border: 1px dashed var(--accent-glow); background: var(--flag-scrim); color: var(--accent-glow); }
 .tile-tag.keeper { background: var(--keeper); color: var(--accent-on); }
 .tile-tag.rejected { background: var(--reject); color: var(--reject-on); }
+/* Filename readout in a tile footer (duplicates review, section 20) —
+ * distinct from .tile-flag, which is a code chip and needs a background. */
+.tile-file {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 600 10.5px/1 var(--mono); color: var(--overlay-fg); opacity: .8;
+}
 
 /* ── 10. Grid density ─────────────────────────────────────────────────── */
 /* --cols defaults to the 1e "cells" density (8 across); screens set the
@@ -626,3 +632,67 @@
 }
 
 .file-path { font: 500 12px/1.5 var(--mono); color: var(--text-muted); word-break: break-all; }
+
+/* ── 20. Duplicates review (1i:606-686, clusterFrames() 1022-1036) ────── */
+.dup-list {
+  flex: 1; min-height: 0; overflow: auto; padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.dup-cluster {
+  /* flex: none is load-bearing, not decorative: overflow:hidden below makes this
+   * flex item's automatic min-height 0 per spec, so without an explicit
+   * flex-shrink:0 every card gets squeezed to fit .dup-list's viewport instead
+   * of the list scrolling past its natural, much taller content. */
+  flex: none;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-card);
+  background: var(--surface-2); overflow: hidden;
+}
+.dup-cluster.decided { opacity: .92; }
+.dup-head {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.dup-title { font: 700 13px/1 var(--font); color: var(--text); }
+.dup-meta { font: 500 12px/1 var(--font); color: var(--text-dim); }
+/* Named .dup-pill-* rather than the brief's literal .pill-undecided /
+ * .pill-keeper-set: those exact names already exist (Task 7, detail.js's
+ * standalone decision pill — 12px, non-uppercase, a different visual and a
+ * different meaning). Reusing them here would silently redefine that rule
+ * for every screen, not add a new one. Colors are the tokens the brief asked
+ * for either way. */
+.dup-pill {
+  display: inline-flex; align-items: center; gap: 5px; font: 700 10px/1 var(--font);
+  letter-spacing: .04em; text-transform: uppercase; padding: 4px 8px; border-radius: var(--radius-pill);
+}
+.dup-pill-undecided { background: var(--kbd-bg); color: var(--text-muted); }
+.dup-pill-keeper-set { background: var(--accent-soft); color: var(--accent-glow); }
+.dup-body {
+  position: relative; display: flex; gap: 12px; padding: 14px;
+  background: var(--well-2); overflow-x: auto;
+}
+.dup-frame { width: 262px; height: 175px; flex: none; }
+/* Every non-keeper frame's "make this the keeper" control. The mockup itself
+ * has no visible per-frame button (it is a static illustration), but the
+ * brief requires each frame to carry this action; the top-right corner is
+ * unused by clusterFrames()'s own tag placement (top-left), so it does not
+ * compete with the suggested/keeper/rejected pill. */
+.dup-frame-pick {
+  position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong); background: var(--flag-scrim); color: var(--overlay-fg);
+  font: 700 13px/1 var(--font); cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.dup-frame-pick:hover { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+.dup-pop {
+  position: absolute; right: 14px; bottom: 14px; width: 330px; border-radius: var(--radius-card);
+  border: 1px solid var(--border-strong); background: var(--surface); backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-float); padding: 14px; z-index: 20;
+}
+.dup-pop-title { font: 700 13px/1.3 var(--font); color: var(--text); }
+.dup-pop-body { margin-top: 6px; font: 400 12px/1.45 var(--font); color: var(--text-muted); }
+.dup-pop-reject { color: var(--reject-fg); }
+.dup-pop-acts { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.dup-note {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--radius-card);
+  border: 1px solid var(--border); background: var(--surface-2);
+  font: 400 12.5px/1.4 var(--font); color: var(--text-muted);
+}
