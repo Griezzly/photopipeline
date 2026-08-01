@@ -69,6 +69,26 @@ function renderTopBar() {
   const host = el('dup-topbar');
   if (!host) return;
   const name = basename(folder) || folder || '';
+
+  // While a fetch for the *current* folder is outstanding (including the
+  // instant after a folder switch, before `load()`'s first await), `clusters`
+  // is not yet known to describe this folder — it is either empty (folder
+  // just changed) or a leftover from before this load started. Render only
+  // the static crumb/title and omit every data-driven control, most
+  // importantly "Accept all suggestions": that button posts decisions using
+  // `clusters`' file_id/group_id values, so it must not exist in the DOM
+  // until a confirmed-fresh fetch has landed. This mirrors review.js's
+  // paintChrome(), which never paints a data-driven control before `load()`
+  // resolves either.
+  if (loading) {
+    host.innerHTML = `
+      <span class="topbar-crumb">${esc(name)}</span>
+      <span class="topbar-sep">/</span>
+      <span class="topbar-title">Duplicates</span>
+      <span class="topbar-count" id="dup-summary">Loading…</span>`;
+    return;
+  }
+
   const decided = clusters.filter((c) => clusterState(c) === 'keeper-set').length;
   const frames = clusters.reduce((n, c) => n + c.members.length, 0);
   const eligible = clusters.filter((c) => clusterState(c) === 'undecided' && c.suggested_keeper_id != null).length;
@@ -553,6 +573,17 @@ export async function openDuplicates(fromFolder) {
     skipped = new Set();
     confirming = null;
     lastDecidedGroupId = null;
+    // The critical fix: `clusters` is the previous library's data and its
+    // file_id/group_id values mean nothing against the new folder's catalog
+    // (each library has its own sequence). Without this, the synchronous
+    // renderTopBar()/render() below would paint a genuinely clickable
+    // "Accept all suggestions" built from the old library's clusters, and
+    // nothing would repaint it until /api/clusters resolves — a live button
+    // that, if clicked in that window, would decide keepers using the old
+    // library's file_id/group_id values against the now-active new library.
+    clusters = [];
+    loading = true;
+    loadError = null;
     lastFolder = folder;
   }
 
