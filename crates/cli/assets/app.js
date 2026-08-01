@@ -62,11 +62,22 @@ async function boot() {
   if (window.pp.openLibraries) await window.pp.openLibraries();
 }
 
-// Task 2 imports rail.js and toast.js here; Tasks 3-10 add their screen
-// imports. Keeping the import list in one place means index.html never
-// changes again.
+// Every screen module, imported in one place so index.html never changes
+// again. icons.js is pulled in transitively by whichever of these import it.
 Promise.all([
-  import('/rail.js'), import('/toast.js'), import('/libraries.js'), import('/picker.js'),
-  import('/analyze.js'), import('/review.js'), import('/detail.js'), import('/duplicates.js'),
-  import('/compare.js'), import('/export.js'),
-]).then(() => boot());
+  import('/rail.js'),
+  import('/toast.js'),
+  import('/libraries.js'),
+  import('/picker.js'),
+  import('/analyze.js'),
+  import('/review.js'),
+  import('/detail.js'),
+  import('/duplicates.js'),
+  import('/compare.js'),
+  import('/export.js'),
+]).then(() => boot()).catch((e) => {
+  // A module that fails to parse would otherwise leave a blank window with the
+  // error buried in the console.
+  document.body.innerHTML =
+    `<pre style="padding:24px;font:13px ui-monospace,monospace">photopipe UI failed to load:\n${e}</pre>`;
+});

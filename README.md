@@ -237,34 +237,42 @@ Pass a different file with `--config <path>` on any command. See
 `photopipe serve` has two entry points — with a folder or without:
 
 ```bash
-photopipe serve                     # open http://127.0.0.1:8787/ — starts on the Home screen
+photopipe serve                     # open http://127.0.0.1:8787/ — starts on the Libraries screen
 photopipe serve ~/Photos/2024       # open that library's Review grid directly
 photopipe serve --port 8808         # same, on a different port
 ```
 
-**Home screen (no folder):** lists every previously-analyzed folder as a card
-(photo count, last-analyzed date). An **Analyze a folder** button opens an
-in-browser folder picker backed by the server's filesystem view.
+The app is a single-page UI with a navigation rail down the left edge:
+**Libraries → Review → Duplicates → Export → Develop**. Review, Duplicates, and
+Export are disabled until a library is active. **Develop** (RAW → JPEG output)
+is a placeholder — it renders disabled with a dot marker and does nothing yet.
+A theme toggle switches between dark (the default) and light; the choice
+persists across reloads via `localStorage`.
+
+**Libraries screen (no folder):** a table of every previously-analyzed folder
+(name, photo count, last-analyzed date). Click a row to open it, or click
+**Analyze a folder** to open an in-browser folder picker backed by the server's
+filesystem view — each entry is annotated if it's already a known library.
 
 **Analyze flow (no CLI required):**
 
-1. Click **Analyze a folder**, navigate to your shoot in the browser picker, and
-   confirm with **Analyze this folder**.
-2. A progress bar tracks the three stages — **Scanning** (ingest + defect checks
-   + ML embeddings), **Calibrating** (per-lens sharpness baselines), and
-   **Deduplicating** (near-duplicate grouping).
+1. From the picker, navigate to your shoot and confirm with **Analyze this
+   folder**.
+2. A staged progress screen tracks **Scanning → Detecting defects → Scoring
+   quality → Calibrating → Grouping duplicates**, each shown done / active /
+   pending. When the server reports a file count, the bar is determinate
+   (`n / total`); otherwise it's an indeterminate sweep — never a fake
+   percentage.
 3. When analysis completes you land on the **Review** grid automatically.
 
 If the ML model files are absent (`models/` is empty), analysis still completes —
-the ML steps are silently skipped and a banner in the app tells you. You can add
-the models later and run an incremental re-analyze.
+the ML steps are silently skipped and a banner tells you so. Tiles show a dash
+instead of a quality score, and duplicate grouping is skipped. You can add the
+models later and run an incremental re-analyze.
 
-**Re-analyze:** Re-opening a folder whose library already exists shows a
-**Re-analyze** button when new photos have been added since the last run. One
-click runs only the new files through the pipeline.
-
-**Export keepers:** the **Export keepers** button at the top of the Review grid
-copies your kept set to `<output>/YYYY-MM/` without leaving the browser.
+**Re-analyze:** opening a folder whose library already exists but has new files
+on disk since the last run shows a re-analyze prompt; it runs only the new files
+through the pipeline.
 
 > **CLI and browser app are two front-ends over the same per-folder libraries.**
 > You can mix them freely: run `photopipe scan` from the CLI to pre-populate a
@@ -282,33 +290,55 @@ copies your kept set to `<output>/YYYY-MM/` without leaving the browser.
 photopipe serve ~/Photos/2024 --port 8787      # then open http://127.0.0.1:8787/
 ```
 
-The grid shows every photo **flagged-first** (defects and duplicates before clean
-shots). Filter by flag (`blur`, `back_focus`, `overexposed`, `underexposed`,
-`low_iqa`) and by decision state (all / undecided / decided). Decisions are
-written through to the catalog immediately.
+**Review grid.** Shows every photo, flagged-first by default. A filter bar lets
+you narrow by defect flag (`blur`, `back_focus`, `overexposed`, `underexposed`,
+`low_iqa`, "any defect", or "no flags") and re-sort by quality score, filename,
+or flagged-first; a density control switches the grid between roomy, normal, and
+dense tile counts per row. Decisions write through to the catalog immediately,
+and the header shows live keep / reject / undecided counts alongside a "N%
+culled" figure from `/api/counts`.
 
-| Key | Action |
-|-----|--------|
-| `j` / `→` | Next photo |
-| `k` / `←` | Previous photo |
-| `Space` / `Enter` | Mark **keep** (green) |
-| `x` | Mark **reject** (red) |
-| `u` | Mark **undecide** |
-| `K` | Pick as the **keeper** of its duplicate group |
-| `f` | Open / close the detail view |
-| `Esc` | Close the detail view |
+Press `f` (or click a tile) to open the **detail panel**: a large preview with
+the full EXIF dump, the photo's quality-score percentile within the loaded
+library, and the same decision controls as the grid. `Fit / 100% / 200%` zoom is
+relative to the 2048px preview the server sends, not the sensor's native
+resolution, and is labelled accordingly. `Esc` closes it back to the grid.
 
-The footer shows live keep / reject / undecided counts. The server binds
-`127.0.0.1` only — it is never exposed on the network.
+Keyboard shortcuts (also shown in-app via `?`):
 
-#### Duplicates view
+| Action | Keys |
+|---|---|
+| Move between photos | `←` `→` `j` `k` |
+| Keep | `Space` |
+| Reject | `x` |
+| Undo the last decision (undecide) | `u` |
+| Mark as **keeper** of its duplicate group | `Shift+K` |
+| Open / close the detail panel | `f` |
+| Compare selected frames | `c` |
+| Exit / close the current overlay | `Esc` |
+| Toggle this shortcut sheet | `?` |
 
-Click **Duplicates** in the review header for a per-group view of near-identical
-shots. Each group is a row with the pipeline's suggested keeper first (gold
-outline) and the rest ordered best-quality-first. Click a thumbnail to compare
-shots full-size (`←` / `→` to step through the group); **★ Keep this** keeps that
-shot and rejects the others in the group in one action — the same as pressing `K`
-on it in the grid.
+Deciding a photo (`Space`, `x`, `u`) advances the cursor to the next one; holding
+`Shift` while deciding keeps the cursor in place instead, so you can, say, reject
+a run of photos in place without them scrolling away as fast. `Shift+K` for
+keeper is the exception where Shift is inherent to the shortcut itself, not an
+advance/stay modifier.
+
+**Duplicates.** Click **Duplicates** in the rail for a per-cluster view of
+near-identical shots, one card per group. The pipeline's suggested keeper is
+marked; clicking a member's **Set as keeper** opens a confirm popover (nothing
+is rejected until you confirm — `Enter` accepts, `Esc` cancels) before it sets
+that member as keeper and rejects its siblings. **Accept all suggestions**
+does the same in bulk for every undecided cluster in one confirmed action.
+Every set is one **Undo** away, which restores the whole cluster to undecided.
+Press `c` (or open a cluster's compare) to view two frames side-by-side, synced
+for zoom and pan; `a` / `d` make the left or right frame the keeper directly.
+
+**Export.** The **Export** rail entry opens a dialog estimating how many kept
+files and how many bytes will be copied to `_keepers/` (relative to where
+`photopipe serve` was started); confirming copies the RAW originals as-is.
+Nothing is developed or converted yet — that's the Develop placeholder's job in
+a future version.
 
 ### Review tree (file-manager browsing)
 

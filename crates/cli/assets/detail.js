@@ -478,7 +478,11 @@ function onKey(e) {
   if (k === 'x' || k === 'X') { decide('reject', e.shiftKey); return; }
   if (k === 'u' || k === 'U') { decide('undecide', e.shiftKey); return; }
   if (k === 'K') { decide('keeper', true); return; } // Shift is inherent in 'K'
-  if (k === 'f' || k === 'F') { closeDetail(); return; }
+  // Stop the event here: review.js's bubble-phase handler re-checks
+  // #modal-host after this capture-phase listener runs, and closeDetail()
+  // below empties it — without this, review.js would see an empty host and
+  // immediately reopen detail, making 'f' a no-op.
+  if (k === 'f' || k === 'F') { e.stopPropagation(); closeDetail(); return; }
   if (k === 'c' || k === 'C') { compare(); }
 }
 

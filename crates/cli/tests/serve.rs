@@ -681,3 +681,69 @@ async fn every_asset_referenced_by_index_resolves() {
         assert_eq!(resp.status(), StatusCode::OK, "/{path} did not resolve");
     }
 }
+
+/// Every module the app dynamically imports must be embedded. `index.html`
+/// only references app.js, so a missing screen module would otherwise surface
+/// as a blank view at runtime rather than a failing build.
+#[tokio::test]
+async fn every_screen_module_is_embedded() {
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    const MODULES: &[&str] = &[
+        "tokens.css",
+        "style.css",
+        "index.html",
+        "app.js",
+        "icons.js",
+        "rail.js",
+        "toast.js",
+        "libraries.js",
+        "picker.js",
+        "analyze.js",
+        "review.js",
+        "detail.js",
+        "duplicates.js",
+        "compare.js",
+        "export.js",
+        "Manrope.ttf",
+    ];
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let state = app_state_active(catalog, cache);
+
+    for m in MODULES {
+        let app = photopipe::serve::router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{m}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "/{m} is not embedded");
+    }
+
+    // And nothing stale is left behind from the previous UI.
+    for gone in ["home.js", "browse.js"] {
+        let app = photopipe::serve::router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{gone}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "/{gone} should have been deleted"
+        );
+    }
+}

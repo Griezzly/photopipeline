@@ -13,8 +13,8 @@ export async function openExport() {
   if (!est.files) {
     window.pp.toast({
       kind: 'info',
-      title: 'Nothing to export yet',
-      body: 'Keep or mark a few frames as keepers first.',
+      title: 'Nothing new to export',
+      body: 'No kept or keeper photos are waiting — any you already exported are in _keepers.',
     });
     return;
   }
