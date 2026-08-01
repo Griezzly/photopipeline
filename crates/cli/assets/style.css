@@ -68,7 +68,7 @@
    squeezing the icon inside the still-32x32 box (1b:145 wants a 28x28 icon button). */
 .btn-icon.sm { width: 28px; height: 28px; padding: 0; }
 .btn.on {
-  border-color: var(--accent-edge); background: var(--accent-soft); color: var(--accent);
+  border-color: var(--accent-edge); background: var(--accent-soft); color: var(--accent-soft-fg);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
@@ -123,7 +123,7 @@
 .stat {
   border: 1px solid var(--border-strong); border-radius: var(--radius-card);
   padding: 12px 14px; background: var(--surface);
-  background-image: radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 55%);
+  background-image: radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--accent) 3.5%, transparent), transparent 55%);
 }
 .stat-n { font: 700 24px/1 var(--font); letter-spacing: -.02em; color: var(--text); }
 .stat-label { margin-top: 7px; font: 500 11.5px/1 var(--font); color: var(--text-muted); }
@@ -142,7 +142,7 @@
 }
 .decide-bar {
   display: flex; height: 10px; border-radius: var(--radius-pill); overflow: hidden;
-  background: var(--inset); border: 1px solid var(--border);
+  background: var(--track); border: 1px solid var(--border);
 }
 .decide-bar-keep { background: var(--keep); }
 .decide-bar-reject { background: var(--reject); }

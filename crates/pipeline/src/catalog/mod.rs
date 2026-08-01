@@ -1558,8 +1558,10 @@ impl Catalog {
             .as_secs() as i64
     }
 
-    /// Record a keep/reject verdict (write-through upsert). Leaves `is_keeper`
-    /// unchanged on update; new rows default it to false.
+    /// Record a keep/reject verdict (write-through upsert). Clears `is_keeper` —
+    /// a plain keep/reject is not a keeper pick, and only [`Self::pick_keeper`]
+    /// sets that flag. Leaving it set here would let a rejected photo keep
+    /// rendering as its group's keeper, which outranks every other state.
     pub fn set_decision(
         &self,
         file_id: i64,
@@ -1575,6 +1577,7 @@ impl Catalog {
              VALUES (?, ?, false, ?, ?)
              ON CONFLICT (file_id) DO UPDATE SET
                  verdict    = excluded.verdict,
+                 is_keeper  = excluded.is_keeper,
                  note       = excluded.note,
                  decided_at = excluded.decided_at",
             duckdb::params![file_id, verdict.as_str(), note, Self::now_secs()],
