@@ -129,7 +129,16 @@ pub fn ingest_directory(
     tracing::info!(total = paths.len(), "ingest: files found");
 
     // ── drop sidecar JPGs (RAW + same-name JPG → keep RAW only) ─────────────
+    let before = paths.len();
     let paths = exclude_sidecar_jpgs(paths);
+    let excluded = before - paths.len();
+    if excluded > 0 {
+        tracing::info!(
+            kept = paths.len(),
+            excluded,
+            "ingest: sidecar JPGs excluded from catalog"
+        );
+    }
 
     if let Some(p) = progress {
         p.set_total(paths.len() as u64);
@@ -342,7 +351,11 @@ fn find_sidecar_jpg(path: &Path) -> Option<PathBuf> {
 
 /// Drop any `.jpg`/`.jpeg` whose same-stem RAW sibling is also in `paths`
 /// (same parent dir, case-insensitive stem). RAWs and standalone JPGs are kept.
-fn exclude_sidecar_jpgs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+///
+/// Public because anything that reasons about "which files would a scan touch"
+/// has to apply the same rule — see [`crate::analyze::count_pending`]. A caller
+/// that filters differently here will disagree with the catalog forever.
+pub fn exclude_sidecar_jpgs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     use std::collections::HashSet;
 
     // Build a set of (parent_dir, lowercased_stem) for every RAW path.
@@ -361,7 +374,6 @@ fn exclude_sidecar_jpgs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         })
         .collect();
 
-    let before = paths.len();
     let result: Vec<PathBuf> = paths
         .into_iter()
         .filter(|p| {
@@ -381,15 +393,6 @@ fn exclude_sidecar_jpgs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
             }
         })
         .collect();
-
-    let excluded = before - result.len();
-    if excluded > 0 {
-        tracing::info!(
-            kept = result.len(),
-            excluded,
-            "ingest: sidecar JPGs excluded from catalog"
-        );
-    }
 
     result
 }

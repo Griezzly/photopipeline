@@ -32,6 +32,46 @@ fn make_jpg(dir: &std::path::Path, name: &str) {
 }
 
 #[test]
+fn count_pending_ignores_sidecar_jpgs() {
+    let d = TempDir::new().unwrap();
+    let roots = LibraryRoots {
+        data: d.path().join("data"),
+        cache: d.path().join("cache"),
+    };
+    let folder = d.path().join("photos");
+    std::fs::create_dir_all(&folder).unwrap();
+
+    // A RAW with a same-stem JPG beside it — the pair ingest collapses to the RAW
+    // alone. The RAW's bytes are irrelevant to this test: both the walk and the
+    // sidecar rule work on paths, and a preview that fails to decode is a warning,
+    // not an ingest failure.
+    std::fs::write(folder.join("IMG_0001.dng"), b"not a decodable raw").unwrap();
+    make_jpg(&folder, "IMG_0001.jpg");
+    make_jpg(&folder, "standalone.jpg");
+
+    let lib = open_or_create_library(&roots, &folder).unwrap();
+    let cfg = Config::default();
+
+    // Before any scan: the RAW and the standalone JPG are pending. The sidecar is
+    // not — ingest will never process it, so counting it can never reach zero.
+    assert_eq!(
+        count_pending(&folder, &lib.catalog, &cfg.ingest).unwrap(),
+        2
+    );
+
+    let hub = ModelHub::empty();
+    let sink = Arc::new(RecordingSink::default());
+    analyze_folder(&folder, &lib.catalog, &lib.cache, &hub, &cfg, sink.as_ref()).unwrap();
+
+    // After the scan nothing is left over — this is what the UI's "N new photos"
+    // banner reads, and it must be able to clear.
+    assert_eq!(
+        count_pending(&folder, &lib.catalog, &cfg.ingest).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn analyze_folder_runs_chain_ml_skipped_and_is_idempotent() {
     let d = TempDir::new().unwrap();
     let roots = LibraryRoots {
