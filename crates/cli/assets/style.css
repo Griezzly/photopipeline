@@ -696,3 +696,37 @@
   border: 1px solid var(--border); background: var(--surface-2);
   font: 400 12.5px/1.4 var(--font); color: var(--text-muted);
 }
+
+/* ── 21. Compare mode (1j:688-733) ────────────────────────────────────── */
+.cmp { position: fixed; inset: 0; z-index: 130; display: flex; flex-direction: column; background: var(--bg); }
+.cmp-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.cmp-panes { flex: 1; min-height: 0; display: flex; gap: 2px; background: var(--inset); }
+.cmp-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--well-2); }
+/* display:flex + the frame's own margin:auto (rather than align-items/
+ * justify-content centring) is the same technique .detail-stage uses: it
+ * centres content that fits while staying scrollable to every edge of
+ * content that overflows, which flex's own cross-axis alignment does not
+ * reliably do once a centred item is larger than its container. */
+.cmp-stage { flex: 1; min-height: 0; display: flex; padding: 20px; overflow: auto; cursor: grab; }
+.cmp-stage.dragging { cursor: grabbing; }
+/* Not in the brief's Step 2 list — a positioned, shrink-to-fit wrapper around
+ * the <img> so .cmp-badge/.cmp-sharper (which an <img> cannot parent) hug the
+ * photo's own rendered edges at both zoom levels, whatever its aspect ratio,
+ * rather than the stage's padding box. Sized explicitly in JS from the
+ * image's naturalWidth/Height, not by CSS percentage. */
+.cmp-frame { position: relative; margin: auto; flex: none; }
+.cmp-img { display: block; border-radius: var(--radius-tile); box-shadow: 0 8px 30px rgba(0, 0, 0, .5); }
+.cmp-img.better { outline: 2px solid var(--accent-glow); outline-offset: 3px; }
+.cmp-badge {
+  position: absolute; top: 8px; left: 8px; font: 700 10px/1 var(--mono);
+  padding: 4px 6px; border-radius: 4px; background: var(--flag-scrim); color: var(--overlay-fg);
+}
+.cmp-sharper {
+  position: absolute; top: 8px; right: 8px; display: inline-flex; align-items: center; gap: 5px;
+  font: 700 10px/1 var(--font); letter-spacing: .04em; text-transform: uppercase;
+  padding: 5px 8px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-on);
+}
+.cmp-foot { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.cmp-score { font: 700 20px/1 var(--font); color: var(--text); }
+.cmp-score.better { color: var(--accent-glow); text-shadow: 0 0 24px var(--accent-soft); }
+.cmp-exif { font: 500 11.5px/1 var(--font); color: var(--text-dim); }
