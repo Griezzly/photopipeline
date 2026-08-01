@@ -3,101 +3,83 @@
 Findings that are real, reproduced, and deliberately **not** fixed in the change
 that surfaced them. Each says why it was left, and what fixing it involves.
 
-Last updated: 2026-07-31, after the review-UI redesign
-(`docs/superpowers/specs/2026-07-30-review-ui-redesign-design.md`).
+Last updated: 2026-08-01. **Nothing is currently open.** Everything the
+review-UI redesign
+(`docs/superpowers/specs/2026-07-30-review-ui-redesign-design.md`) left behind
+was fixed on `fix/known-issues`; what remains below is the accepted risk and the
+defect class worth not re-learning.
 
 ---
 
-## Backend bugs
+## Open
 
-These were found while building the new web UI. All three were verified
-directly, not inferred. None were fixed there, because that work was scoped to
-the front end — its only production Rust change was two `Content-Type` mime arms.
-
-### BE-1 — `count_pending` counts excluded sidecar JPGs, so the re-analyze banner never clears
-
-`crates/pipeline/src/analyze.rs`, `count_pending()`.
-
-It walks the folder, filters by extension, and asks `needs_processing()` — but
-never applies `exclude_sidecar_jpgs()`, which is private to
-`crates/pipeline/src/ingest/mod.rs` and only called from the ingest walk. Every
-sidecar JPG that ingest deliberately excluded therefore reports as pending
-forever.
-
-Evidence: Kijkduin has 150 files on disk, exactly 75 of them JPGs, and 75
-cataloged photos. `POST /api/open` returns `pending_new: 75` — precisely the
-excluded sidecars. Reproduced on all five test libraries.
-
-Effect: the UI's "N new photos in this folder" banner fires on every library,
-every time. The banner reports the API faithfully; the API is wrong.
-
-Fix: make the sidecar-exclusion rule reachable from `analyze.rs` (export it, or
-lift it into a shared helper) and apply it in `count_pending`. Add a test with a
-RAW+JPG pair asserting `count_pending == 0` after a scan.
-
-### BE-2 — `set_decision` never resets `is_keeper`, so a rejected photo can render as a keeper
-
-`crates/pipeline/src/catalog/mod.rs`, `Catalog::set_decision()`.
-
-```sql
-INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
-VALUES (?, ?, false, ?, ?)
-ON CONFLICT (file_id) DO UPDATE SET
-    verdict = excluded.verdict, note = excluded.note, decided_at = excluded.decided_at
-```
-
-The `false` applies only on a fresh insert. The `DO UPDATE SET` list omits
-`is_keeper`, so marking a photo keeper and then keeping or rejecting it leaves
-`is_keeper = true` in the database.
-
-Effect: after any reload, `review_list` returns `is_keeper: true` and the UI —
-where keeper outranks every other state — paints a **rejected** photo as a
-keeper, permanently. The client already does the right thing locally; the
-divergence only appears after a refetch.
-
-No test covers keeper-then-decide; `crates/pipeline/tests/decisions.rs` stops at
-`pick_keeper`.
-
-Fix: add `is_keeper = false` to that `SET` list, plus a regression test that
-sets a keeper, then rejects, then re-reads.
-
-### BE-3 — one library's catalog has a corrupted DuckDB ART index
-
-Every decision write to the Grindelwald library returns 500:
-
-```
-FATAL Error: Corrupted ART index - likely the same row id was inserted twice into the same ART
-```
-
-Reproduced on two different `file_id`s after a clean server restart. Reads
-(counts, photos, thumbnails) are unaffected and no partial write lands.
-
-**Localized, not systemic** — the identical write to another library succeeds and
-reverts cleanly, so this is damage to one derived-data file rather than a code
-path. Origin unknown; the likeliest candidate is an interrupted write during
-early testing.
-
-Fix: delete that library's directory under
-`~/.local/share/photopipe/libraries/<key>/` and re-scan. Safe by this project's
-own constraint — catalogs are derived data and originals are never modified. Not
-done automatically because it is a deletion.
+None.
 
 ---
 
-## UI follow-ups
+## Fixed on 2026-08-01
 
-Non-blocking; triaged as ship-as-is during the redesign's final review.
+Each was reproduced before the fix and re-verified after, against the real
+`2024-05 Grindelwald` library rather than only in tests.
 
-| Item | Where | Note |
+### Backend
+
+**BE-1 — `count_pending` counted excluded sidecar JPGs** (`bf4438f`)
+
+`analyze.rs::count_pending` walked by extension and asked `needs_processing()`,
+but never applied `exclude_sidecar_jpgs()`, which was private to
+`ingest/mod.rs`. Every sidecar JPG that ingest deliberately skips reported as
+pending forever, so the UI's "N new photos in this folder" banner fired on every
+library, every time.
+
+Fixed by making the exclusion public and applying it in `count_pending`, so both
+walks answer the same question; the logging moved to the ingest call site, where
+"excluded from catalog" is actually true. Covered by
+`count_pending_ignores_sidecar_jpgs` in `crates/pipeline/tests/analyze.rs`.
+Verified live: Grindelwald has 94 RAWs and 94 sidecars, and `POST /api/open` now
+returns `pending_new: 0` where it used to return 94.
+
+**BE-2 — `set_decision` never reset `is_keeper`** (`e02a5df`)
+
+The upsert wrote `is_keeper = false` only on a fresh insert; the
+`ON CONFLICT DO UPDATE SET` list omitted the column. Picking a keeper and then
+keeping or rejecting that photo left `is_keeper = true`, and since the UI ranks
+keeper above every other state, the next refetch painted a **rejected** photo as
+its group's keeper — permanently.
+
+Fixed by adding `is_keeper = excluded.is_keeper` to the `SET` list; only
+`pick_keeper` sets the flag now. Covered by
+`set_decision_clears_a_previously_picked_keeper` in
+`crates/pipeline/tests/decisions.rs`, which asserts through `review_list` as well
+as `get_decision`, because `review_list` is what the client actually refetches.
+
+**BE-3 — one library's catalog had a corrupted DuckDB ART index**
+
+Every decision write to Grindelwald returned 500 with
+`FATAL Error: Corrupted ART index - likely the same row id was inserted twice
+into the same ART`. Confirmed still failing on 2026-08-01, then fixed by deleting
+that library's `catalog.duckdb` and re-scanning: 94 processed, 0 errored, and a
+second scan processed 0 — idempotent. Decision writes now return 200.
+
+No code change, and none was warranted: the identical write always succeeded
+against other libraries, so this was damage to one derived-data file. The library
+held zero decisions, so nothing but derived data was lost. Origin remains
+unknown; the likeliest candidate is an interrupted write during early testing.
+
+### UI (`26773a5`)
+
+| Item | Where | Fix |
 |---|---|---|
-| Test-comment inaccuracy | `crates/cli/tests/serve.rs` | A doc comment claims the font is covered by the index-manifest test. It is not — `Manrope.ttf` is referenced from `tokens.css`, not `index.html`. Coverage is intact via `font_is_served_with_font_content_type`; only the comment is wrong. |
-| Guard test can go vacuous on a rename | `crates/cli/tests/serve.rs` | The cross-library guard assertion's strongest inner check is gated on `src.contains("let loading")`. Renaming that variable silently disables the check while the test still passes. One-line fix: also assert the set of modules matching `let loading`. |
-| `norm()` lowercases whole paths | `crates/cli/assets/picker.js` | Can show "Analyzed" on `/photos/Shoot` when the library is `/photos/shoot` — a false positive on a badge whose whole point is truthfulness. Only affects case-sensitive filesystems. |
-| `--shadow-float` is not themed | `crates/cli/assets/tokens.css` | Defined once in the shared `:root` as a dark-tuned drop shadow, then used by `.sheet` and `.dup-pop`, so it reads heavy over the light theme's pale wells. Move it into the two theme blocks. |
-| Determinate progress bar lacks ARIA | `crates/cli/assets/analyze.js` | The indeterminate branch has a proper `role="progressbar"` on its spinner; the determinate bar does not. |
-| Mockup-fidelity nits | `crates/cli/assets/style.css` | `.stat` radial wash strength, `.btn.on` text colour, `.decide-bar` track shade all differ slightly from the mockups. Sub-perceptual. |
+| Test-comment inaccuracy | `crates/cli/tests/serve.rs` | The font is referenced from `tokens.css`, not `index.html`, so the index-manifest test never covered it. The comment now says so and names `font_is_served_with_font_content_type`, which does. |
+| Guard test could go vacuous | `crates/cli/tests/serve.rs` | The cross-library guard's strongest inner check was gated on `src.contains("let loading")`; renaming that variable would have disabled it silently. The set of modules the gate fires on is now pinned — verified by renaming the variable and watching the test go red. |
+| `norm()` lowercased whole paths | `crates/cli/assets/picker.js` | Library identity is `library_key`, an xxh3 of the canonical path with its case intact, so on a case-sensitive filesystem the two casings really are two libraries. `norm()` now strips trailing separators only, and fails toward a missing badge rather than a false one. |
+| `--shadow-float` was not themed | `crates/cli/assets/tokens.css` | Moved from the shared `:root` into the two theme blocks. Light gets a soft `rgba(3,7,18,…)` lift instead of the dark-tuned `rgba(0,0,0,.55)` bruise. |
+| Determinate progress bar lacked ARIA | `crates/cli/assets/analyze.js` | Both branches now expose `role="progressbar"`, with `aria-valuenow` where there is a value to report. |
+| Mockup-fidelity nits | `crates/cli/assets/style.css` | Taken from the mockups' own values: `.stat` wash 9% → 3.5%, `.btn.on` text to a new `--accent-soft-fg` (`#007A8A` / `#51D7ED`), `.decide-bar` track to a new `--track` (`#F1F0F0` / `#1A1C1C`). |
 
-### Accepted, not a defect
+---
+
+## Accepted, not a defect
 
 Folder names and filenames from the filesystem are interpolated into `innerHTML`
 in several screens. Judged acceptable for a localhost-only tool that displays the
@@ -132,4 +114,5 @@ load B fully, then interact, and everything passes. They only appear when you ac
 merging UI changes. When adding a module that holds state or registers a keydown
 handler, clear its data in the folder-change block, guard every post-`await`
 continuation against the folder having changed, and stand down while loading.
-`crates/cli/tests/serve.rs` asserts the guards exist.
+`crates/cli/tests/serve.rs` asserts the guards exist, and — since 2026-08-01 —
+asserts which modules they cover, so a rename cannot quietly retire one.
