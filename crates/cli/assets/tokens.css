@@ -24,8 +24,10 @@
   --shadow-pop: 0 1px 1px rgba(3,7,18,.01), 0 5px 5px rgba(3,7,18,.02),
                 0 12px 12px rgba(3,7,18,.03), 0 20px 20px rgba(3,7,18,.04),
                 0 32px 32px rgba(3,7,18,.05);
-  --shadow-float: 0 24px 48px rgba(0,0,0,.55);
   --shadow-toast: 0 4px 12px rgba(0,0,0,.06), 0 2px 4px rgba(0,0,0,.04);
+  /* --shadow-float lives in the theme blocks below: it lifts .sheet and
+     .dup-pop off the page, and the opacity that reads as "lifted" over a dark
+     surface reads as a bruise over a pale one. */
 }
 
 /* ── Light ─────────────────────────────────────────────────────────────── */
@@ -36,6 +38,7 @@
   --inset:         #F1F0F0;
   --well:          #F7F7F7;   /* grid background */
   --well-2:        #FFFFFF;   /* photo stage */
+  --track:         #F1F0F0;   /* unfilled meter track on a surface (cf. --overlay-track) */
 
   --border:        rgba(0,0,0,.08);
   --border-strong: #D8D8D8;
@@ -51,6 +54,7 @@
   --accent-hover:  #005F6B;
   --accent-on:     #FFFFFF;   /* text on an accent fill */
   --accent-soft:   rgba(9,178,199,.12);
+  --accent-soft-fg:#007A8A;   /* text/glyph on an --accent-soft fill */
   --accent-edge:   rgba(0,122,138,.40);
   --accent-tint:   #D2F7FF;
   --accent-tint-fg:#003138;
@@ -71,6 +75,8 @@
   --warn-bg:       #FFFBEB;
   --warn-soft:     #FFF1B8;
   --warn-fg:       #2A1E00;
+
+  --shadow-float:  0 24px 48px rgba(3,7,18,.16), 0 8px 16px rgba(3,7,18,.08);
 
   --scrim:         rgba(0,0,0,.34);
   --flag-scrim:    rgba(0,0,0,.82);
@@ -95,6 +101,7 @@
   --inset:         #0E0E0E;
   --well:          #121414;
   --well-2:        #1A1C1C;
+  --track:         #1A1C1C;   /* unfilled meter track on a surface (cf. --overlay-track) */
 
   --border:        rgba(255,255,255,.07);
   --border-strong: rgba(255,255,255,.12);
@@ -110,6 +117,7 @@
   --accent-hover:  #51D7ED;
   --accent-on:     #00262B;
   --accent-soft:   rgba(9,178,199,.14);
+  --accent-soft-fg:#51D7ED;   /* text/glyph on an --accent-soft fill */
   --accent-edge:   rgba(9,178,199,.45);
   --accent-tint:   rgba(9,178,199,.18);
   --accent-tint-fg:#51D7ED;
@@ -130,6 +138,8 @@
   --warn-bg:       rgba(182,137,0,.10);
   --warn-soft:     rgba(255,241,184,.16);
   --warn-fg:       #FFE9A3;
+
+  --shadow-float:  0 24px 48px rgba(0,0,0,.55);
 
   --scrim:         rgba(0,0,0,.55);
   --flag-scrim:    rgba(0,0,0,.72);

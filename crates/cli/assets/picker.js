@@ -5,7 +5,13 @@ import { icon } from '/icons.js';
 // once per picker session so each row can carry a truthful "Analyzed" badge.
 let analyzed = new Set();
 
-const norm = (p) => p.replace(/[\\/]+$/, '').toLowerCase();
+// Trailing separators only — deliberately case-sensitive. A library's identity
+// is `library_key`, an xxh3 of the canonical path with its case intact, so on a
+// case-sensitive filesystem /photos/Shoot and /photos/shoot really are two
+// libraries. Folding case here would badge one of them "Analyzed" on the
+// strength of the other, and this badge's whole value is that it is truthful.
+// The failure mode now runs the safe way: a missing badge, never a false one.
+const norm = (p) => p.replace(/[\\/]+$/, '');
 
 export async function openPicker(startPath) {
   try {

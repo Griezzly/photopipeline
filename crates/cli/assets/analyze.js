@@ -94,7 +94,10 @@ function render(folder, s) {
               <span class="stage-title ${stateName}">${st.label}</span>
               <span class="stage-meta ${stateName}">${meta}</span>
             </div>
-            ${showBar ? `<div class="stage-bar-wrap"><div class="bar">
+            ${showBar ? `<div class="stage-bar-wrap"><div class="bar" role="progressbar"
+                 aria-label="${st.label}"${counted
+                   ? ` aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"`
+                   : ''}>
               <div class="bar-fill${counted ? '' : ' indet'}"
                    style="${counted ? `width:${pct}%` : ''}"></div>
             </div></div>` : ''}`;

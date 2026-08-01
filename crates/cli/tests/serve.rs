@@ -725,8 +725,11 @@ fn dynamic_imports_of(app_js: &str) -> Vec<String> {
 ///
 /// The manifest is *derived* from app.js's own `import()` calls rather than
 /// hardcoded here: a hardcoded copy is exactly the drift this test exists to
-/// catch. `index.html`'s own references (the two stylesheets, the font,
-/// app.js) are covered by `every_asset_referenced_by_index_resolves`.
+/// catch. `index.html`'s own references — the two stylesheets and app.js — are
+/// covered by `every_asset_referenced_by_index_resolves`. The font is *not*
+/// among them: `tokens.css` requests `/Manrope.ttf` from its `@font-face`, so
+/// nothing in `index.html` names it. `font_is_served_with_font_content_type` is
+/// what covers the font.
 #[tokio::test]
 async fn every_screen_module_is_embedded() {
     use axum::http::{Request, StatusCode};
@@ -832,6 +835,7 @@ async fn keyboard_modules_carry_cross_library_stand_down_guards() {
     let modules = dynamic_imports_of(&app_js);
 
     let mut guarded: Vec<&str> = Vec::new();
+    let mut loading_aware: Vec<&str> = Vec::new();
     let mut reset: Vec<&str> = Vec::new();
 
     for m in &modules {
@@ -858,6 +862,7 @@ async fn keyboard_modules_carry_cross_library_stand_down_guards() {
                      down on it — keys pressed during the load window would act on the \
                      rows of whichever library was open before"
                 );
+                loading_aware.push(m);
             }
             guarded.push(m);
         }
@@ -887,6 +892,16 @@ async fn keyboard_modules_carry_cross_library_stand_down_guards() {
         guarded,
         ["compare.js", "detail.js", "duplicates.js", "review.js"],
         "unexpected set of decision-writing keyboard modules"
+    );
+    // The `let loading` check above is the strongest thing this test asserts, and
+    // it is gated on a variable name. Pin the set it fires on: renaming `loading`
+    // would otherwise skip the gate silently and leave the test green.
+    loading_aware.sort_unstable();
+    assert_eq!(
+        loading_aware,
+        ["duplicates.js", "review.js"],
+        "unexpected set of decision-writing keyboard modules with their own load \
+         window — a rename here disables the stand-down assertion above"
     );
     reset.sort_unstable();
     assert_eq!(
