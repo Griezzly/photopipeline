@@ -20,7 +20,7 @@ Copied from `CLAUDE.md` and the spec. Every task's requirements implicitly inclu
 - **No mutation of original photo files.** Reads only, even in error paths. `.pp3` files go next to the output JPEG; `.cube` files go in the cache dir. **Never** beside the source raw.
 - **Idempotency is a correctness requirement, not a perf goal.** A second `finish` run over an unchanged library must perform zero renders.
 - **One corrupt file must never abort a run.** Wrap per-file work so an `Err` logs `tracing::warn!(path = %p.display(), error = %e)` and continues, leaving no `edits` row.
-- **Bulk inserts use the DuckDB Appender API.** Row-at-a-time `INSERT` is a perf bug. Batch size lives in `CatalogConfig::write_batch_size` (default 64).
+- **Bulk inserts use the DuckDB Appender API.** Row-at-a-time `INSERT` is a perf bug. Batch size lives in `CatalogConfig::write_batch_size` (default 64). **Scope (ruled 2026-08-09):** this binds bulk ingest paths. `upsert_raw_stats` and `upsert_edit` use `INSERT … ON CONFLICT` instead, because the Appender cannot express `ON CONFLICT` — the same reason already documented for `flush_blur_flag_batch` in `catalog/mod.rs` — and `finish` writes one row per photo between multi-second renders, so there is no batch to accelerate.
 - **Migrations are atomic** — each wrapped in `BEGIN TRANSACTION; … COMMIT;`.
 - **`ON DELETE CASCADE` is unsupported** in this DuckDB version. Manage cascades in application code.
 - **No `println!` outside user-facing CLI output.** Use `tracing`: `info!` for phase events, `warn!` for per-file failures, `debug!` for detail.
@@ -2058,6 +2058,18 @@ mod tests {
         assert!(out.contains("Chroma=36"), "denoise_chroma 0.36 should emit 36:\n{out}");
     }
 
+    /// The three silent no-op traps from docs/design/pp3-keys.md. Each of
+    /// these keys defaults to a value that makes a neighbouring key we DO set
+    /// be ignored, with no warning from RawTherapee.
+    #[test]
+    fn silent_no_op_traps_are_defused() {
+        let out = emit_pp3(&fixed_recipe());
+        assert!(out.contains("Setting=Custom"), "WB would fall back to camera:\n{out}");
+        assert!(out.contains("AutoContrast=false"), "Contrast would be ignored:\n{out}");
+        assert!(out.contains("AutoRadius=false"), "DeconvRadius would be ignored:\n{out}");
+        assert!(out.contains("CMethod=MAN"), "Chroma would be ignored:\n{out}");
+    }
+
     /// Zeroed corrections emit disabled tools, not enabled ones set to zero —
     /// an enabled no-op tool still costs render time.
     #[test]
@@ -2197,6 +2209,9 @@ pub fn emit_pp3(recipe: &EditRecipe) -> String {
 
     // ── white balance ──
     s.push_str("\n[White Balance]\n");
+    s.push_str("Enabled=true\n");
+    // TRAP: the neutral default is Setting=Camera, under which Temperature and
+    // Green are ignored entirely. See docs/design/pp3-keys.md.
     s.push_str("Setting=Custom\n");
     s.push_str(&format!("Temperature={}\n", recipe.wb_temp_k.round() as i32));
     s.push_str(&format!("Green={}\n", f3(recipe.wb_green)));
@@ -2205,7 +2220,11 @@ pub fn emit_pp3(recipe: &EditRecipe) -> String {
     s.push_str("\n[Directional Pyramid Denoising]\n");
     if recipe.denoise_luma > 0.0 || recipe.denoise_chroma > 0.0 {
         s.push_str("Enabled=true\n");
-        s.push_str("Method=RGB\n");
+        // TRAP: a single Chroma slider requires Method=Lab AND CMethod=MAN.
+        // Under CMethod=AUT — which several bundled profiles use — Chroma is
+        // ignored. See docs/design/pp3-keys.md.
+        s.push_str("Method=Lab\n");
+        s.push_str("CMethod=MAN\n");
         s.push_str(&format!("Luma={}\n", pct(recipe.denoise_luma)));
         s.push_str(&format!("Chroma={}\n", pct(recipe.denoise_chroma)));
     } else {
@@ -2216,6 +2235,10 @@ pub fn emit_pp3(recipe: &EditRecipe) -> String {
     s.push_str("\n[PostDemosaicSharpening]\n");
     if recipe.sharpen_amount > 0.0 {
         s.push_str("Enabled=true\n");
+        // TRAP: AutoContrast and AutoRadius both default to true, and each
+        // overrides the manual value below it. See docs/design/pp3-keys.md.
+        s.push_str("AutoContrast=false\n");
+        s.push_str("AutoRadius=false\n");
         s.push_str(&format!("Contrast={}\n", pct(recipe.sharpen_amount)));
         s.push_str("DeconvRadius=0.750\n");
     } else {
@@ -2265,7 +2288,7 @@ section header or key name disagrees with what your GUI diff showed.
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p pipeline --lib develop::pp3`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 7: Prove the emitted profile actually changes the render**
 
