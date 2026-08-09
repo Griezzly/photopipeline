@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod config;
 pub mod dedupe;
 pub mod defect;
+pub mod develop;
 pub mod error;
 pub mod ingest;
 pub mod library;
