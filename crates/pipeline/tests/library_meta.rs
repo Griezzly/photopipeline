@@ -5,7 +5,7 @@ use tempfile::TempDir;
 fn library_meta_roundtrips_at_v3() {
     let dir = TempDir::new().unwrap();
     let catalog = Catalog::open(&dir.path().join("c.duckdb")).unwrap();
-    assert_eq!(catalog.schema_version().unwrap(), 3);
+    assert_eq!(catalog.schema_version().unwrap(), 4);
 
     // No meta yet.
     assert!(catalog.library_meta().unwrap().is_none());

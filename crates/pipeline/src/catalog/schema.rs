@@ -113,4 +113,48 @@ pub const MIGRATIONS: &[&str] = &[
          last_analyzed BIGINT
      );
      COMMIT;",
+    // version 4 — automatic develop: raw-linear stats and edit recipes
+    "BEGIN TRANSACTION;
+     INSERT INTO schema_version VALUES (4);
+     CREATE TABLE raw_stats (
+         file_id           BIGINT PRIMARY KEY REFERENCES files(id),
+         p1                REAL NOT NULL,
+         p50               REAL NOT NULL,
+         p999              REAL NOT NULL,
+         clipped_frac      REAL NOT NULL,
+         black_frac        REAL NOT NULL,
+         wb_r              REAL NOT NULL,
+         wb_g              REAL NOT NULL,
+         wb_b              REAL NOT NULL,
+         illum_r           REAL,
+         illum_g           REAL,
+         illum_b           REAL
+     );
+     CREATE TABLE edits (
+         file_id            BIGINT PRIMARY KEY REFERENCES files(id),
+         content_hash       VARCHAR NOT NULL,
+         exposure_ev        REAL NOT NULL,
+         wb_temp_k          REAL NOT NULL,
+         wb_green           REAL NOT NULL,
+         highlight_recovery REAL NOT NULL,
+         shadow_lift        REAL NOT NULL,
+         denoise_luma       REAL NOT NULL,
+         denoise_chroma     REAL NOT NULL,
+         sharpen_amount     REAL NOT NULL,
+         lens_correct       BOOLEAN NOT NULL,
+         recipe_hash        VARCHAR NOT NULL,
+         decider_version    VARCHAR NOT NULL,
+         renderer           VARCHAR NOT NULL,
+         look_model         VARCHAR,
+         look_version       VARCHAR,
+         lut_hash           VARCHAR,
+         look_applied       BOOLEAN NOT NULL,
+         iqa_before         REAL,
+         iqa_after          REAL,
+         output_path        VARCHAR,
+         output_size_bytes  BIGINT,
+         rendered_at        BIGINT
+     );
+     CREATE INDEX idx_edits_hash ON edits(content_hash);
+     COMMIT;",
 ];

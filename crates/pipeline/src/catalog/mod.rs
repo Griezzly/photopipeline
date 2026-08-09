@@ -349,6 +349,12 @@ impl Catalog {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test-only raw connection access, for asserting schema shape directly.
+    #[doc(hidden)]
+    pub fn raw_conn_for_test(&self) -> std::sync::MutexGuard<'_, duckdb::Connection> {
+        self.conn.lock().expect("mutex poisoned")
+    }
+
     /// Returns `true` if the file at `path` needs (re-)processing.
     ///
     /// A file is considered already processed when a row exists with the
@@ -3340,7 +3346,7 @@ mod tests {
     fn schema_version_reports_current_migration() {
         let (catalog, _dir) = make_catalog();
         // Migrations v1 (base schema) and v2 (decisions table) run at open().
-        assert_eq!(catalog.schema_version().unwrap(), 3);
+        assert_eq!(catalog.schema_version().unwrap(), 4);
     }
 
     /// Insert a file with the given path/hash and return its id.
