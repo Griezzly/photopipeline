@@ -24,6 +24,16 @@ the decision layer, the look model — changed.
 | A5 | The IQA guard and the ONNX exporter are **reuse**, not new work | §7 |
 | A6 | Schema **v4 confirmed available** — the catalog is at v3 | §5 |
 | A7 | The **FiveK look stands** for v1; no own-look corpus exists | §7, §12 |
+| A8 | **Input set corrected** from `is_keeper = true` to `verdict = 'keep'` | §2, §4 |
+
+**A8 — the input set was wrong.** The original draft named
+`decisions.is_keeper = true`. In the shipped schema `is_keeper` is written only by
+`Catalog::pick_keeper()` and means *best shot of a duplicate group*; an ordinary
+keep through `Catalog::set_decision()` writes `is_keeper = false` explicitly. Using
+it would have developed only duplicate-group winners and silently skipped every
+photo kept outside a group. The correct predicate is `verdict = 'keep'`, which is
+what `Catalog::keeper_files()` and `export-keepers` already use, and what "the
+photos I kept" means to the user.
 
 ## 1. Motivation
 
@@ -44,7 +54,7 @@ rewrites.
 | Decision | Choice |
 |---|---|
 | Output | Finished JPEGs. Fully automatic, no per-photo interaction. |
-| Input set | `decisions.is_keeper = true` for the folder's library. |
+| Input set | `decisions.verdict = 'keep'` for the folder's library. **Corrected 2026-08-09 — see A8.** |
 | Render engine | **`rawtherapee-cli`**, invoked as a subprocess. External dependency, detected by `doctor`. |
 | Baseline profile | **Our own version-controlled `base.pp3`**, stacked via `-p`. Never RT's `-d` GUI default. |
 | Look | Image-adaptive 3D LUT model trained on MIT-Adobe FiveK (generic "pro" look). |
@@ -88,7 +98,7 @@ against it, so no licence obligation propagates.
 ```
 photopipe finish <folder> --out <dir>
 
-  decisions.is_keeper = true
+  decisions.verdict = 'keep'
         │
   ① MEASURE   (Rust, rawler)      raw-linear percentiles, per-CFA-channel
         │                          clipping, as-shot wb_coeffs, PCA illuminant
@@ -271,11 +281,13 @@ contains or redistributes them.
 
 Two parts of this stage that read as new work in the original draft are reuse:
 
-- **The CLIP-IQA guard.** `ClipIqaScorer::score(&DynamicImage)` already exists in
-  `crates/pipeline/src/models/iqa.rs` and is loaded by the scan pipeline. The
-  guard needs it made `pub` and called twice — once on the baseline TIFF, once on
-  the looked JPEG — not a new model integration. `[develop.look].guard_iqa`
-  therefore costs almost nothing to ship.
+- **The CLIP-IQA guard.** The public `Iqa` trait
+  (`crates/pipeline/src/models/mod.rs`) already exposes
+  `score(&self, img: &DynamicImage) -> Result<f32>`, and `ModelHub.iqa` is a
+  public `Option<Arc<dyn Iqa>>` already populated by the scan pipeline. The guard
+  is two calls on an existing handle — once on the baseline TIFF, once on the
+  looked JPEG — with **no** change to the model layer at all.
+  `[develop.look].guard_iqa` therefore costs almost nothing to ship.
 - **`tools/export_lut3d.py`.** `tools/export_rt_detr.py` already performs ONNX
   graph surgery to fix up a traced graph, weights are gitignored, and
   `models/download.sh` is the established entry point. Excluding the reference
