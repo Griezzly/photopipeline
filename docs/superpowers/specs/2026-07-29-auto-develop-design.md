@@ -1,11 +1,29 @@
 # Automatic RAW development (`photopipe finish`) — Design Spec
 
 **Date:** 2026-07-29
+**Revised:** 2026-08-09 — see §0
 **Status:** Approved (brainstorm) — ready for implementation planning
 **Scope:** Step 3 of the pipeline (*edit*). Turn curated keepers into finished
 JPEGs automatically, with no per-photo human input. Adds a `finish` command, a
 `raw_stats` + `edits` schema pair, an analytic decision layer, a RawTherapee
 render backend, and an ONNX look model. Curation itself is unchanged.
+
+## 0. Revision 2026-08-09
+
+The original draft predates the review UI redesign. This revision reconciles the
+spec with what shipped since and resolves two assumptions that turned out to
+need a decision. Nothing in the technical core — the renderer choice, the schema,
+the decision layer, the look model — changed.
+
+| # | Amendment | Where |
+|---|---|---|
+| A1 | Both stages go in **one** implementation plan, with a mandatory sign-off checkpoint between them | §13 |
+| A2 | v1 is **CLI-only**, but reports through the existing `ProgressSink` so a UI screen is later a wiring job | §8, §13 |
+| A3 | `finish` and `export-keepers` are **independent** commands over independent trees | §10 |
+| A4 | `rawtherapee-cli` is **not installed** — the plan opens with a Phase 0 that installs it and resolves the `.pp3` key research | §13 |
+| A5 | The IQA guard and the ONNX exporter are **reuse**, not new work | §7 |
+| A6 | Schema **v4 confirmed available** — the catalog is at v3 | §5 |
+| A7 | The **FiveK look stands** for v1; no own-look corpus exists | §7, §12 |
 
 ## 1. Motivation
 
@@ -36,6 +54,8 @@ rewrites.
 | Crop / rotation / local edits | **Out of scope for v1.** |
 | darktable backend | **Rejected.** XMP history params are encoded blobs; not authorable. |
 | vkdt backend | Deferred, not rejected. No Windows support — see §9. |
+| Interface (v1) | **CLI only** — `photopipe finish`. No HTTP endpoint, no nav-rail screen. A Develop screen is a later spec. |
+| Relation to `export-keepers` | **Independent.** Two commands, two trees, no ordering dependency. |
 
 ## 3. Why RawTherapee, and why not the alternatives
 
@@ -119,6 +139,11 @@ corrections only — no film simulation, no strong tone curve — and makes the 
 render reproducible across machines.
 
 ## 5. Schema (migration version 4)
+
+**A6 — confirmed available.** The catalog is at version 3
+(`crates/pipeline/src/catalog/schema.rs`, "version 3 — per-folder library
+identity"). Nothing has claimed 4 in the interim, so the migration below applies
+verbatim with no renumbering.
 
 The existing `exposure` table is derived from the 8-bit preview JPEG and feeds
 defect flagging. It is left untouched: raw-linear statistics are a separate
@@ -215,7 +240,7 @@ table-driven unit tests over numbers, without fixtures.
 - **`denoise_luma` / `denoise_chroma`** — monotone piecewise-linear in ISO,
   anchored approximately at (100→0), (1600→0.3), (6400→0.6), (25600→0.85).
   These anchors are a starting shape, not a validated claim; they require
-  calibration against real high-ISO files (§10).
+  calibration against real high-ISO files (§13, open item 2).
 - **`sharpen_amount`** — RT capture sharpening enabled, amount modulated by the
   existing `sharpness.s_global`, hard-capped so a genuinely soft frame is never
   sharpened into crunch.
@@ -242,6 +267,26 @@ Following the established convention, ONNX weights are gitignored and produced
 on the user's machine by a `tools/export_lut3d.py` script; the repository never
 contains or redistributes them.
 
+### A5 — what already exists
+
+Two parts of this stage that read as new work in the original draft are reuse:
+
+- **The CLIP-IQA guard.** `ClipIqaScorer::score(&DynamicImage)` already exists in
+  `crates/pipeline/src/models/iqa.rs` and is loaded by the scan pipeline. The
+  guard needs it made `pub` and called twice — once on the baseline TIFF, once on
+  the looked JPEG — not a new model integration. `[develop.look].guard_iqa`
+  therefore costs almost nothing to ship.
+- **`tools/export_lut3d.py`.** `tools/export_rt_detr.py` already performs ONNX
+  graph surgery to fix up a traced graph, weights are gitignored, and
+  `models/download.sh` is the established entry point. Excluding the reference
+  implementation's custom CUDA trilinear op from the traced predictor is the same
+  class of problem, already solved once in this repo. Open item 3 is routine, not
+  research.
+
+**A7 — the look model stands.** No corpus of paired RAW / Lightroom-export files
+is available, so the own-look least-squares fit remains a §12 non-goal and the
+generic FiveK model is the v1 look as originally designed.
+
 **Licensing:** the Image-Adaptive-3DLUT *code* is Apache-2.0, but its weights
 derive from MIT-Adobe FiveK, whose Adobe licence grants use "solely for your own
 research purposes" and forbids exercising those rights "in any manner that is
@@ -260,6 +305,25 @@ Unlike `scan`, this stage must **not** fan out widely with rayon:
 Stages ③–④ therefore process 1–2 files concurrently, streaming through a temp
 directory and deleting each intermediate immediately after the JPEG is encoded.
 Stages ① and ② are cheap and may use the existing parallelism.
+
+**A2 — progress reporting.** v1 ships no HTTP endpoint and no UI screen, but the
+library entry point takes the *existing* progress abstraction rather than printing
+directly:
+
+```rust
+pub fn finish_folder(
+    /* … catalog, cache, config, out_dir … */
+    progress: &dyn ProgressSink,
+) -> Result<FinishReport>
+```
+
+`ProgressSink` is the trait `analyze_folder()` already uses
+(`crates/pipeline/src/analyze.rs`). `finish` calls `stage("measuring")`,
+`stage("rendering")`, `stage("applying look")`, `stage("done")`. The CLI passes a
+terminal sink. When a Develop screen is specified later, it passes the server's
+existing job sink to a `POST /api/finish` + `/api/finish/status` pair and the
+frontend reuses the analyze checklist component unchanged. This costs nothing now
+and prevents the UI iteration from being a rewrite.
 
 **Idempotency.** A file is skipped when an `edits` row matches on
 `(content_hash, recipe_hash, decider_version, renderer, look_model,
@@ -334,6 +398,18 @@ never needs a config edit.
 one-frame smoke render — and fails loudly with an install hint when it is
 missing, rather than failing per-photo deep into a run.
 
+### A3 — relationship to `export-keepers`
+
+`export-keepers` builds a `keepers/YYYY-MM/` tree of copied RAWs; `finish` builds
+a `_finished/YYYY-MM/` tree of JPEGs. Both read `decisions.is_keeper` from the
+library directly, and neither depends on the other having run.
+
+They are kept independent deliberately. `finish` reading an already-exported
+keepers tree would introduce an ordering requirement and a second source of truth
+for file paths, for no gain — the catalog already knows every keeper's original
+path. `export-keepers` remains the "hand the RAWs to Lightroom or a backup" path;
+`finish` is the "I'm done, give me JPEGs" path. Neither supersedes the other.
+
 ## 11. Testing strategy
 
 - **`decide()` unit tests** — table-driven over synthetic `RawStats`/`Exif`
@@ -363,27 +439,40 @@ pass over the Grindelwald set, not something the test suite can assert.
   nor our post-process cleanly; would need its own design.
 - Learning the user's personal look from their existing Lightroom exports. This
   is the strongest long-term differentiator and needs no neural network — a
-  least-squares 33³ LUT fit over RAW/export pairs would do — but the generic
-  FiveK look was chosen for v1.
+  least-squares 33³ LUT fit over RAW/export pairs would do — but it needs a corpus
+  of paired RAW and exported files, which is not available (A7), so the generic
+  FiveK look is the v1 look.
+- A `finish` screen in the review UI. v1 is CLI-only; §8 keeps the seam open.
 - Multiple render backends (§9).
 - ML denoise or restoration models. RawTherapee's profiled denoise is good, and
   NAFNet-class models are heavy, need tiling, and would add little here.
 
 ## 13. Sequencing and open items
 
-The spec is large enough that the implementation plan should stage it in two
-deliverables, because the analytic layer can be validated before any model work
-begins:
+**A1 — one plan, three phases, one hard checkpoint.** The work goes into a single
+implementation plan rather than two. The staging argument still holds, so it is
+enforced by an explicit gate inside the plan instead of by a document boundary.
 
-- **13a — baseline develop.** Schema v4, `raw_stats`, `decide()`, `base.pp3`,
-  `Pp3Renderer`, `finish` command, `doctor` check, idempotency. Produces finished
-  JPEGs with technical corrections and no look. Independently useful, and it
-  proves the recipe is sound before a LUT can mask or confuse the result.
-- **13b — the look.** `tools/export_lut3d.py`, the predictor CNN in `ort`, LUT
-  fuse and trilinear apply, `.cube` caching, and the CLIP-IQA guard.
-
-Doing 13b first would mean tuning a look on top of an unvalidated baseline, where
-a bad `exposure_ev` and a bad LUT are indistinguishable in the output.
+- **Phase 0 — environment and research.** No Rust. Install `rawtherapee-cli` and
+  confirm `-Y -t -b16 -o <tmp> -c <raw>` produces a 16-bit TIFF from one of the
+  user's own files. Resolve open item 1 by the GUI-diff method. Land the `doctor`
+  check as the first commit, so every later task runs against a gated
+  environment. This phase exists because `rawtherapee-cli` is **not currently
+  installed** — the original draft assumed availability. It also front-loads the
+  single largest unknown in the spec: the `.pp3` key names are pure manual
+  research, and discovering key drift mid-implementation is far more expensive
+  than discovering it now.
+- **Phase 1 — baseline develop (was 13a).** Schema v4, `raw_stats`, `decide()`,
+  `base.pp3`, `Pp3Renderer`, the `finish` command over `ProgressSink`,
+  idempotency. Produces finished JPEGs with technical corrections and no look.
+  Independently useful.
+- **CHECKPOINT — baseline sign-off.** Phase 1's output is reviewed on the
+  Grindelwald set and explicitly signed off before any Phase 2 work starts. This
+  gate is not optional. Tuning a look on top of an unvalidated baseline makes a
+  bad `exposure_ev` and a bad LUT indistinguishable in the output, and the whole
+  reason the analytic layer comes first is that it can be judged alone.
+- **Phase 2 — the look (was 13b).** `tools/export_lut3d.py`, the predictor CNN in
+  `ort`, LUT fuse and trilinear apply, `.cube` caching, and the CLIP-IQA guard.
 
 Open items:
 
@@ -391,16 +480,18 @@ Open items:
    them. Reliable method: set each tool in the RT GUI, save, and diff the
    resulting `.pp3`. [AI-PP3](https://github.com/tychenjiajun/art) provides
    templates worth cross-checking (GPL-2.0; reference only, no code reuse).
+   *Scheduled as Phase 0 work.*
 2. **ISO→denoise anchors** in §6 need calibration against the user's real
-   high-ISO files before they can be claimed as tuned.
+   high-ISO files before they can be claimed as tuned. *Phase 1.*
 3. **`tools/export_lut3d.py`** — export the predictor CNN and dump basis LUTs,
-   confirming the custom CUDA op is excluded from the traced graph.
+   confirming the custom CUDA op is excluded from the traced graph. *Phase 2;
+   downgraded from research risk to routine by A5.*
 4. **PCA illuminant estimator** — confirm the Cheng-2014 variant behaves on the
    fixture set; fall back to as-shot coefficients whenever it fails rather than
-   propagating an error.
+   propagating an error. *Phase 1.*
 5. **`base.pp3` contents** — the neutral baseline must be validated as close to a
    default raw conversion, since the look model's input distribution depends on
-   it.
+   it. *Phase 1, and part of the checkpoint's sign-off criteria.*
 
 ## 14. References
 
