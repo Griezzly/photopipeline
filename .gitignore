@@ -23,3 +23,7 @@ PROJECT_OVERVIEW.md
 
 # stray copy-export trees accidentally created in the repo root
 /_keepers/
+
+# Local sample RAWs for develop testing — large binaries, not repo content.
+example-pictures/
+.DS_Store

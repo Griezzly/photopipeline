@@ -1,0 +1,77 @@
+[Version]
+AppVersion=5.13
+Version=346
+
+# photopipe base.pp3 — version-controlled neutral baseline.
+#
+# Applied with `-p base.pp3 -p <photo>.pp3`, in that order, so per-photo keys win.
+#
+# NEVER use rawtherapee-cli -d: that reads the user's GUI default processing
+# profile and makes output depend on invisible machine-local state (spec §4).
+#
+# RawTherapee builds every profile from neutral values first, so this file is
+# deliberately SMALL. It pins only the settings that must not drift, either
+# because a future RawTherapee release might change the default or because a
+# non-neutral value would break the Phase 2 look model, which was trained on
+# default-converted sRGB.
+#
+# Verified against RawTherapee 5.13. See docs/design/pp3-keys.md.
+
+# ── Output colour space ───────────────────────────────────────────────────────
+# The look model is trained in sRGB and applied by us to the emitted TIFF, so
+# the output profile is load-bearing, not cosmetic. RTv4_sRGB is already the
+# neutral default; pinned here so a release that changes the default cannot
+# silently feed the model a Rec2020 or ProPhoto image.
+[Color Management]
+OutputProfile=RTv4_sRGB
+OutputProfileIntent=Relative
+InputProfile=(cameraICC)
+ApplyLookTable=false
+ApplyBaselineExposureOffset=true
+ApplyHueSatMap=true
+
+# ── No look of our own ────────────────────────────────────────────────────────
+# The baseline applies technical corrections only. Anything stylistic belongs in
+# the Phase 2 LUT, and a tone curve here would change the input distribution the
+# model expects.
+[Film Simulation]
+Enabled=false
+ClutFilename=
+Strength=100
+
+[Exposure]
+Auto=false
+Brightness=0
+Contrast=0
+Saturation=0
+# HistogramMatching derives an automatic tone curve from the embedded JPEG.
+# RawTherapee's own "Auto-Matched Curve" profiles enable it; ours must not, or
+# the render stops being a default conversion.
+HistogramMatching=false
+CurveFromHistogramMatching=false
+Curve=0;
+Curve2=0;
+
+[ColorToning]
+Enabled=false
+
+# ── Technical corrections ─────────────────────────────────────────────────────
+# Demosaic and raw-level fixes. These are exactly the hard pixel work we defer
+# to RawTherapee rather than rebuilding in Rust (spec §3).
+[RAW Bayer]
+Method=amaze
+Border=4
+
+[RAW]
+# Automatic chromatic-aberration correction: a purely technical fix with no
+# stylistic component, safe to apply unconditionally.
+CA=true
+CAAvoidColourshift=true
+CAAutoIterations=2
+HotPixelFilter=false
+DeadPixelFilter=false
+
+# Per-photo profiles set [White Balance], [Exposure] Compensation, [HLRecovery],
+# [Shadows & Highlights], [Directional Pyramid Denoising], [PostDemosaicSharpening]
+# and [LensProfile]. They are deliberately absent here so the per-photo values
+# apply against neutral defaults.
