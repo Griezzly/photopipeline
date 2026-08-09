@@ -540,6 +540,7 @@ fn cmd_doctor(
     let mut checks: Vec<DoctorCheck> = Vec::new();
     checks.push(doctor_check_cache_writable(&roots.cache));
     checks.push(doctor_check_disk_free(&roots.data));
+    checks.push(doctor_check_rawtherapee(&cfg.develop));
 
     // Actually attempt to load models so we report which slots came up.
     match ModelHub::from_config(&cfg.models) {
@@ -620,6 +621,53 @@ fn doctor_check_disk_free(path: &std::path::Path) -> DoctorCheck {
             }
         }
         None => DoctorCheck::warn("Disk free", "could not determine free space".to_string()),
+    }
+}
+
+/// Locate `rawtherapee-cli` and confirm it runs. Non-critical: `finish` is the
+/// only command that needs it, so a missing binary must not fail `doctor` for a
+/// user who only scans and reviews.
+fn doctor_check_rawtherapee(cfg: &config::DevelopConfig) -> DoctorCheck {
+    let exe = resolve_rawtherapee(cfg);
+    let out = std::process::Command::new(&exe).arg("--version").output();
+    match out {
+        Ok(o) => {
+            // RawTherapee outputs version to stdout or stderr; check both.
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let version_line = if !stdout.is_empty() {
+                stdout.lines().next().map(|s| s.to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                stderr.lines().next().map(|s| s.to_string())
+            };
+            if let Some(version) = version_line {
+                DoctorCheck::ok(
+                    "RawTherapee",
+                    format!("{} ({})", version.trim(), exe.display()),
+                )
+            } else {
+                DoctorCheck::warn(
+                    "RawTherapee",
+                    format!("{} ran but produced no output", exe.display()),
+                )
+            }
+        }
+        Err(e) => DoctorCheck::warn(
+            "RawTherapee",
+            format!(
+                "not found ({e}) — install it and set [develop] rawtherapee_path, \
+                 or `photopipe finish` will not work"
+            ),
+        ),
+    }
+}
+
+/// The configured path if set, otherwise the bare name so the OS searches PATH.
+fn resolve_rawtherapee(cfg: &config::DevelopConfig) -> PathBuf {
+    if cfg.rawtherapee_path.is_empty() {
+        PathBuf::from("rawtherapee-cli")
+    } else {
+        config::expand_tilde(std::path::Path::new(&cfg.rawtherapee_path))
     }
 }
 
