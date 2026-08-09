@@ -2406,6 +2406,18 @@ mod tests {
         let err = r.probe().expect_err("probe should fail");
         assert!(matches!(err, DevelopError::Render { .. }), "got {err:?}");
     }
+
+    /// A binary that runs but is not RawTherapee must be rejected. Guards the
+    /// exit-status trap from the other side: since probe() cannot gate on the
+    /// status (RawTherapee 5.13 exits 2 on --version), the version banner is
+    /// the only success signal, so a successful non-RawTherapee binary must
+    /// still fail.
+    #[test]
+    fn a_non_rawtherapee_binary_is_rejected() {
+        let exe = if cfg!(windows) { "cmd" } else { "true" };
+        let r = Pp3Renderer::new(&cfg_with(exe));
+        assert!(r.probe().is_err(), "`{exe}` must not pass as RawTherapee");
+    }
 }
 ```
 
@@ -2473,6 +2485,13 @@ impl Pp3Renderer {
     /// Confirm the binary exists and runs. Called once before a run rather than
     /// per photo, so a missing dependency fails immediately instead of
     /// producing hundreds of identical per-file warnings.
+    ///
+    /// **Do not gate on the exit status here.** Verified against RawTherapee
+    /// 5.13: `--version` exits 2 and `-h` exits 255, while a real render exits
+    /// 0. Treating a non-zero status as failure would make `probe()` fail on
+    /// every machine and abort `finish` unconditionally. The presence of a
+    /// parseable version banner is the actual success signal, and it arrives on
+    /// stdout or stderr depending on build.
     pub fn probe(&self) -> Result<String, DevelopError> {
         let out = Command::new(&self.exe)
             .arg("--version")
@@ -2481,18 +2500,19 @@ impl Pp3Renderer {
                 path: self.exe.clone(),
                 reason: format!("cannot execute: {e}"),
             })?;
-        if !out.status.success() {
-            return Err(DevelopError::Render {
-                path: self.exe.clone(),
-                reason: format!("--version exited {}", out.status),
-            });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("unknown")
-            .trim()
-            .to_string())
+        let banner = [&out.stdout, &out.stderr]
+            .into_iter()
+            .filter_map(|buf| {
+                String::from_utf8_lossy(buf)
+                    .lines()
+                    .find(|l| l.contains("RawTherapee"))
+                    .map(|l| l.trim().to_string())
+            })
+            .next();
+        banner.ok_or_else(|| DevelopError::Render {
+            path: self.exe.clone(),
+            reason: "ran, but printed no RawTherapee version banner".into(),
+        })
     }
 
     /// Render `raw` through `recipe` into `tmp_dir`.
@@ -3028,31 +3048,27 @@ fn missing_renderer_fails_before_any_work() {
 
 /// One unreadable raw must not abort the run, and must leave no edits row —
 /// a half-recorded render would make the next run believe it succeeded.
+///
+/// Needs a real RawTherapee: `probe()` authenticates the binary by its version
+/// banner (see Task 9), so a stand-in like `true` cannot get us past it to the
+/// per-file path this test is about. Gated, and skips cleanly when absent.
 #[test]
 fn unreadable_raw_is_skipped_without_an_edits_row() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
     let (_dir, cat) = temp_catalog();
     let id = seed_file(&cat, "/tmp/definitely-missing.arw", "keep");
     let out = tempfile::TempDir::new().unwrap();
-    // Point at a real executable that is not RawTherapee, so probe() passes
-    // and the failure happens per-file during measure instead.
     let cfg = DevelopConfig {
-        rawtherapee_path: fake_renderer_path(),
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
     };
     let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
     assert_eq!(report.errored, 1);
     assert_eq!(report.rendered, 0);
     assert!(cat.edit_identity(id).unwrap().is_none(), "no row on failure");
-}
-
-/// A stand-in binary that exits 0 for `--version`. `probe()` only checks the
-/// exit status, so this lets the test reach the per-file path.
-fn fake_renderer_path() -> String {
-    if cfg!(windows) {
-        "cmd".into()
-    } else {
-        "true".into()
-    }
 }
 ```
 
