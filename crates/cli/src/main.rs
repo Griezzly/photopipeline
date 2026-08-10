@@ -443,12 +443,19 @@ fn cmd_finish(
     let report = pipeline::finish_folder(&lib.catalog, &cfg.develop, &out_dir, &CliProgress)?;
 
     println!(
-        "Finished {} photos, {} already current, {} failed → {}",
+        "Finished {} photos, {} already current, {} skipped (not RAW), {} failed → {}",
         report.rendered,
         report.skipped,
+        report.skipped_unsupported,
         report.errored,
         out_dir.display()
     );
+    if report.skipped_unsupported > 0 {
+        println!(
+            "{} keeper(s) are not RAW files; `finish` only develops RAWs.",
+            report.skipped_unsupported
+        );
+    }
     if report.errored > 0 {
         println!("Re-run with --log-level debug to see why individual files failed.");
     }

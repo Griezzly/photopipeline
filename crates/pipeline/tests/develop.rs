@@ -196,6 +196,33 @@ fn seed_file(cat: &Catalog, path: &str, verdict: &str) -> i64 {
     id
 }
 
+/// Like `seed_file`, but with an explicit `file_format` — used to seed a
+/// non-RAW keeper (e.g. `jpg`), which `keepers_to_develop()` does not filter
+/// out.
+fn seed_file_with_format(cat: &Catalog, path: &str, verdict: &str, file_format: &str) -> i64 {
+    let conn = cat.raw_conn_for_test();
+    conn.execute(
+        "INSERT INTO files (path, content_hash, size_bytes, mtime_ns, file_format, last_processed)
+         VALUES (?, 'hash-a', 100, 0, ?, 0)",
+        duckdb::params![path, file_format],
+    )
+    .unwrap();
+    let id: i64 = conn
+        .query_row(
+            "SELECT id FROM files WHERE path = ?",
+            duckdb::params![path],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
+         VALUES (?, ?, false, NULL, 0)",
+        duckdb::params![id, verdict],
+    )
+    .unwrap();
+    id
+}
+
 #[test]
 fn raw_stats_round_trip() {
     let (_dir, cat) = temp_catalog();
@@ -603,7 +630,7 @@ fn each_identity_component_forces_a_rerender() {
     );
 
     let mut decider_changed = base.clone();
-    decider_changed.decider_version = "decide-2".into();
+    decider_changed.decider_version = "some-other-decider".into();
     assert!(
         !is_up_to_date(&base, &decider_changed, Some(&out), Some(100)),
         "a decider_version change must force a re-render"
@@ -815,6 +842,27 @@ fn unreadable_raw_is_skipped_without_an_edits_row() {
         cat.edit_identity(id).unwrap().is_none(),
         "no row on failure"
     );
+}
+
+/// A plain JPEG keeper must be counted as `skipped_unsupported`, not
+/// `errored`. Before this fix, `finish_one` called `measure_raw`
+/// unconditionally and a JPEG produced one useless `Decode` error per file
+/// instead of a clean skip.
+#[cfg(unix)]
+#[test]
+fn jpg_keeper_is_counted_as_skipped_unsupported_not_errored() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    seed_file_with_format(&cat, "/tmp/a.jpg", "keep", "jpg");
+    let out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    assert_eq!(report.skipped_unsupported, 1);
+    assert_eq!(report.errored, 0);
+    assert_eq!(report.rendered, 0);
 }
 
 /// Exercises the fake renderer against a real, decodable RAW so `measure_raw`

@@ -33,9 +33,12 @@ pub enum DevelopError {
     },
 }
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::catalog::EditIdentity;
+use crate::ingest::FileFormat;
 
 /// True when the recorded render still satisfies what we now want.
 ///
@@ -68,6 +71,7 @@ use crate::catalog::{Catalog, EditRow};
 use crate::config::{DevelopConfig, OutputSubdirs};
 use crate::develop::decide::{decide, Sharpness, DECIDER_VERSION};
 use crate::develop::render::{Pp3Renderer, RENDERER_NAME};
+use crate::output::dedupe_name;
 
 /// Summary of a `finish` run.
 #[derive(Debug, Clone, Default)]
@@ -75,6 +79,11 @@ pub struct FinishReport {
     pub rendered: u64,
     pub skipped: u64,
     pub errored: u64,
+    /// Keepers that are not RAW files (e.g. a plain JPEG). `finish` only
+    /// develops RAWs; these are counted separately from `errored` so a mixed
+    /// library does not produce a wall of decode-failure noise for files that
+    /// were never going to decode as a raw in the first place.
+    pub skipped_unsupported: u64,
 }
 
 /// Develop every kept photo into `out_dir`.
@@ -112,8 +121,34 @@ pub fn finish_folder(
     // its JPEG is encoded, so peak disk stays at roughly one TIFF.
     let tmp = tempfile::TempDir::new().context("cannot create temp render directory")?;
 
+    // Basenames already handed out, keyed by output directory, so two keepers
+    // that share a stem in the same capture month (different source
+    // subfolders, two cards, a wrapped camera counter, or plain coincidence)
+    // land on distinct files instead of one overwriting the other's JPEG and
+    // .pp3. `keepers_to_develop()` is `ORDER BY f.path`, and this loop is
+    // serial, so the same input assigns the same names on every run.
+    let mut taken_by_dir: HashMap<std::path::PathBuf, HashSet<String>> = HashMap::new();
+
     for item in &work {
-        match finish_one(catalog, cfg, &renderer, out_dir, tmp.path(), item) {
+        if !is_raw_format(&item.file_format) {
+            tracing::info!(
+                path = %item.path.display(),
+                format = %item.file_format,
+                "keeper is not a RAW file; `finish` only develops RAWs, skipping"
+            );
+            report.skipped_unsupported += 1;
+            progress.inc();
+            continue;
+        }
+        match finish_one(
+            catalog,
+            cfg,
+            &renderer,
+            out_dir,
+            tmp.path(),
+            item,
+            &mut taken_by_dir,
+        ) {
             Ok(Outcome::Rendered) => report.rendered += 1,
             Ok(Outcome::Skipped) => report.skipped += 1,
             Err(e) => {
@@ -129,10 +164,20 @@ pub fn finish_folder(
     tracing::info!(
         rendered = report.rendered,
         skipped = report.skipped,
+        skipped_unsupported = report.skipped_unsupported,
         errored = report.errored,
         "finish complete"
     );
     Ok(report)
+}
+
+/// True when `file_format` (the lowercase extension recorded at ingest) is a
+/// RAW format `finish` knows how to develop. `jpg`/`jpeg` are supported
+/// ingest formats but are not RAWs, so `measure_raw` cannot decode them.
+fn is_raw_format(file_format: &str) -> bool {
+    FileFormat::from_ext(file_format)
+        .map(|f| f.is_raw())
+        .unwrap_or(false)
 }
 
 enum Outcome {
@@ -147,6 +192,7 @@ fn finish_one(
     out_dir: &Path,
     tmp_dir: &Path,
     item: &crate::catalog::KeeperToDevelop,
+    taken_by_dir: &mut HashMap<std::path::PathBuf, HashSet<String>>,
 ) -> anyhow::Result<Outcome> {
     // ① measure
     let stats = crate::develop::measure::measure_raw(&item.path)?;
@@ -167,7 +213,7 @@ fn finish_one(
         look_version: None,
     };
 
-    let dest = output_path_for(cfg, out_dir, item);
+    let dest = output_path_for(cfg, out_dir, item, taken_by_dir);
 
     // Idempotency: skip when the recorded render still satisfies what we want.
     if let Some((existing, path, size)) = catalog.edit_identity(item.file_id)? {
@@ -226,10 +272,21 @@ fn finish_one(
 }
 
 /// Where one photo's JPEG lands.
+///
+/// Two keepers can share a stem within the same output directory — different
+/// source subfolders, two cards, a wrapped camera counter, or plain
+/// coincidence — and `output_subdirs = "flat"` makes that collision far more
+/// likely. Left unhandled, the second render would silently overwrite the
+/// first's JPEG and `.pp3`; worse, the first photo's `edits` row would still
+/// record its own byte size, which would no longer match what's on disk, so
+/// `is_up_to_date` would report it stale forever and the two keepers would
+/// ping-pong re-renders indefinitely. `dedupe_name` (shared with the review
+/// and keepers trees) resolves the collision deterministically.
 fn output_path_for(
     cfg: &DevelopConfig,
     out_dir: &Path,
     item: &crate::catalog::KeeperToDevelop,
+    taken_by_dir: &mut HashMap<std::path::PathBuf, HashSet<String>>,
 ) -> std::path::PathBuf {
     let stem = item
         .path
@@ -240,7 +297,9 @@ fn output_path_for(
         OutputSubdirs::Month => out_dir.join(&item.year_month),
         OutputSubdirs::Flat => out_dir.to_path_buf(),
     };
-    dir.join(format!("{stem}.jpg"))
+    let taken = taken_by_dir.entry(dir.clone()).or_default();
+    let basename = dedupe_name(taken, &format!("{stem}.jpg"));
+    dir.join(basename)
 }
 
 fn encode_jpeg(img: &image::DynamicImage, dest: &Path, quality: u8) -> anyhow::Result<()> {
@@ -258,4 +317,82 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::KeeperToDevelop;
+
+    fn keeper(file_id: i64, path: &str, year_month: &str) -> KeeperToDevelop {
+        KeeperToDevelop {
+            file_id,
+            path: std::path::PathBuf::from(path),
+            content_hash: format!("hash-{file_id}"),
+            year_month: year_month.into(),
+            file_format: "arw".into(),
+        }
+    }
+
+    #[test]
+    fn is_raw_format_accepts_raws_and_rejects_jpg() {
+        assert!(is_raw_format("arw"));
+        assert!(is_raw_format("ARW"));
+        assert!(is_raw_format("dng"));
+        assert!(!is_raw_format("jpg"));
+        assert!(!is_raw_format("jpeg"));
+        assert!(!is_raw_format("bogus"));
+    }
+
+    /// Two keepers from different source subfolders that happen to share a
+    /// stem, in the same capture month, must land on distinct output paths —
+    /// otherwise the second render silently overwrites the first's JPEG.
+    #[test]
+    fn same_stem_same_month_produces_distinct_output_paths() {
+        let cfg = DevelopConfig::default();
+        let out = Path::new("/out");
+        let a = keeper(1, "/cardA/subdir/DSC001.arw", "2024-05");
+        let b = keeper(2, "/cardB/otherdir/DSC001.arw", "2024-05");
+
+        let mut taken: HashMap<std::path::PathBuf, HashSet<String>> = HashMap::new();
+        let path_a = output_path_for(&cfg, out, &a, &mut taken);
+        let path_b = output_path_for(&cfg, out, &b, &mut taken);
+
+        assert_ne!(
+            path_a, path_b,
+            "colliding stems must not overwrite each other"
+        );
+        assert_eq!(path_a, Path::new("/out/2024-05/DSC001.jpg"));
+        assert_eq!(path_b, Path::new("/out/2024-05/DSC001 (2).jpg"));
+    }
+
+    /// `keepers_to_develop()` is `ORDER BY f.path` and the finish loop is
+    /// strictly serial, so the same input must assign the same output names
+    /// on every run — that determinism is what keeps idempotency stable.
+    #[test]
+    fn output_path_assignment_is_deterministic_across_runs() {
+        let cfg = DevelopConfig::default();
+        let out = Path::new("/out");
+        let items = vec![
+            keeper(1, "/cardA/DSC001.arw", "2024-05"),
+            keeper(2, "/cardB/DSC001.arw", "2024-05"),
+            keeper(3, "/cardC/DSC002.arw", "2024-05"),
+            keeper(4, "/cardA/DSC001.arw", "2024-06"),
+        ];
+
+        let assign = |items: &[KeeperToDevelop]| -> Vec<std::path::PathBuf> {
+            let mut taken: HashMap<std::path::PathBuf, HashSet<String>> = HashMap::new();
+            items
+                .iter()
+                .map(|item| output_path_for(&cfg, out, item, &mut taken))
+                .collect()
+        };
+
+        let first_run = assign(&items);
+        let second_run = assign(&items);
+        assert_eq!(
+            first_run, second_run,
+            "the same ordered input must assign identical output paths every run"
+        );
+    }
 }

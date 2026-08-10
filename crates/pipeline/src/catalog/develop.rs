@@ -20,6 +20,11 @@ pub struct KeeperToDevelop {
     pub content_hash: String,
     /// `YYYY-MM` from `captured_at`, or `"unknown-date"`.
     pub year_month: String,
+    /// Lowercase extension as recorded at ingest (e.g. `"arw"`, `"jpg"`).
+    /// `keepers_to_develop()` applies no format filter — `jpg`/`jpeg` are
+    /// supported ingest formats too — so callers must check this before
+    /// treating the file as a raw.
+    pub file_format: String,
 }
 
 impl Catalog {
@@ -38,7 +43,8 @@ impl Catalog {
                 "SELECT f.id, f.path, f.content_hash,
                         COALESCE(
                             strftime(CAST(to_timestamp(e.captured_at) AS TIMESTAMP), '%Y-%m'),
-                            'unknown-date') AS ym
+                            'unknown-date') AS ym,
+                        f.file_format
                  FROM decisions dec
                  JOIN files f ON f.id = dec.file_id
                  LEFT JOIN exif e ON e.file_id = f.id
@@ -53,6 +59,7 @@ impl Catalog {
                     path: PathBuf::from(r.get::<_, String>(1)?),
                     content_hash: r.get(2)?,
                     year_month: r.get(3)?,
+                    file_format: r.get(4)?,
                 })
             })
             .map_err(|e| CatalogError::Db(e.to_string()))?;

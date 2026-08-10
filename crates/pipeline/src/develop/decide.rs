@@ -9,7 +9,7 @@ use crate::ingest::exif::ExifData;
 
 /// Bumped whenever any formula below changes. Stored in `edits.decider_version`
 /// and part of the idempotency key, so a tuning change re-renders everything.
-pub const DECIDER_VERSION: &str = "decide-1";
+pub const DECIDER_VERSION: &str = "decide-2";
 
 /// The sharpness measurement `decide` consumes. A struct rather than a bare f32
 /// so adding subject/background terms later does not churn the signature.
@@ -82,7 +82,20 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     // are unrecoverable, so protecting them costs the rest of the image.
     let headroom = (HIGHLIGHT_TARGET / raw.p99.max(LOG_FLOOR)).log2();
     let lift = (MID_GREY / raw.p50.max(LOG_FLOOR)).log2();
-    let exposure_ev = lift.min(headroom).clamp(-3.0, 3.0);
+    let wanted = lift.min(headroom).clamp(-3.0, 3.0);
+    // Soft deadband. Modern camera metering is good, and the CHECKPOINT review
+    // showed the unguarded correction actively made well-metered frames worse:
+    // on three real frames the baseline render beat ours wherever a lift was
+    // applied, because `MID_GREY` is a grey-card reflectance target and the
+    // median of a scene full of dark conifers is legitimately far below it.
+    // So correct outliers, not every frame — the same reasoning already applied
+    // to white balance.
+    //
+    // Subtracting the deadband rather than thresholding on it keeps the response
+    // continuous: a frame wanting 0.76 EV gets 0.01 rather than jumping to 0.76.
+    // It is also inherently conservative, since the applied correction is always
+    // smaller than the computed one.
+    let exposure_ev = deadband(wanted, EXPOSURE_DEADBAND_EV);
 
     // ── white balance ──
     // Nothing to decide. v1 emits RawTherapee's `Setting=Camera`, so the camera's
@@ -103,10 +116,16 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     let highlight_recovery = (raw.clipped_frac / 0.05).clamp(0.0, 1.0);
 
     // ── shadow lift ──
-    // Driven by how much sits at the bottom, throttled by a noise penalty:
-    // lifting shadows at high ISO only reveals noise.
-    let shadow_demand =
-        (raw.black_frac / 0.05).clamp(0.0, 1.0) + ((0.02 - raw.p1).max(0.0) / 0.02).clamp(0.0, 1.0);
+    // Driven only by genuinely crushed blacks, with its own deadband, and
+    // throttled by a noise penalty since lifting shadows at high ISO only
+    // reveals noise.
+    //
+    // The `p1` term this replaced was the same category of error as the exposure
+    // target: a low 1st percentile means the scene *has* deep shadows, not that
+    // it is broken. On a real frame p1 = 0.0018 drove shadow_lift to 0.46, which
+    // flattened the image badly. `black_frac` already measures what matters —
+    // how much actually hit the black level — so the deadband keys on that alone.
+    let shadow_demand = ((raw.black_frac - SHADOW_DEADBAND_FRAC) / 0.045).clamp(0.0, 1.0);
     let noise_penalty = 1.0 - denoise_curve(iso);
     let shadow_lift = (shadow_demand * 0.5 * noise_penalty).clamp(0.0, 1.0);
 
@@ -131,6 +150,25 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
         denoise_chroma,
         sharpen_amount,
         lens_correct: exif.lens_model.is_some(),
+    }
+}
+
+/// Exposure corrections smaller than this are not applied at all; larger ones
+/// have it subtracted. Tuned at the CHECKPOINT against real frames.
+const EXPOSURE_DEADBAND_EV: f32 = 0.75;
+
+/// Shadow lift stays at zero until at least this fraction of the frame has
+/// actually hit the black level.
+const SHADOW_DEADBAND_FRAC: f32 = 0.005;
+
+/// Subtract `dz` from the magnitude of `v`, preserving sign, floored at zero.
+/// Continuous, and always returns something no larger than `v`.
+fn deadband(v: f32, dz: f32) -> f32 {
+    let out = (v.abs() - dz).max(0.0);
+    if v.is_sign_negative() {
+        -out
+    } else {
+        out
     }
 }
 
@@ -205,8 +243,10 @@ mod tests {
         assert!(r.exposure_ev.abs() < 0.05, "ev was {}", r.exposure_ev);
     }
 
-    /// An underexposed frame is lifted — but never past clipping. p50 at 0.045
-    /// wants +2 EV; p99 at 0.5 only allows +0.93.
+    /// An underexposed frame is lifted — but never past clipping, and the
+    /// result still has the deadband subtracted. p50 at 0.045 wants +2 EV;
+    /// p99 at 0.5 only allows +0.93, and the deadband takes off a further
+    /// 0.75, leaving ~0.176.
     #[test]
     fn lift_is_bounded_by_available_headroom() {
         let mut s = neutral_stats();
@@ -214,9 +254,10 @@ mod tests {
         s.p99 = 0.5;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         let headroom = (0.95f32 / 0.5).log2();
+        let expected = deadband(headroom, EXPOSURE_DEADBAND_EV);
         assert!(
-            (r.exposure_ev - headroom).abs() < 0.01,
-            "expected the lift clamped to headroom {headroom}, got {}",
+            (r.exposure_ev - expected).abs() < 0.01,
+            "expected the headroom-bound lift {headroom} minus the deadband ({expected}), got {}",
             r.exposure_ev
         );
     }
@@ -243,6 +284,12 @@ mod tests {
     /// Deriving headroom from p999 — as the original spec §6 did — emitted
     /// -0.07 EV here and threw away a wanted +1.62 EV lift. Any change that
     /// reintroduces a p999-based headroom will fail this test.
+    ///
+    /// `p99 = 0.42` is a constructed value, not the real measurement (the real
+    /// frame's p99 is high enough that the deadband zeroes the correction — see
+    /// the worked example in the plan). With the deadband in place the expected
+    /// output is the headroom-bound lift minus `EXPOSURE_DEADBAND_EV`, not the
+    /// raw headroom itself.
     #[test]
     fn saturated_p999_does_not_suppress_the_lift() {
         let mut s = neutral_stats();
@@ -251,38 +298,53 @@ mod tests {
         s.p999 = 1.0;
         s.clipped_frac = 0.0212;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        let headroom = (0.95f32 / 0.42).log2();
+        let expected = deadband(headroom, EXPOSURE_DEADBAND_EV);
         assert!(
-            r.exposure_ev > 1.0,
+            (r.exposure_ev - expected).abs() < 0.01,
+            "expected {expected} (headroom {headroom} minus the deadband), got {}",
+            r.exposure_ev
+        );
+        assert!(
+            r.exposure_ev > 0.0,
             "a dark frame with a few clipped highlights must still be lifted, got {}",
             r.exposure_ev
         );
     }
 
-    /// The +3 EV clamp is reachable and must bind: a nearly black frame wants
-    /// far more than three stops.
+    /// The +3 EV clamp on `wanted` is reachable and must bind: a nearly black
+    /// frame wants far more than three stops. The deadband is then subtracted
+    /// from the clamped value, so the final result is `3.0 -
+    /// EXPOSURE_DEADBAND_EV`, not `3.0` — proving the clamp bound first.
     #[test]
     fn extreme_underexposure_is_clamped_to_three_stops() {
         let mut s = neutral_stats();
         s.p50 = 0.0001;
         s.p99 = 0.001;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        assert_eq!(r.exposure_ev, 3.0, "the upper clamp must bind exactly");
+        let expected = 3.0 - EXPOSURE_DEADBAND_EV;
+        assert!(
+            (r.exposure_ev - expected).abs() < 1e-4,
+            "expected the upper clamp (3.0) minus the deadband = {expected}, got {}",
+            r.exposure_ev
+        );
     }
 
-    /// The -3 EV clamp is UNREACHABLE by construction, and this test records
-    /// why so nobody mistakes it for tested behaviour. Percentiles are
-    /// normalised to 0..=1, so the most negative `lift` obtainable is
-    /// log2(0.18 / 1.0) = -2.474 EV, and `headroom` only ever raises the
-    /// minimum further. The clamp stays as defence-in-depth against a future
-    /// change to the percentile range; what is asserted here is the real
-    /// reachable floor.
+    /// The -3 EV clamp on `wanted` is UNREACHABLE by construction, and this
+    /// test records why so nobody mistakes it for tested behaviour.
+    /// Percentiles are normalised to 0..=1, so the most negative `lift`
+    /// obtainable is log2(0.18 / 1.0) = -2.474 EV, and `headroom` only ever
+    /// raises the minimum further. The clamp stays as defence-in-depth against
+    /// a future change to the percentile range; what is asserted here is the
+    /// real reachable floor after the deadband is subtracted.
     #[test]
     fn maximum_pull_down_is_the_reachable_floor_not_the_clamp() {
         let mut s = neutral_stats();
         s.p50 = 1.0;
         s.p99 = 1.0;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        let reachable_floor = (0.18f32 / 1.0).log2(); // -2.474
+        let reachable_wanted = (0.18f32 / 1.0).log2(); // -2.474
+        let reachable_floor = deadband(reachable_wanted, EXPOSURE_DEADBAND_EV);
         assert!(
             (r.exposure_ev - reachable_floor).abs() < 0.01,
             "expected the reachable floor {reachable_floor}, got {}",
@@ -291,6 +353,38 @@ mod tests {
         assert!(
             r.exposure_ev > -3.0,
             "the -3 clamp should never be what binds"
+        );
+    }
+
+    /// The whole point of the deadband: a frame close to correctly exposed
+    /// gets exactly zero exposure correction, not a small nudge. `wanted` here
+    /// is 0.5 EV, comfortably inside the 0.75 EV deadband.
+    #[test]
+    fn near_correct_frame_gets_exactly_zero_exposure_correction() {
+        let mut s = neutral_stats();
+        s.p50 = 0.18 / 2.0f32.powf(0.5); // lift = +0.5 EV
+        s.p99 = 0.6; // headroom = log2(0.95/0.6) ~= 0.66, does not bind
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert_eq!(
+            r.exposure_ev, 0.0,
+            "expected exactly zero, got {}",
+            r.exposure_ev
+        );
+    }
+
+    /// The deadband is continuous, not a hard threshold: a frame whose wanted
+    /// correction sits just past the 0.75 EV boundary gets a small non-zero
+    /// result rather than jumping straight to the full 0.76 EV.
+    #[test]
+    fn deadband_is_continuous_past_the_boundary() {
+        let mut s = neutral_stats();
+        s.p50 = 0.18 / 2.0f32.powf(0.76); // lift = +0.76 EV, just past the deadband
+        s.p99 = 0.5; // headroom = log2(0.95/0.5) ~= 0.93, does not bind
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert!(
+            r.exposure_ev > 0.0 && r.exposure_ev < 0.02,
+            "expected a small non-zero nudge just past the boundary, got {}",
+            r.exposure_ev
         );
     }
 
@@ -383,6 +477,31 @@ mod tests {
             "low-ISO lift {low} should exceed high-ISO {high}"
         );
         assert!((0.0..=1.0).contains(&high));
+    }
+
+    /// Below the shadow deadband, black_frac alone must not trigger any lift
+    /// — a scene with a genuinely tiny fraction of true blacks is not broken.
+    #[test]
+    fn shadow_lift_is_zero_below_the_deadband() {
+        let mut s = neutral_stats();
+        s.p1 = 0.01;
+        s.black_frac = 0.003; // below SHADOW_DEADBAND_FRAC = 0.005
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert_eq!(r.shadow_lift, 0.0, "shadow_lift was {}", r.shadow_lift);
+    }
+
+    /// Above the shadow deadband, black_frac drives a non-zero lift.
+    #[test]
+    fn shadow_lift_is_non_zero_above_the_deadband() {
+        let mut s = neutral_stats();
+        s.p1 = 0.01;
+        s.black_frac = 0.01; // above SHADOW_DEADBAND_FRAC = 0.005
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert!(
+            r.shadow_lift > 0.0,
+            "expected a non-zero lift above the deadband, got {}",
+            r.shadow_lift
+        );
     }
 
     /// Highlight recovery scales with how much actually clipped.
