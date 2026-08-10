@@ -1524,7 +1524,7 @@ use crate::ingest::exif::ExifData;
 
 /// Bumped whenever any formula below changes. Stored in `edits.decider_version`
 /// and part of the idempotency key, so a tuning change re-renders everything.
-pub const DECIDER_VERSION: &str = "decide-1";
+pub const DECIDER_VERSION: &str = "decide-2";
 
 /// The sharpness measurement `decide` consumes. A struct rather than a bare f32
 /// so adding subject/background terms later does not churn the signature.
@@ -1597,7 +1597,20 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     // are unrecoverable, so protecting them costs the rest of the image.
     let headroom = (HIGHLIGHT_TARGET / raw.p99.max(LOG_FLOOR)).log2();
     let lift = (MID_GREY / raw.p50.max(LOG_FLOOR)).log2();
-    let exposure_ev = lift.min(headroom).clamp(-3.0, 3.0);
+    let wanted = lift.min(headroom).clamp(-3.0, 3.0);
+    // Soft deadband. Modern camera metering is good, and the CHECKPOINT review
+    // showed the unguarded correction actively made well-metered frames worse:
+    // on three real frames the baseline render beat ours wherever a lift was
+    // applied, because `MID_GREY` is a grey-card reflectance target and the
+    // median of a scene full of dark conifers is legitimately far below it.
+    // So correct outliers, not every frame — the same reasoning already applied
+    // to white balance.
+    //
+    // Subtracting the deadband rather than thresholding on it keeps the response
+    // continuous: a frame wanting 0.76 EV gets 0.01 rather than jumping to 0.76.
+    // It is also inherently conservative, since the applied correction is always
+    // smaller than the computed one.
+    let exposure_ev = deadband(wanted, EXPOSURE_DEADBAND_EV);
 
     // ── white balance ──
     // Nothing to decide. v1 emits RawTherapee's `Setting=Camera`, so the camera's
@@ -1618,10 +1631,17 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     let highlight_recovery = (raw.clipped_frac / 0.05).clamp(0.0, 1.0);
 
     // ── shadow lift ──
-    // Driven by how much sits at the bottom, throttled by a noise penalty:
-    // lifting shadows at high ISO only reveals noise.
-    let shadow_demand = (raw.black_frac / 0.05).clamp(0.0, 1.0)
-        + ((0.02 - raw.p1).max(0.0) / 0.02).clamp(0.0, 1.0);
+    // Driven only by genuinely crushed blacks, with its own deadband, and
+    // throttled by a noise penalty since lifting shadows at high ISO only
+    // reveals noise.
+    //
+    // The `p1` term this replaced was the same category of error as the exposure
+    // target: a low 1st percentile means the scene *has* deep shadows, not that
+    // it is broken. On a real frame p1 = 0.0018 drove shadow_lift to 0.46, which
+    // flattened the image badly. `black_frac` already measures what matters —
+    // how much actually hit the black level — so the deadband keys on that alone.
+    let shadow_demand =
+        ((raw.black_frac - SHADOW_DEADBAND_FRAC) / 0.045).clamp(0.0, 1.0);
     let noise_penalty = 1.0 - denoise_curve(iso);
     let shadow_lift = (shadow_demand * 0.5 * noise_penalty).clamp(0.0, 1.0);
 
@@ -1647,6 +1667,21 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
         sharpen_amount,
         lens_correct: exif.lens_model.is_some(),
     }
+}
+
+/// Exposure corrections smaller than this are not applied at all; larger ones
+/// have it subtracted. Tuned at the CHECKPOINT against real frames.
+const EXPOSURE_DEADBAND_EV: f32 = 0.75;
+
+/// Shadow lift stays at zero until at least this fraction of the frame has
+/// actually hit the black level.
+const SHADOW_DEADBAND_FRAC: f32 = 0.005;
+
+/// Subtract `dz` from the magnitude of `v`, preserving sign, floored at zero.
+/// Continuous, and always returns something no larger than `v`.
+fn deadband(v: f32, dz: f32) -> f32 {
+    let out = (v.abs() - dz).max(0.0);
+    if v.is_sign_negative() { -out } else { out }
 }
 
 /// Ceiling on capture-sharpening strength. Applied as a scale factor rather
@@ -2814,7 +2849,7 @@ fn each_identity_component_forces_a_rerender() {
     assert!(!is_up_to_date(&base, &recipe_changed, Some(&out), Some(100)));
 
     let mut decider_changed = base.clone();
-    decider_changed.decider_version = "decide-2".into();
+    decider_changed.decider_version = "some-other-decider".into();
     assert!(!is_up_to_date(&base, &decider_changed, Some(&out), Some(100)));
 
     let mut content_changed = base.clone();
