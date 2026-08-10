@@ -6,6 +6,7 @@
 //! separate is what makes the tuning logic testable over plain numbers.
 
 pub mod decide;
+pub mod illuminant;
 pub mod measure;
 
 use thiserror::Error;

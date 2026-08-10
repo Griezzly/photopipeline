@@ -164,6 +164,91 @@ fn collect_samples(
     samples
 }
 
+/// Build coarse linear-RGB triples by averaging 2×2 CFA cells.
+///
+/// Not a demosaic — each output pixel is a whole cell, so the result is
+/// quarter resolution and has no interpolation artefacts. That is exactly
+/// right for a white-balance estimate and far cheaper than demosaicing.
+///
+/// Restricted to `active_area` when present, for the same reason
+/// `collect_samples` is: masked optically-black border rows carry no colour
+/// information and would drag the estimate toward neutral.
+fn cfa_cells_to_rgb(raw: &rawler::rawimage::RawImage, black: f32, white: f32) -> Vec<[f32; 3]> {
+    use rawler::rawimage::RawPhotometricInterpretation;
+
+    let (w, h) = (raw.width, raw.height);
+    let (x0, y0, x1, y1) = match raw.active_area {
+        Some(area) => (
+            area.p.x.min(w),
+            area.p.y.min(h),
+            area.p.x.saturating_add(area.d.w).min(w),
+            area.p.y.saturating_add(area.d.h).min(h),
+        ),
+        None => (0, 0, w, h),
+    };
+
+    let RawPhotometricInterpretation::Cfa(ref cfg) = raw.photometric else {
+        // Already RGB (some DNGs, LinearRaw): take pixels directly.
+        let data = raw.data.as_f32();
+        if raw.cpp != 3 {
+            return Vec::new();
+        }
+        let range = (white - black).max(1.0);
+        let mut out = Vec::new();
+        for y in y0..y1 {
+            let row_start = y * w * 3 + x0 * 3;
+            let row_end = row_start + (x1.saturating_sub(x0)) * 3;
+            if row_end > data.len() {
+                break;
+            }
+            for c in data[row_start..row_end].chunks_exact(3) {
+                out.push([
+                    ((c[0] - black) / range).clamp(0.0, 1.0),
+                    ((c[1] - black) / range).clamp(0.0, 1.0),
+                    ((c[2] - black) / range).clamp(0.0, 1.0),
+                ]);
+            }
+        }
+        return out;
+    };
+
+    let data = raw.data.as_f32();
+    let range = (white - black).max(1.0);
+    // Cap the walk: a full 60MP pass is pointless for a 3-vector estimate.
+    let cell_stride = ((w * h) / (4 * 250_000)).max(1);
+
+    let mut out = Vec::new();
+    let mut cell_index = 0usize;
+    for y in (y0..y1.saturating_sub(1)).step_by(2) {
+        for x in (x0..x1.saturating_sub(1)).step_by(2) {
+            cell_index += 1;
+            if !cell_index.is_multiple_of(cell_stride) {
+                continue;
+            }
+            let mut sum = [0.0f32; 3];
+            let mut count = [0u32; 3];
+            for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                let color = cfg.cfa.color_at(y + dy, x + dx);
+                if color > 2 {
+                    continue; // the E channel of an RGBE sensor
+                }
+                let v = data[(y + dy) * w + (x + dx)];
+                sum[color] += ((v - black) / range).clamp(0.0, 1.0);
+                count[color] += 1;
+            }
+            if count.contains(&0) {
+                continue;
+            }
+            out.push([
+                sum[0] / count[0] as f32,
+                sum[1] / count[1] as f32,
+                sum[2] / count[2] as f32,
+            ]);
+        }
+    }
+    out
+}
+
 /// Decode `path` and compute raw-linear statistics.
 ///
 /// Reads the raw sensor plane, not the embedded preview. Restricted to the
@@ -221,6 +306,22 @@ pub fn measure_raw(path: &Path) -> Result<RawStats, DevelopError> {
         stats.wb_g = 1.0;
         stats.wb_b = 1.0;
     }
+
+    let cells = cfa_cells_to_rgb(&raw, black, white);
+    match crate::develop::illuminant::estimate_illuminant(&cells) {
+        Some(e) => {
+            stats.illum_r = Some(e[0]);
+            stats.illum_g = Some(e[1]);
+            stats.illum_b = Some(e[2]);
+        }
+        None => {
+            tracing::debug!(
+                path = %path.display(),
+                "illuminant estimation declined; no trustworthy PCA direction"
+            );
+        }
+    }
+
     Ok(stats)
 }
 
