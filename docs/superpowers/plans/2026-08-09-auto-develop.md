@@ -512,6 +512,7 @@ of the approved design, not a suggestion:
          file_id           BIGINT PRIMARY KEY REFERENCES files(id),
          p1                REAL NOT NULL,
          p50               REAL NOT NULL,
+         p99               REAL NOT NULL,
          p999              REAL NOT NULL,
          clipped_frac      REAL NOT NULL,
          black_frac        REAL NOT NULL,
@@ -615,7 +616,7 @@ git commit -m "feat(catalog): schema v4 — raw_stats and edits tables"
 **Interfaces:**
 - Consumes: `rawler::get_decoder`, `rawler::rawsource::RawSource`, `rawler::decoders::RawDecodeParams`, `rawler::rawimage::{RawImage, RawImageData}`
 - Produces:
-  - `pipeline::develop::measure::RawStats { p1: f32, p50: f32, p999: f32, clipped_frac: f32, black_frac: f32, wb_r: f32, wb_g: f32, wb_b: f32, illum_r: Option<f32>, illum_g: Option<f32>, illum_b: Option<f32> }`
+  - `pipeline::develop::measure::RawStats { p1: f32, p50: f32, p99: f32, p999: f32, clipped_frac: f32, black_frac: f32, wb_r: f32, wb_g: f32, wb_b: f32, illum_r: Option<f32>, illum_g: Option<f32>, illum_b: Option<f32> }`
   - `pipeline::develop::measure::measure_raw(path: &Path) -> Result<RawStats, DevelopError>`
   - `pipeline::develop::measure::stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats` — the pure inner function, so percentile logic is testable without a RAW file
   - `pipeline::develop::DevelopError` (thiserror)
@@ -742,6 +743,7 @@ use crate::develop::DevelopError;
 pub struct RawStats {
     pub p1: f32,
     pub p50: f32,
+    pub p99: f32,
     pub p999: f32,
     /// Fraction of samples at or above the white level.
     pub clipped_frac: f32,
@@ -766,6 +768,7 @@ pub fn stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats {
         return RawStats {
             p1: 0.0,
             p50: 0.0,
+            p99: 0.0,
             p999: 0.0,
             clipped_frac: 0.0,
             black_frac: 0.0,
@@ -793,6 +796,7 @@ pub fn stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats {
     RawStats {
         p1: percentile(&norm, 0.01),
         p50: percentile(&norm, 0.50),
+        p99: percentile(&norm, 0.99),
         p999: percentile(&norm, 0.999),
         clipped_frac: clipped as f32 / n as f32,
         black_frac: blacked as f32 / n as f32,
@@ -933,6 +937,7 @@ fn sample_stats() -> RawStats {
     RawStats {
         p1: 0.01,
         p50: 0.18,
+        p99: 0.90,
         p999: 0.95,
         clipped_frac: 0.002,
         black_frac: 0.004,
@@ -1100,17 +1105,18 @@ impl Catalog {
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         conn.execute(
             "INSERT INTO raw_stats
-                (file_id, p1, p50, p999, clipped_frac, black_frac,
+                (file_id, p1, p50, p99, p999, clipped_frac, black_frac,
                  wb_r, wb_g, wb_b, illum_r, illum_g, illum_b)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (file_id) DO UPDATE SET
-                 p1 = excluded.p1, p50 = excluded.p50, p999 = excluded.p999,
+                 p1 = excluded.p1, p50 = excluded.p50, p99 = excluded.p99,
+                 p999 = excluded.p999,
                  clipped_frac = excluded.clipped_frac, black_frac = excluded.black_frac,
                  wb_r = excluded.wb_r, wb_g = excluded.wb_g, wb_b = excluded.wb_b,
                  illum_r = excluded.illum_r, illum_g = excluded.illum_g,
                  illum_b = excluded.illum_b",
             duckdb::params![
-                file_id, s.p1, s.p50, s.p999, s.clipped_frac, s.black_frac,
+                file_id, s.p1, s.p50, s.p99, s.p999, s.clipped_frac, s.black_frac,
                 s.wb_r, s.wb_g, s.wb_b, s.illum_r, s.illum_g, s.illum_b
             ],
         )
@@ -1124,7 +1130,7 @@ impl Catalog {
             .lock()
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         let row = conn.query_row(
-            "SELECT p1, p50, p999, clipped_frac, black_frac, wb_r, wb_g, wb_b,
+            "SELECT p1, p50, p99, p999, clipped_frac, black_frac, wb_r, wb_g, wb_b,
                     illum_r, illum_g, illum_b
              FROM raw_stats WHERE file_id = ?",
             duckdb::params![file_id],
@@ -1132,15 +1138,16 @@ impl Catalog {
                 Ok(RawStats {
                     p1: r.get(0)?,
                     p50: r.get(1)?,
-                    p999: r.get(2)?,
-                    clipped_frac: r.get(3)?,
-                    black_frac: r.get(4)?,
-                    wb_r: r.get(5)?,
-                    wb_g: r.get(6)?,
-                    wb_b: r.get(7)?,
-                    illum_r: r.get(8)?,
-                    illum_g: r.get(9)?,
-                    illum_b: r.get(10)?,
+                    p99: r.get(2)?,
+                    p999: r.get(3)?,
+                    clipped_frac: r.get(4)?,
+                    black_frac: r.get(5)?,
+                    wb_r: r.get(6)?,
+                    wb_g: r.get(7)?,
+                    wb_b: r.get(8)?,
+                    illum_r: r.get(9)?,
+                    illum_g: r.get(10)?,
+                    illum_b: r.get(11)?,
                 })
             },
         );
@@ -1213,6 +1220,7 @@ mod tests {
         RawStats {
             p1: 0.01,
             p50: 0.18,
+            p99: 0.90,
             p999: 0.95,
             clipped_frac: 0.0,
             black_frac: 0.0,
@@ -1238,7 +1246,7 @@ mod tests {
     }
 
     /// A correctly exposed frame needs no correction: p50 already sits at
-    /// middle grey and p999 leaves headroom.
+    /// middle grey and p99 leaves headroom.
     #[test]
     fn correct_exposure_is_left_alone() {
         let r = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
@@ -1246,12 +1254,12 @@ mod tests {
     }
 
     /// An underexposed frame is lifted — but never past clipping. p50 at 0.045
-    /// wants +2 EV; p999 at 0.5 only allows +0.93.
+    /// wants +2 EV; p99 at 0.5 only allows +0.93.
     #[test]
     fn lift_is_bounded_by_available_headroom() {
         let mut s = neutral_stats();
         s.p50 = 0.045;
-        s.p999 = 0.5;
+        s.p99 = 0.5;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         let headroom = (0.95f32 / 0.5).log2();
         assert!(
@@ -1266,9 +1274,32 @@ mod tests {
     fn overexposure_produces_negative_ev() {
         let mut s = neutral_stats();
         s.p50 = 0.5;
-        s.p999 = 1.0;
+        s.p99 = 1.0;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         assert!(r.exposure_ev < 0.0, "ev should be negative, was {}", r.exposure_ev);
+    }
+
+    /// REGRESSION GUARD. A dark frame containing a few blown specular
+    /// highlights must still be lifted. These are the real measured values from
+    /// `example-pictures/DSC03073.ARW`: p999 is fully saturated at 1.0 because
+    /// 2.1% of pixels clip, but p99 shows plenty of headroom remains.
+    ///
+    /// Deriving headroom from p999 — as the original spec §6 did — emitted
+    /// -0.07 EV here and threw away a wanted +1.62 EV lift. Any change that
+    /// reintroduces a p999-based headroom will fail this test.
+    #[test]
+    fn saturated_p999_does_not_suppress_the_lift() {
+        let mut s = neutral_stats();
+        s.p50 = 0.05866;
+        s.p99 = 0.42;
+        s.p999 = 1.0;
+        s.clipped_frac = 0.0212;
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert!(
+            r.exposure_ev > 1.0,
+            "a dark frame with a few clipped highlights must still be lifted, got {}",
+            r.exposure_ev
+        );
     }
 
     /// Exposure is hard-clamped to ±3 EV whatever the measurements say.
@@ -1276,13 +1307,13 @@ mod tests {
     fn exposure_is_clamped_to_three_stops() {
         let mut s = neutral_stats();
         s.p50 = 0.0001;
-        s.p999 = 0.001;
+        s.p99 = 0.001;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         assert!(r.exposure_ev <= 3.0, "ev was {}", r.exposure_ev);
 
         let mut s2 = neutral_stats();
         s2.p50 = 0.99;
-        s2.p999 = 1.0;
+        s2.p99 = 1.0;
         let r2 = decide(&s2, &exif_at_iso(100), &sharp(0.5));
         assert!(r2.exposure_ev >= -3.0, "ev was {}", r2.exposure_ev);
     }
@@ -1293,6 +1324,7 @@ mod tests {
     fn zero_percentiles_do_not_produce_nan() {
         let mut s = neutral_stats();
         s.p50 = 0.0;
+        s.p99 = 0.0;
         s.p999 = 0.0;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         assert!(r.exposure_ev.is_finite(), "ev was {}", r.exposure_ev);
@@ -1525,9 +1557,18 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
 
     // ── exposure ──
     // Lift toward middle grey, but never past the point where the brightest
-    // real detail clips. An overexposed frame has negative headroom, which
-    // pulls the exposure down.
-    let headroom = (HIGHLIGHT_TARGET / raw.p999.max(LOG_FLOOR)).log2();
+    // *recoverable* detail clips. An overexposed frame has negative headroom,
+    // which pulls the exposure down.
+    //
+    // Headroom is measured from p99, NOT p999. p999 saturates to 1.0 as soon as
+    // more than 0.1% of pixels clip — true of almost any frame containing sky, a
+    // specular highlight, or a light source — after which it reports zero
+    // headroom regardless of how dark the image actually is, and the lift is
+    // silently thrown away. Measured on a real frame: p50 = 0.0587 (median 1.62
+    // stops below middle grey), p999 = 1.0, clipped_frac = 2.1%; the p999 form
+    // emitted -0.07 EV where +1.62 EV was wanted. Pixels that already clipped
+    // are unrecoverable, so protecting them costs the rest of the image.
+    let headroom = (HIGHLIGHT_TARGET / raw.p99.max(LOG_FLOOR)).log2();
     let lift = (MID_GREY / raw.p50.max(LOG_FLOOR)).log2();
     let exposure_ev = lift.min(headroom).clamp(-3.0, 3.0);
 
