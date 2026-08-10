@@ -22,7 +22,7 @@ fn migration_v4_tables_accept_rows() {
          VALUES ('/tmp/a.arw', 'deadbeef', 100, 0, 'arw', 0);
          INSERT INTO raw_stats VALUES
              ((SELECT id FROM files WHERE path='/tmp/a.arw'),
-              0.01, 0.18, 0.95, 0.001, 0.002, 2.0, 1.0, 1.5, NULL, NULL, NULL);",
+              0.01, 0.18, 0.90, 0.95, 0.001, 0.002, 2.0, 1.0, 1.5, NULL, NULL, NULL);",
     )
     .unwrap();
 }

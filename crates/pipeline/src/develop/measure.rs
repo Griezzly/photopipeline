@@ -13,6 +13,11 @@ use crate::develop::DevelopError;
 pub struct RawStats {
     pub p1: f32,
     pub p50: f32,
+    /// 99th percentile. Stays meaningful until 1% of pixels clip, unlike
+    /// `p999` which saturates to 1.0 as soon as >0.1% of pixels do — true of
+    /// nearly any frame with sky or a specular highlight. This is the
+    /// headroom measurement the exposure decision actually wants.
+    pub p99: f32,
     pub p999: f32,
     /// Fraction of samples at or above the white level.
     pub clipped_frac: f32,
@@ -31,12 +36,26 @@ pub struct RawStats {
 /// Percentiles and clipping fractions from raw sample values.
 ///
 /// Pure: no I/O, no decode. `black` and `white` are the sensor's own levels, so
-/// the returned percentiles are comparable across cameras.
+/// the returned percentiles are comparable across cameras. Defensive against
+/// non-finite inputs — a corrupt `blacklevel`/`whitelevel` tag or a garbage
+/// sample must never leak a NaN or infinity into the returned stats, since the
+/// decision layer takes `log2` of these percentiles.
 pub fn stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats {
+    // Sanitise the levels themselves: a zero-denominator Rational in a
+    // corrupt blacklevel/whitelevel tag yields NaN or Inf, which would
+    // poison every sample via subtraction/division below.
+    let black = if black.is_finite() { black } else { 0.0 };
+    let white = if white.is_finite() {
+        white
+    } else {
+        u16::MAX as f32
+    };
+
     if samples.is_empty() {
         return RawStats {
             p1: 0.0,
             p50: 0.0,
+            p99: 0.0,
             p999: 0.0,
             clipped_frac: 0.0,
             black_frac: 0.0,
@@ -50,20 +69,33 @@ pub fn stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats {
     }
 
     let n = samples.len();
-    let clipped = samples.iter().filter(|v| **v >= white).count();
-    let blacked = samples.iter().filter(|v| **v <= black).count();
+    let clipped = samples
+        .iter()
+        .filter(|v| v.is_finite() && **v >= white)
+        .count();
+    let blacked = samples
+        .iter()
+        .filter(|v| v.is_finite() && **v <= black)
+        .count();
 
     // Normalise before sorting so the percentile read-out is already in 0..1.
     let range = (white - black).max(1.0);
     let mut norm: Vec<f32> = samples
         .iter()
-        .map(|v| ((v - black) / range).clamp(0.0, 1.0))
+        .map(|v| {
+            // A NaN or infinite sample (sensor glitch, overflowed pixel) is
+            // treated as black rather than allowed to propagate: `clamp`
+            // does not sanitise NaN, so this substitution must happen first.
+            let v = if v.is_finite() { *v } else { black };
+            ((v - black) / range).clamp(0.0, 1.0)
+        })
         .collect();
     norm.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     RawStats {
         p1: percentile(&norm, 0.01),
         p50: percentile(&norm, 0.50),
+        p99: percentile(&norm, 0.99),
         p999: percentile(&norm, 0.999),
         clipped_frac: clipped as f32 / n as f32,
         black_frac: blacked as f32 / n as f32,
@@ -89,6 +121,49 @@ fn percentile(sorted: &[f32], q: f32) -> f32 {
 /// before a full 60MP read, and the stride keeps the walk cache-friendly.
 const MAX_SAMPLES: usize = 2_000_000;
 
+/// Collect up to `max_samples` values from `data`, restricted to `active_area`
+/// when present (row-bounded, so masked black borders outside the rectangle
+/// never enter the walk). Falls back to a flat whole-buffer stride when no
+/// active area is reported.
+fn collect_samples(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    cpp: usize,
+    active_area: Option<rawler::imgop::Rect>,
+    max_samples: usize,
+) -> Vec<f32> {
+    let Some(area) = active_area else {
+        let stride = (data.len() / max_samples).max(1);
+        return data.iter().step_by(stride).copied().collect();
+    };
+
+    let x0 = area.p.x.min(width);
+    let y0 = area.p.y.min(height);
+    let x1 = area.p.x.saturating_add(area.d.w).min(width);
+    let y1 = area.p.y.saturating_add(area.d.h).min(height);
+    let row_len = x1.saturating_sub(x0) * cpp;
+    let total = row_len * y1.saturating_sub(y0);
+    let stride = (total / max_samples).max(1);
+
+    let mut samples = Vec::with_capacity(max_samples.min(total));
+    let mut counter: usize = 0;
+    for y in y0..y1 {
+        let row_start = y * width * cpp + x0 * cpp;
+        let row_end = row_start + row_len;
+        if row_end > data.len() {
+            break;
+        }
+        for v in &data[row_start..row_end] {
+            if counter.is_multiple_of(stride) {
+                samples.push(*v);
+            }
+            counter += 1;
+        }
+    }
+    samples
+}
+
 /// Decode `path` and compute raw-linear statistics.
 ///
 /// Reads the raw sensor plane, not the embedded preview. Restricted to the
@@ -113,16 +188,27 @@ pub fn measure_raw(path: &Path) -> Result<RawStats, DevelopError> {
         })?;
 
     let data = raw.data.as_f32();
-    let white = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
-    let black = raw
+    let mut white = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
+    let mut black = raw
         .blacklevel
         .levels
         .first()
         .map(|r| r.as_f32())
         .unwrap_or(0.0);
+    if !black.is_finite() || !white.is_finite() {
+        tracing::warn!(path = %path.display(), "non-finite black/white levels; falling back to neutral");
+        black = 0.0;
+        white = u16::MAX as f32;
+    }
 
-    let stride = (data.len() / MAX_SAMPLES).max(1);
-    let samples: Vec<f32> = data.iter().step_by(stride).copied().collect();
+    let samples = collect_samples(
+        &data,
+        raw.width,
+        raw.height,
+        raw.cpp,
+        raw.active_area,
+        MAX_SAMPLES,
+    );
 
     let mut stats = stats_from_samples(&samples, black, white);
     // rawler stores coefficients in RGBE order.
@@ -150,7 +236,9 @@ mod tests {
         let s = stats_from_samples(&samples, 0.0, 1000.0);
         assert!((s.p50 - 0.5).abs() < 0.01, "p50 was {}", s.p50);
         assert!((s.p1 - 0.01).abs() < 0.01, "p1 was {}", s.p1);
+        assert!((s.p99 - 0.99).abs() < 0.01, "p99 was {}", s.p99);
         assert!((s.p999 - 0.999).abs() < 0.01, "p999 was {}", s.p999);
+        assert!(s.p1 <= s.p50 && s.p50 <= s.p99 && s.p99 <= s.p999);
     }
 
     /// Black subtraction and white normalisation: a sensor with black=512,
@@ -175,7 +263,7 @@ mod tests {
     fn out_of_range_samples_clamp_to_unit_interval() {
         let samples = vec![0.0, 100.0, 20000.0];
         let s = stats_from_samples(&samples, 512.0, 16383.0);
-        for v in [s.p1, s.p50, s.p999] {
+        for v in [s.p1, s.p50, s.p99, s.p999] {
             assert!(
                 (0.0..=1.0).contains(&v),
                 "value {v} escaped the unit interval"
@@ -190,5 +278,36 @@ mod tests {
         assert_eq!(s.clipped_frac, 0.0);
         assert_eq!(s.black_frac, 0.0);
         assert_eq!(s.p50, 0.0);
+    }
+
+    /// A non-finite black level (e.g. a corrupt blacklevel tag with a
+    /// zero-denominator Rational) must not poison the returned percentiles.
+    #[test]
+    fn non_finite_black_level_yields_finite_stats() {
+        let s = stats_from_samples(&[1.0, 2.0, 3.0], f32::NAN, 100.0);
+        for v in [s.p1, s.p50, s.p99, s.p999] {
+            assert!(v.is_finite(), "value {v} is not finite");
+        }
+    }
+
+    /// A non-finite white level must likewise not poison the stats.
+    #[test]
+    fn non_finite_white_level_yields_finite_stats() {
+        let s = stats_from_samples(&[1.0, 2.0, 3.0], 0.0, f32::INFINITY);
+        for v in [s.p1, s.p50, s.p99, s.p999] {
+            assert!(v.is_finite(), "value {v} is not finite");
+        }
+    }
+
+    /// Individual NaN/Infinity samples in the input must not poison the
+    /// percentiles either — a single glitched photosite must not corrupt the
+    /// whole frame's measurement.
+    #[test]
+    fn non_finite_samples_are_excluded_from_finite_stats() {
+        let samples = vec![1.0, f32::NAN, 2.0, f32::INFINITY, 3.0, f32::NEG_INFINITY];
+        let s = stats_from_samples(&samples, 0.0, 16383.0);
+        for v in [s.p1, s.p50, s.p99, s.p999] {
+            assert!(v.is_finite(), "value {v} is not finite");
+        }
     }
 }

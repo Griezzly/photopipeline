@@ -120,6 +120,7 @@ pub const MIGRATIONS: &[&str] = &[
          file_id           BIGINT PRIMARY KEY REFERENCES files(id),
          p1                REAL NOT NULL,
          p50               REAL NOT NULL,
+         p99               REAL NOT NULL,
          p999              REAL NOT NULL,
          clipped_frac      REAL NOT NULL,
          black_frac        REAL NOT NULL,
