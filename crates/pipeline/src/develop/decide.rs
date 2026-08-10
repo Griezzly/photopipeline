@@ -20,12 +20,13 @@ pub struct Sharpness {
 }
 
 /// A complete, renderer-agnostic development recipe. Every field is normalised
-/// 0..1 except `exposure_ev` (stops), `wb_temp_k` (kelvin) and `wb_green`.
+/// 0..1 except `exposure_ev`, which is in stops.
+///
+/// Carries NO white-balance fields. v1 emits RawTherapee's `Setting=Camera`,
+/// which applies the camera's own as-shot coefficients exactly. See `decide()`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditRecipe {
     pub exposure_ev: f32,
-    pub wb_temp_k: f32,
-    pub wb_green: f32,
     pub highlight_recovery: f32,
     pub shadow_lift: f32,
     pub denoise_luma: f32,
@@ -42,8 +43,6 @@ impl EditRecipe {
         let mut h = xxhash_rust::xxh3::Xxh3::new();
         for v in [
             self.exposure_ev,
-            self.wb_temp_k,
-            self.wb_green,
             self.highlight_recovery,
             self.shadow_lift,
             self.denoise_luma,
@@ -86,30 +85,18 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     let exposure_ev = lift.min(headroom).clamp(-3.0, 3.0);
 
     // ── white balance ──
-    let (as_shot_k, as_shot_g) = coeffs_to_temp_green(raw.wb_r, raw.wb_g, raw.wb_b);
-    let (wb_temp_k, wb_green) = match (raw.illum_r, raw.illum_g, raw.illum_b) {
-        (Some(r), Some(g), Some(b)) => {
-            // The illuminant is an estimate of the light; the as-shot
-            // coefficients are its reciprocal. Invert before comparing.
-            let (est_k, est_g) = coeffs_to_temp_green(
-                1.0 / r.max(LOG_FLOOR),
-                1.0 / g.max(LOG_FLOOR),
-                1.0 / b.max(LOG_FLOOR),
-            );
-            let angle =
-                angular_distance([raw.wb_r, raw.wb_g, raw.wb_b], [1.0 / r, 1.0 / g, 1.0 / b]);
-            if angle < AGREEMENT_RADIANS {
-                // Cameras are usually right; a confirming estimate adds nothing.
-                (as_shot_k, as_shot_g)
-            } else {
-                // Large disagreement means mixed or artificial light, where
-                // neither estimator is trustworthy. Split the difference rather
-                // than committing to either.
-                (0.5 * as_shot_k + 0.5 * est_k, 0.5 * as_shot_g + 0.5 * est_g)
-            }
-        }
-        _ => (as_shot_k, as_shot_g),
-    };
+    // Nothing to decide. v1 emits RawTherapee's `Setting=Camera`, so the camera's
+    // own as-shot coefficients are applied exactly and no conversion error can
+    // enter. `EditRecipe` therefore carries no white-balance field at all.
+    //
+    // An earlier revision converted the as-shot coefficients into RawTherapee's
+    // Temperature/Green parameterisation and got it wrong twice: the temperature
+    // relation was inverted (tungsten -> 8214 K, daylight -> 3713 K) and Green
+    // landed near 0.5 against its 1.0 neutral, casting every frame magenta.
+    //
+    // The PCA illuminant estimate in `raw.illum_*` is measured and persisted for
+    // the audit record but deliberately not acted on: overriding the camera needs
+    // a conversion we can verify, which is deferred to its own spec.
 
     // ── highlight recovery ──
     // Scales with how much actually clipped. 5% clipped is already severe.
@@ -130,13 +117,14 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
 
     // ── sharpening ──
     // Modulated by measured sharpness and hard-capped, so a genuinely soft
-    // frame is never sharpened into crunch.
-    let sharpen_amount = (sharp.s_global.clamp(0.0, 1.0) * 0.8).clamp(0.0, 0.8);
+    // frame is never sharpened into crunch. The cap is structural: the input is
+    // clamped to 0..1 and then scaled, so the product cannot exceed SHARPEN_MAX.
+    // An outer `.clamp(0.0, SHARPEN_MAX)` here would be a no-op and would make
+    // the cap untestable, since removing it could not change any result.
+    let sharpen_amount = sharp.s_global.clamp(0.0, 1.0) * SHARPEN_MAX;
 
     EditRecipe {
         exposure_ev,
-        wb_temp_k,
-        wb_green,
         highlight_recovery,
         shadow_lift,
         denoise_luma,
@@ -146,9 +134,10 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     }
 }
 
-/// Angular distance below which the PCA estimate is treated as confirming the
-/// camera rather than contradicting it. ~11°.
-const AGREEMENT_RADIANS: f32 = 0.2;
+/// Ceiling on capture-sharpening strength. Applied as a scale factor rather
+/// than an outer clamp so the bound is structural and a change to it is
+/// observable in the tests.
+const SHARPEN_MAX: f32 = 0.8;
 
 /// Piecewise-linear denoise strength in ISO, through the spec's anchor points:
 /// (100→0), (1600→0.3), (6400→0.6), (25600→0.85).
@@ -173,36 +162,6 @@ fn denoise_curve(iso: f32) -> f32 {
     // Beyond the last anchor, approach but never reach 1.0.
     let last = ANCHORS[ANCHORS.len() - 1];
     (last.1 + (iso.log2() - last.0.log2()) * 0.05).clamp(0.0, 0.98)
-}
-
-/// Convert raw RGB white-balance coefficients into RawTherapee's
-/// Temperature/Green parameterisation.
-///
-/// Approximate by design: RawTherapee re-derives its own multipliers from the
-/// camera profile, so this needs to land in the right neighbourhood, not be
-/// colorimetrically exact.
-pub fn coeffs_to_temp_green(r: f32, g: f32, b: f32) -> (f32, f32) {
-    let r = r.max(LOG_FLOOR);
-    let g = g.max(LOG_FLOOR);
-    let b = b.max(LOG_FLOOR);
-    // A high red multiplier means the scene was blue (cool) and needs warming.
-    let ratio = (b / r).max(LOG_FLOOR);
-    let temp = (5000.0 * ratio.powf(0.85)).clamp(1500.0, 25000.0);
-    // Green sits between the two chroma channels.
-    let green = (g / (r * b).sqrt()).clamp(0.02, 5.0);
-    (temp, green)
-}
-
-/// Angle between two coefficient vectors, in radians. The standard measure for
-/// comparing illuminant estimates, since only the direction carries colour.
-fn angular_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na = (a.iter().map(|x| x * x).sum::<f32>()).sqrt();
-    let nb = (b.iter().map(|x| x * x).sum::<f32>()).sqrt();
-    if na < LOG_FLOOR || nb < LOG_FLOOR {
-        return 0.0;
-    }
-    (dot / (na * nb)).clamp(-1.0, 1.0).acos()
 }
 
 #[cfg(test)]
@@ -299,20 +258,40 @@ mod tests {
         );
     }
 
-    /// Exposure is hard-clamped to ±3 EV whatever the measurements say.
+    /// The +3 EV clamp is reachable and must bind: a nearly black frame wants
+    /// far more than three stops.
     #[test]
-    fn exposure_is_clamped_to_three_stops() {
+    fn extreme_underexposure_is_clamped_to_three_stops() {
         let mut s = neutral_stats();
         s.p50 = 0.0001;
         s.p99 = 0.001;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        assert!(r.exposure_ev <= 3.0, "ev was {}", r.exposure_ev);
+        assert_eq!(r.exposure_ev, 3.0, "the upper clamp must bind exactly");
+    }
 
-        let mut s2 = neutral_stats();
-        s2.p50 = 0.99;
-        s2.p99 = 1.0;
-        let r2 = decide(&s2, &exif_at_iso(100), &sharp(0.5));
-        assert!(r2.exposure_ev >= -3.0, "ev was {}", r2.exposure_ev);
+    /// The -3 EV clamp is UNREACHABLE by construction, and this test records
+    /// why so nobody mistakes it for tested behaviour. Percentiles are
+    /// normalised to 0..=1, so the most negative `lift` obtainable is
+    /// log2(0.18 / 1.0) = -2.474 EV, and `headroom` only ever raises the
+    /// minimum further. The clamp stays as defence-in-depth against a future
+    /// change to the percentile range; what is asserted here is the real
+    /// reachable floor.
+    #[test]
+    fn maximum_pull_down_is_the_reachable_floor_not_the_clamp() {
+        let mut s = neutral_stats();
+        s.p50 = 1.0;
+        s.p99 = 1.0;
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        let reachable_floor = (0.18f32 / 1.0).log2(); // -2.474
+        assert!(
+            (r.exposure_ev - reachable_floor).abs() < 0.01,
+            "expected the reachable floor {reachable_floor}, got {}",
+            r.exposure_ev
+        );
+        assert!(
+            r.exposure_ev > -3.0,
+            "the -3 clamp should never be what binds"
+        );
     }
 
     /// Degenerate percentiles must not produce NaN — log2(0) is -inf and would
@@ -326,6 +305,30 @@ mod tests {
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         assert!(r.exposure_ev.is_finite(), "ev was {}", r.exposure_ev);
         assert!(r.shadow_lift.is_finite());
+    }
+
+    /// NEGATIVE percentiles are the case the LOG_FLOOR guards actually carry:
+    /// `log2` of a negative number is NaN, and unlike an infinity a NaN
+    /// survives `clamp`. Zeroed percentiles alone do not prove the guards are
+    /// load-bearing, because they produce an infinity that the trailing clamp
+    /// would rescue on its own.
+    #[test]
+    fn negative_percentiles_do_not_produce_nan() {
+        let mut s = neutral_stats();
+        s.p1 = -0.5;
+        s.p50 = -0.5;
+        s.p99 = -0.5;
+        s.p999 = -0.5;
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        for (name, v) in [
+            ("exposure_ev", r.exposure_ev),
+            ("highlight_recovery", r.highlight_recovery),
+            ("shadow_lift", r.shadow_lift),
+            ("denoise_luma", r.denoise_luma),
+            ("sharpen_amount", r.sharpen_amount),
+        ] {
+            assert!(v.is_finite(), "{name} was {v}");
+        }
     }
 
     /// Denoise rises monotonically with ISO across the spec's anchor points.
@@ -394,6 +397,17 @@ mod tests {
         assert_eq!(r_none.highlight_recovery, 0.0);
         assert!(r_heavy.highlight_recovery > 0.5);
         assert!(r_heavy.highlight_recovery <= 1.0);
+
+        // An interior point, so a wrong scale divisor cannot hide behind the
+        // clamped extremes: clipped_frac 0.025 against the 0.05 scale is 0.5.
+        let mut mid = neutral_stats();
+        mid.clipped_frac = 0.025;
+        let r_mid = decide(&mid, &exif_at_iso(100), &sharp(0.5));
+        assert!(
+            (r_mid.highlight_recovery - 0.5).abs() < 0.01,
+            "expected 0.5 at the midpoint, got {}",
+            r_mid.highlight_recovery
+        );
     }
 
     /// A soft frame is never sharpened into crunch.
@@ -419,41 +433,20 @@ mod tests {
         assert!(!without.lens_correct);
     }
 
-    /// With no illuminant estimate, as-shot coefficients are kept.
+    /// v1 has no white-balance override: the recipe carries no WB field and the
+    /// illuminant estimate must not change any decision. A frame with a wildly
+    /// disagreeing illuminant must produce the same recipe as one with none.
     #[test]
-    fn absent_illuminant_keeps_as_shot_wb() {
-        let r = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
-        let as_shot = coeffs_to_temp_green(2.0, 1.0, 1.5);
-        assert!((r.wb_temp_k - as_shot.0).abs() < 1.0);
-        assert!((r.wb_green - as_shot.1).abs() < 0.001);
-    }
-
-    /// An illuminant estimate that agrees with as-shot changes nothing.
-    #[test]
-    fn agreeing_illuminant_keeps_as_shot_wb() {
-        let mut s = neutral_stats();
-        // Same direction as the as-shot coefficients, so angular distance ~0.
-        s.illum_r = Some(0.5);
-        s.illum_g = Some(1.0);
-        s.illum_b = Some(0.667);
-        let agreed = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        let as_shot = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
-        assert!((agreed.wb_temp_k - as_shot.wb_temp_k).abs() < 50.0);
-    }
-
-    /// A wildly disagreeing estimate means mixed or artificial light, where
-    /// neither estimator is trustworthy — blend 50/50 rather than commit.
-    #[test]
-    fn disagreeing_illuminant_blends_halfway() {
+    fn illuminant_estimate_does_not_affect_the_recipe() {
+        let plain = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
         let mut s = neutral_stats();
         s.illum_r = Some(1.0);
         s.illum_g = Some(1.0);
         s.illum_b = Some(0.1);
-        let blended = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        let as_shot = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
-        assert!(
-            (blended.wb_temp_k - as_shot.wb_temp_k).abs() > 50.0,
-            "a disagreeing estimate should move the temperature"
+        let with_estimate = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert_eq!(
+            plain, with_estimate,
+            "v1 must not act on the illuminant estimate"
         );
     }
 

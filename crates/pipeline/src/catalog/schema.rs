@@ -135,8 +135,6 @@ pub const MIGRATIONS: &[&str] = &[
          file_id            BIGINT PRIMARY KEY REFERENCES files(id),
          content_hash       VARCHAR NOT NULL,
          exposure_ev        REAL NOT NULL,
-         wb_temp_k          REAL NOT NULL,
-         wb_green           REAL NOT NULL,
          highlight_recovery REAL NOT NULL,
          shadow_lift        REAL NOT NULL,
          denoise_luma       REAL NOT NULL,
