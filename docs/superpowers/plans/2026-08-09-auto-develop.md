@@ -2089,7 +2089,7 @@ mod tests {
     #[test]
     fn silent_no_op_traps_are_defused() {
         let out = emit_pp3(&fixed_recipe());
-        assert!(out.contains("Setting=Custom"), "WB would fall back to camera:\n{out}");
+        assert!(out.contains("Setting=Camera"), "WB must use the camera's own coefficients:\n{out}");
         assert!(out.contains("AutoContrast=false"), "Contrast would be ignored:\n{out}");
         assert!(out.contains("AutoRadius=false"), "DeconvRadius would be ignored:\n{out}");
         assert!(out.contains("CMethod=MAN"), "Chroma would be ignored:\n{out}");

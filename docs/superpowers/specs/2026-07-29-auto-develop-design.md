@@ -25,6 +25,8 @@ the decision layer, the look model — changed.
 | A6 | Schema **v4 confirmed available** — the catalog is at v3 | §5 |
 | A7 | The **FiveK look stands** for v1; no own-look corpus exists | §7, §12 |
 | A8 | **Input set corrected** from `is_keeper = true` to `verdict = 'keep'` | §2, §4 |
+| A9 | **Exposure headroom comes from `p99`, not `p999`** — a new `raw_stats` column | §5, §6 |
+| A10 | **The white-balance override is removed.** v1 emits RawTherapee's `Setting=Camera`; `EditRecipe` and `edits` carry no WB fields | §5, §6 |
 
 **A8 — the input set was wrong.** The original draft named
 `decisions.is_keeper = true`. In the shipped schema `is_keeper` is written only by
@@ -34,6 +36,39 @@ it would have developed only duplicate-group winners and silently skipped every
 photo kept outside a group. The correct predicate is `verdict = 'keep'`, which is
 what `Catalog::keeper_files()` and `export-keepers` already use, and what "the
 photos I kept" means to the user.
+
+**A9 — headroom must come from `p99`.** The formula below originally read
+`headroom = log2(0.95 / p999)`. The 99.9th percentile saturates to 1.0 as soon as
+more than 0.1% of pixels clip — true of almost any frame containing sky, a
+specular highlight, or a light source — after which it reports zero headroom no
+matter how dark the image actually is, and the exposure lift is silently
+discarded. Measured on a real Sony ARW: `p50 = 0.0587` (median 1.62 stops below
+middle grey), `p999 = 1.0`, `clipped_frac = 2.1%`; the `p999` form emitted
+**−0.07 EV** where **+1.62 EV** was wanted. `p99` stays meaningful until 1% of
+pixels clip, and pixels that already clipped are unrecoverable anyway, so
+protecting them costs the rest of the image. A `p99` column was added to
+`raw_stats` and there is a regression test, `saturated_p999_does_not_suppress_the_lift`,
+built from those measured numbers.
+
+**A10 — the white-balance override is removed.** The design below started from
+the as-shot coefficients and converted them into RawTherapee's
+`Temperature`/`Green` parameterisation. That conversion was wrong in two
+independent ways. The temperature relation was **inverted**: `5000·(b/r)^0.85`
+maps warm light to a high kelvin value, giving 8214 K for tungsten coefficients,
+3713 K for daylight and 5838 K for shade. And `Green`, computed as
+`g/√(r·b)`, always landed near 0.5 against RawTherapee's 1.0 neutral — because
+camera coefficients normalise `g` to 1.0 while `r` and `b` both exceed it — which
+is a magenta cast on every photo.
+
+The fix was not to repair the conversion but to stop converting. RawTherapee's
+`Setting=Camera` applies the camera's own coefficients exactly, which is what
+"cameras are usually right" wanted in the first place. `EditRecipe` and the
+`edits` table therefore carry **no** white-balance fields, and `decide()` has no
+white-balance logic. The Cheng-2014 PCA illuminant estimate is still computed and
+persisted in `raw_stats` for the audit record — validated on real frames, where
+it lands 1.3°–5.4° from the direction implied by the reciprocal as-shot gains —
+but nothing acts on it. Overriding the camera needs a conversion that can be
+checked against reference values, and is deferred to its own spec.
 
 ## 1. Motivation
 
@@ -170,6 +205,7 @@ CREATE TABLE raw_stats (
     file_id           BIGINT PRIMARY KEY REFERENCES files(id),
     p1                REAL NOT NULL,   -- raw-linear percentiles, 0..1,
     p50               REAL NOT NULL,   -- black-subtracted and white-normalised
+    p99               REAL NOT NULL,   -- the highlight anchor; see A9
     p999              REAL NOT NULL,
     clipped_frac      REAL NOT NULL,   -- fraction at/above whitelevel
     black_frac        REAL NOT NULL,   -- fraction at/below blacklevel
@@ -187,8 +223,6 @@ CREATE TABLE edits (
 
     -- recipe
     exposure_ev        REAL NOT NULL,
-    wb_temp_k          REAL NOT NULL,
-    wb_green           REAL NOT NULL,
     highlight_recovery REAL NOT NULL,      -- 0..1
     shadow_lift        REAL NOT NULL,      -- 0..1
     denoise_luma       REAL NOT NULL,      -- 0..1
@@ -231,16 +265,18 @@ Pure — no image data, no I/O, no database. This is the single most important
 testability property in the design: the tuning-sensitive logic is exercised by
 table-driven unit tests over numbers, without fixtures.
 
-- **`exposure_ev`** — `headroom = log2(0.95 / p999)`,
+- **`exposure_ev`** — `headroom = log2(0.95 / p99)` (**not `p999`** — see A9),
   `lift = log2(0.18 / p50)`, then `ev = clamp(min(lift, headroom), -3.0, 3.0)`.
   Underexposed frames are lifted but never past clipping; overexposed frames are
   pulled down because `headroom` goes negative.
-- **`wb_temp_k` / `wb_green`** — start from as-shot `wb_coeffs`; cameras are
-  usually right. Compute a Cheng-2014 PCA illuminant estimate as a cross-check.
-  If the angular distance between the two is small, keep as-shot. If it is
-  large — in practice mixed or artificial light, where neither estimator is
-  trustworthy — blend 50/50 rather than committing to either. Convert the result
-  to RT's `Temperature`/`Green` parameterisation.
+- **white balance** — **nothing is decided (A10).** The `.pp3` emits
+  `Setting=Camera`, so RawTherapee applies the camera's own as-shot coefficients
+  exactly and no conversion error can enter. A Cheng-2014 PCA illuminant estimate
+  is still computed and stored in `raw_stats` as a cross-check for a future
+  override, but `decide()` does not read it and `EditRecipe` has no WB field.
+  **Do not reintroduce a coefficient → `Temperature`/`Green` conversion without
+  reference values to validate it against** — the previous attempt was inverted
+  and cast every frame magenta.
 - **`highlight_recovery`** — scales with `clipped_frac`; the reconstruction
   *method* escalates with severity (blend for mild, colour propagation for
   heavy).
