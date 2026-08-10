@@ -1,5 +1,6 @@
-use pipeline::catalog::Catalog;
-use pipeline::develop::decide::EditRecipe;
+use pipeline::catalog::{Catalog, EditIdentity, EditRow};
+use pipeline::develop::decide::{EditRecipe, DECIDER_VERSION};
+use pipeline::develop::is_up_to_date;
 use pipeline::develop::measure::RawStats;
 use pipeline::develop::render::Pp3Renderer;
 
@@ -235,4 +236,280 @@ fn real_renderer_produces_a_tiff_and_touches_nothing_beside_the_source() {
         "first render's TIFF must still exist after the second render completes"
     );
     assert!(rendered2.tiff.exists(), "second render's TIFF must exist");
+}
+
+fn sample_recipe() -> EditRecipe {
+    EditRecipe {
+        exposure_ev: 0.5,
+        highlight_recovery: 0.2,
+        shadow_lift: 0.1,
+        denoise_luma: 0.0,
+        denoise_chroma: 0.0,
+        sharpen_amount: 0.4,
+        lens_correct: true,
+    }
+}
+
+fn sample_edit(file_id: i64, out: &std::path::Path, size: i64) -> EditRow {
+    let recipe = sample_recipe();
+    EditRow {
+        file_id,
+        content_hash: "hash-a".into(),
+        recipe_hash: recipe.recipe_hash(),
+        recipe,
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+        lut_hash: None,
+        look_applied: false,
+        iqa_before: None,
+        iqa_after: None,
+        output_path: Some(out.display().to_string()),
+        output_size_bytes: Some(size),
+        rendered_at: 1_700_000_000,
+    }
+}
+
+#[test]
+fn edit_round_trips() {
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/a.arw", "keep");
+    let out = std::path::PathBuf::from("/tmp/out/a.jpg");
+    cat.upsert_edit(&sample_edit(id, &out, 4096)).unwrap();
+    let (identity, path, size) = cat.edit_identity(id).unwrap().expect("row should exist");
+    assert_eq!(identity.content_hash, "hash-a");
+    assert_eq!(identity.decider_version, DECIDER_VERSION);
+    assert_eq!(identity.renderer, "rawtherapee");
+    assert_eq!(identity.look_model, None);
+    assert_eq!(path.as_deref(), Some("/tmp/out/a.jpg"));
+    assert_eq!(size, Some(4096));
+}
+
+#[test]
+fn edit_upsert_overwrites() {
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/a.arw", "keep");
+    let out = std::path::PathBuf::from("/tmp/out/a.jpg");
+    cat.upsert_edit(&sample_edit(id, &out, 4096)).unwrap();
+    let mut second = sample_edit(id, &out, 8192);
+    second.look_applied = true;
+    cat.upsert_edit(&second).unwrap();
+    let (_, _, size) = cat.edit_identity(id).unwrap().unwrap();
+    assert_eq!(size, Some(8192));
+}
+
+#[test]
+fn no_edit_row_means_not_up_to_date() {
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/a.arw", "keep");
+    assert!(cat.edit_identity(id).unwrap().is_none());
+}
+
+/// Every nullable field of `EditRow` gets a distinct, recognisable value so a
+/// positional transposition between same-typed neighbours (e.g. `iqa_before`
+/// vs `iqa_after`, `look_model` vs `look_version`) is caught. The brief's
+/// `edit_round_trips` test only checks a few fields; this checks all of them,
+/// individually, against `edit_identity`'s output AND a direct SQL read of
+/// the row's remaining columns (look_applied, lut_hash, output_size_bytes).
+#[test]
+fn edit_round_trips_field_exact_with_all_nullable_fields_populated() {
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/a.arw", "keep");
+    let out = std::path::PathBuf::from("/tmp/out/a.jpg");
+    let recipe = sample_recipe();
+    let row = EditRow {
+        file_id: id,
+        content_hash: "hash-a".into(),
+        recipe_hash: recipe.recipe_hash(),
+        recipe,
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: Some("lut3d-fivek".into()),
+        look_version: Some("look-v3".into()),
+        lut_hash: Some("lutsha-deadbeef".into()),
+        look_applied: true,
+        iqa_before: Some(0.31),
+        iqa_after: Some(0.87),
+        output_path: Some(out.display().to_string()),
+        output_size_bytes: Some(123_456),
+        rendered_at: 1_700_000_123,
+    };
+    cat.upsert_edit(&row).unwrap();
+
+    let (identity, path, size) = cat.edit_identity(id).unwrap().expect("row should exist");
+    assert_eq!(identity.content_hash, "hash-a");
+    assert_eq!(identity.recipe_hash, row.recipe_hash);
+    assert_eq!(identity.decider_version, DECIDER_VERSION);
+    assert_eq!(identity.renderer, "rawtherapee");
+    assert_eq!(identity.look_model, Some("lut3d-fivek".to_string()));
+    assert_eq!(identity.look_version, Some("look-v3".to_string()));
+    assert_eq!(path, Some(out.display().to_string()));
+    assert_eq!(size, Some(123_456));
+
+    // Columns not covered by `edit_identity` — read directly so
+    // look_applied/lut_hash/iqa_before/iqa_after/output_size_bytes are each
+    // checked individually against their own distinct value.
+    let conn = cat.raw_conn_for_test();
+    let (lut_hash, look_applied, iqa_before, iqa_after, output_size_bytes): (
+        Option<String>,
+        bool,
+        Option<f32>,
+        Option<f32>,
+        Option<i64>,
+    ) = conn
+        .query_row(
+            "SELECT lut_hash, look_applied, iqa_before, iqa_after, output_size_bytes
+             FROM edits WHERE file_id = ?",
+            duckdb::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(lut_hash, Some("lutsha-deadbeef".to_string()));
+    assert!(look_applied);
+    assert_eq!(iqa_before, Some(0.31));
+    assert_eq!(iqa_after, Some(0.87));
+    assert_eq!(output_size_bytes, Some(123_456));
+}
+
+/// Every `Option` field must round-trip a `None` as `None`, not a zero or
+/// empty string — `look_applied = false` with `look_model = NULL` is the
+/// legitimate "baseline only" state that the idempotency key compares.
+#[test]
+fn edit_round_trips_none_for_every_optional_field() {
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/a.arw", "keep");
+    let recipe = sample_recipe();
+    let row = EditRow {
+        file_id: id,
+        content_hash: "hash-a".into(),
+        recipe_hash: recipe.recipe_hash(),
+        recipe,
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+        lut_hash: None,
+        look_applied: false,
+        iqa_before: None,
+        iqa_after: None,
+        output_path: None,
+        output_size_bytes: None,
+        rendered_at: 1_700_000_000,
+    };
+    cat.upsert_edit(&row).unwrap();
+
+    let (identity, path, size) = cat.edit_identity(id).unwrap().expect("row should exist");
+    assert_eq!(identity.look_model, None);
+    assert_eq!(identity.look_version, None);
+    assert_eq!(path, None);
+    assert_eq!(size, None);
+
+    let conn = cat.raw_conn_for_test();
+    let (lut_hash, look_applied, iqa_before, iqa_after): (
+        Option<String>,
+        bool,
+        Option<f32>,
+        Option<f32>,
+    ) = conn
+        .query_row(
+            "SELECT lut_hash, look_applied, iqa_before, iqa_after
+             FROM edits WHERE file_id = ?",
+            duckdb::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(lut_hash, None);
+    assert!(!look_applied);
+    assert_eq!(iqa_before, None);
+    assert_eq!(iqa_after, None);
+}
+
+fn identity(recipe_hash: &str) -> EditIdentity {
+    EditIdentity {
+        content_hash: "hash-a".into(),
+        recipe_hash: recipe_hash.into(),
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+    }
+}
+
+#[test]
+fn identical_identity_with_present_output_is_up_to_date() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let out = dir.path().join("a.jpg");
+    std::fs::write(&out, vec![0u8; 100]).unwrap();
+    assert!(is_up_to_date(
+        &identity("r1"),
+        &identity("r1"),
+        Some(&out),
+        Some(100)
+    ));
+}
+
+/// Any identity component changing forces a re-render. A tuning change must
+/// not leave stale JPEGs behind.
+#[test]
+fn each_identity_component_forces_a_rerender() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let out = dir.path().join("a.jpg");
+    std::fs::write(&out, vec![0u8; 100]).unwrap();
+    let base = identity("r1");
+
+    let mut recipe_changed = base.clone();
+    recipe_changed.recipe_hash = "r2".into();
+    assert!(!is_up_to_date(
+        &base,
+        &recipe_changed,
+        Some(&out),
+        Some(100)
+    ));
+
+    let mut decider_changed = base.clone();
+    decider_changed.decider_version = "decide-2".into();
+    assert!(!is_up_to_date(
+        &base,
+        &decider_changed,
+        Some(&out),
+        Some(100)
+    ));
+
+    let mut content_changed = base.clone();
+    content_changed.content_hash = "hash-b".into();
+    assert!(!is_up_to_date(
+        &base,
+        &content_changed,
+        Some(&out),
+        Some(100)
+    ));
+
+    let mut look_changed = base.clone();
+    look_changed.look_model = Some("lut3d-fivek".into());
+    assert!(!is_up_to_date(&base, &look_changed, Some(&out), Some(100)));
+}
+
+/// A deleted or truncated output must be rebuilt even when the identity matches.
+#[test]
+fn missing_or_resized_output_forces_a_rerender() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let out = dir.path().join("a.jpg");
+    assert!(!is_up_to_date(
+        &identity("r1"),
+        &identity("r1"),
+        Some(&out),
+        Some(100)
+    ));
+
+    std::fs::write(&out, vec![0u8; 50]).unwrap();
+    assert!(!is_up_to_date(
+        &identity("r1"),
+        &identity("r1"),
+        Some(&out),
+        Some(100)
+    ));
+
+    // Never rendered before: no recorded path at all.
+    assert!(!is_up_to_date(&identity("r1"), &identity("r1"), None, None));
 }

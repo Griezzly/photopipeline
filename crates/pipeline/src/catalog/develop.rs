@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use super::optional_row;
 use super::Catalog;
+use crate::develop::decide::EditRecipe;
 use crate::develop::measure::RawStats;
 use crate::error::CatalogError;
 
@@ -124,6 +125,140 @@ impl Catalog {
                     illum_g: r.get(10)?,
                     illum_b: r.get(11)?,
                 })
+            },
+        );
+        optional_row(row)
+    }
+}
+
+/// A complete `edits` row. Doubles as the audit record: for any finished JPEG
+/// it answers which recipe and model version produced it and whether the look
+/// survived the quality guard.
+#[derive(Debug, Clone)]
+pub struct EditRow {
+    pub file_id: i64,
+    /// Denormalised from `files` so the row survives moves and renames.
+    pub content_hash: String,
+    pub recipe: EditRecipe,
+    pub recipe_hash: String,
+    pub decider_version: String,
+    pub renderer: String,
+    pub look_model: Option<String>,
+    pub look_version: Option<String>,
+    /// Retained even when `look_applied` is false, so a rejected look is still
+    /// reproducible for inspection.
+    pub lut_hash: Option<String>,
+    pub look_applied: bool,
+    pub iqa_before: Option<f32>,
+    pub iqa_after: Option<f32>,
+    pub output_path: Option<String>,
+    pub output_size_bytes: Option<i64>,
+    pub rendered_at: i64,
+}
+
+/// The subset of an `edits` row that decides whether a re-render is needed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditIdentity {
+    pub content_hash: String,
+    pub recipe_hash: String,
+    pub decider_version: String,
+    pub renderer: String,
+    pub look_model: Option<String>,
+    pub look_version: Option<String>,
+}
+
+impl Catalog {
+    pub fn upsert_edit(&self, row: &EditRow) -> Result<(), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let r = &row.recipe;
+        conn.execute(
+            "INSERT INTO edits
+                (file_id, content_hash, exposure_ev,
+                 highlight_recovery, shadow_lift, denoise_luma, denoise_chroma,
+                 sharpen_amount, lens_correct, recipe_hash, decider_version,
+                 renderer, look_model, look_version, lut_hash, look_applied,
+                 iqa_before, iqa_after, output_path, output_size_bytes, rendered_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT (file_id) DO UPDATE SET
+                 content_hash = excluded.content_hash,
+                 exposure_ev = excluded.exposure_ev,
+                 highlight_recovery = excluded.highlight_recovery,
+                 shadow_lift = excluded.shadow_lift,
+                 denoise_luma = excluded.denoise_luma,
+                 denoise_chroma = excluded.denoise_chroma,
+                 sharpen_amount = excluded.sharpen_amount,
+                 lens_correct = excluded.lens_correct,
+                 recipe_hash = excluded.recipe_hash,
+                 decider_version = excluded.decider_version,
+                 renderer = excluded.renderer,
+                 look_model = excluded.look_model,
+                 look_version = excluded.look_version,
+                 lut_hash = excluded.lut_hash,
+                 look_applied = excluded.look_applied,
+                 iqa_before = excluded.iqa_before,
+                 iqa_after = excluded.iqa_after,
+                 output_path = excluded.output_path,
+                 output_size_bytes = excluded.output_size_bytes,
+                 rendered_at = excluded.rendered_at",
+            duckdb::params![
+                row.file_id,
+                row.content_hash,
+                r.exposure_ev,
+                r.highlight_recovery,
+                r.shadow_lift,
+                r.denoise_luma,
+                r.denoise_chroma,
+                r.sharpen_amount,
+                r.lens_correct,
+                row.recipe_hash,
+                row.decider_version,
+                row.renderer,
+                row.look_model,
+                row.look_version,
+                row.lut_hash,
+                row.look_applied,
+                row.iqa_before,
+                row.iqa_after,
+                row.output_path,
+                row.output_size_bytes,
+                row.rendered_at
+            ],
+        )
+        .map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// The identity of the last render plus where it landed and how big it was.
+    #[allow(clippy::type_complexity)]
+    pub fn edit_identity(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<(EditIdentity, Option<String>, Option<i64>)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let row = conn.query_row(
+            "SELECT content_hash, recipe_hash, decider_version, renderer,
+                    look_model, look_version, output_path, output_size_bytes
+             FROM edits WHERE file_id = ?",
+            duckdb::params![file_id],
+            |r| {
+                Ok((
+                    EditIdentity {
+                        content_hash: r.get(0)?,
+                        recipe_hash: r.get(1)?,
+                        decider_version: r.get(2)?,
+                        renderer: r.get(3)?,
+                        look_model: r.get(4)?,
+                        look_version: r.get(5)?,
+                    },
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
             },
         );
         optional_row(row)
