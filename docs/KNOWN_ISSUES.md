@@ -3,17 +3,112 @@
 Findings that are real, reproduced, and deliberately **not** fixed in the change
 that surfaced them. Each says why it was left, and what fixing it involves.
 
-Last updated: 2026-08-01. **Nothing is currently open.** Everything the
-review-UI redesign
-(`docs/superpowers/specs/2026-07-30-review-ui-redesign-design.md`) left behind
-was fixed on `fix/known-issues`; what remains below is the accepted risk and the
-defect class worth not re-learning.
+Last updated: 2026-08-10. The **Open** section below was filled by the automatic
+RAW development work (`docs/superpowers/specs/2026-07-29-auto-develop-design.md`,
+Phase 1). Everything the review-UI redesign left behind was fixed on
+`fix/known-issues` and is recorded further down.
 
 ---
 
 ## Open
 
-None.
+From Phase 1 of automatic RAW development (`feat/auto-develop`). All were
+reproduced, none is a regression of existing behaviour, and each was left because
+it sits outside that phase's scope.
+
+### Affects photos, not just internals
+
+**KI-1 — `rawler` cannot extract previews from Sony A6300 (ILCE-6300) ARW files.**
+
+`rawler` 0.7.2 returns `None` from **both** `preview_image()` and
+`thumbnail_image()` for these files, so ingest logs "no preview or thumbnail
+available", writes nothing to the preview cache, and still reports the file as
+`Processed`, `Errored: 0`. The previews exist: a byte scan of `DSC03073.ARW`
+finds two embedded JPEGs, ~9 KB at offset 38842 and ~674 KB at offset 144546.
+
+Everything downstream of the preview silently does nothing for these files:
+review-UI thumbnails, blur and back-focus detection, exposure flags, CLIP-IQA
+scoring, DINOv2 embeddings, and therefore duplicate detection. EXIF extraction
+works, so the catalog looks populated at a glance — `sharpness`, `exposure` and
+`iqa` are simply null.
+
+`finish` is unaffected for correctness, because `measure_raw` reads the raw
+sensor plane rather than the embedded preview. But with `sharpness` empty,
+`decide()` falls back to `s_global = 0.5` and `sharpen_amount` is constant across
+the set, which is why the Phase 1 CHECKPOINT could not judge sharpening.
+
+Fixing it means a fallback that scans for the embedded JPEG when `rawler`
+declines — the data is right there — or an upstream fix. Worth doing: it would
+restore the entire ML path for this camera.
+
+**KI-2 — the finished tree is never pruned.** Flipping a verdict from keep to
+reject leaves the JPEG, its `.pp3` and the `edits` row in place, with no way to
+clean up. `review-tree` and `export-keepers` both prune stale entries; `finish`
+has no `--regenerate` and no prune pass, so `_finished/` accumulates orphans. A
+related consequence: because the dedupe set is per-run and not seeded from what
+is already on disk, a shrinking keeper set can let a re-rendered photo overwrite
+a previous run's orphaned JPEG whose `edits` row still points at it.
+
+**KI-3 — the next `scan` re-ingests finished JPEGs as new photos.** `_finished`
+defaults to living inside the library and `jpg` is an ingest extension, and
+`ingest_directory` has no exclusion for managed trees. `_review` has had this
+problem all along, so it is not new, but `finish` makes it far easier to hit. The
+`.photopipe-tree` marker that `output/mod.rs` already writes would give the
+walker something cheap to skip on.
+
+**KI-4 — output JPEGs carry no metadata.** `encode_jpeg` uses `JpegEncoder`
+without `set_exif`/`set_icc_profile`, so finished files have no capture date,
+camera, lens or ICC tag, and viewers sort them by mtime. The spec never promised
+metadata, so this is a gap rather than a regression — but it is the kind of thing
+noticed on the first real run.
+
+### Internals
+
+**KI-5 — a "zero work" second run still decodes every RAW.** `finish_one`
+measures and upserts `raw_stats` *before* consulting `edit_identity`, because
+`recipe_hash` is needed to build the identity. Functionally correct and verified
+idempotent, but on 500 frames the second run costs a full raw decode each, where
+§8's language implies zero. `get_raw_stats` already exists and is currently used
+only by tests: when a stored `edits` row's `content_hash` matches and a
+`raw_stats` row exists, `decide()` could run from the persisted stats.
+
+**KI-6 — `[develop] renderer` and the whole `[develop.look]` section are read by
+nobody.** Only `finished_dir`, `jpeg_quality`, `output_subdirs` and
+`rawtherapee_path` are consumed. `renderer = "vkdt"` silently renders through
+RawTherapee; `look.enable = true` silently does nothing, because the look is
+Phase 2. One validation line rejecting an unknown renderer, plus a `debug!` noting
+the look is unimplemented, removes the trap.
+
+**KI-7 — a long run is nearly silent, and the failure hint is wrong.**
+`CliProgress` makes `set_total` and `inc` no-ops and nothing logs per rendered
+photo, so a multi-hour serial run prints two lines. (`cmd_scan` passes `None`, so
+this is convention rather than regression.) Separately, per-file failures are
+logged at `warn!` while the default log level is `info`, so the summary's "re-run
+with --log-level debug to see why individual files failed" is misleading — the
+reasons already printed. `stage("rendering")` is also never emitted, so a future
+UI wired to `ProgressSink` would show "measuring" for the whole render.
+
+**KI-8 — unchecked indexing in the CFA path, and a panic escapes failure
+isolation.** `measure.rs`'s 2×2 CFA cell walk indexes `data[(y + dy) * w + (x +
+dx)]` with no bounds guard, while both sibling paths check `row_end > data.len()`
+and break. If `rawler` ever returns a buffer shorter than `width * height`, this
+panics — and `finish_folder` matches on `Err`, not unwinds, so one malformed file
+would abort the whole run rather than being skipped. Low likelihood, cheap to
+close with the guard the neighbours already use.
+
+**KI-9 — `cargo test` registers libraries in the real user data directory.**
+There are currently 74 catalog directories under
+`~/Library/Application Support/photopipe/libraries/` whose folders are long-gone
+`/T/.tmpXXXX/trip` temp paths. The CLI tests isolate their app-data dir
+correctly; the pipeline integration tests do not, so they leave a registration
+behind on every run. Harmless but it makes `photopipe libraries` useless on a
+development machine.
+
+**KI-10 — `raw_conn_for_test` is a sharp escape hatch.** It returns a
+`MutexGuard` over the raw DuckDB connection and is `pub` behind only
+`#[doc(hidden)]`, so nothing at compile time stops production code from taking
+it and holding the lock. Integration tests live in a separate crate, so
+`#[cfg(test)]` cannot work; a `test-support` cargo feature would.
 
 ---
 
@@ -88,6 +183,31 @@ already has code execution as that user. Toast titles and bodies *are* escaped a
 the sink, because filenames are a wider surface than the user's own folder names.
 
 ---
+
+## Two defect classes from the auto-develop work
+
+**A formula that passes every unit test can be systematically wrong on real
+photos.** The decision layer was fully covered by table-driven tests over
+synthetic numbers, all green, and it still made photos worse: `MID_GREY = 0.18`
+is a grey-card reflectance target, and the median of a scene full of dark
+conifers is legitimately far below it, so pulling the median to 0.18
+over-brightened most outdoor frames. The same error appeared a second time in
+`shadow_lift`, driven by a low 1st percentile that meant "this scene has deep
+shadows", not "this scene is broken". Neither was visible in a test; both were
+obvious the moment three real frames were rendered next to baseline-only renders.
+Rendering real photos and comparing against a known-neutral baseline is the only
+thing that found them, and it is worth doing before believing any tuning change.
+
+**Amending a migration in place is unsafe as soon as any catalog has run it —
+"unreleased" is not the relevant question.** Migration v4 was edited twice on the
+reasoning that it had not shipped. Catalogs created at v4 *before* those edits
+already existed on disk, and because `schema_version` already read `4`, no
+migration re-ran: `finish` then failed on every photo with `Table "raw_stats"
+does not have a column with name "p99"`, with a NOT NULL violation on `edits`
+queued behind it. No unit test could catch this, because every test builds a
+fresh catalog where the amended and the migrated schema are identical. The fix
+was to restore v4 verbatim and add v5. Migrations are append-only from the moment
+one has been executed anywhere.
 
 ## A recurring defect class worth remembering
 
