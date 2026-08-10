@@ -300,7 +300,7 @@ fn edit_upsert_overwrites() {
 }
 
 #[test]
-fn no_edit_row_means_not_up_to_date() {
+fn no_edit_row_for_an_unrendered_file() {
     let (_dir, cat) = temp_catalog();
     let id = seed_file(&cat, "/tmp/a.arw", "keep");
     assert!(cat.edit_identity(id).unwrap().is_none());
@@ -450,7 +450,12 @@ fn identical_identity_with_present_output_is_up_to_date() {
 }
 
 /// Any identity component changing forces a re-render. A tuning change must
-/// not leave stale JPEGs behind.
+/// not leave stale JPEGs behind. Covers all six `EditIdentity` fields
+/// individually (the brief's own snippet only flipped four), plus the
+/// `Some -> Some` transitions for the two `Option<String>` look fields —
+/// the realistic case of swapping look models or bumping a look version,
+/// which a `None -> Some` transition alone cannot distinguish from a sloppy
+/// "both present" comparison.
 #[test]
 fn each_identity_component_forces_a_rerender() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -458,36 +463,75 @@ fn each_identity_component_forces_a_rerender() {
     std::fs::write(&out, vec![0u8; 100]).unwrap();
     let base = identity("r1");
 
+    // Positive control: without this, every negative assertion below would
+    // still pass if `is_up_to_date` simply always returned `false`.
+    assert!(
+        is_up_to_date(&base, &base.clone(), Some(&out), Some(100)),
+        "an unmodified identity with the output present at the recorded size must be up to date"
+    );
+
     let mut recipe_changed = base.clone();
     recipe_changed.recipe_hash = "r2".into();
-    assert!(!is_up_to_date(
-        &base,
-        &recipe_changed,
-        Some(&out),
-        Some(100)
-    ));
+    assert!(
+        !is_up_to_date(&base, &recipe_changed, Some(&out), Some(100)),
+        "a recipe_hash change must force a re-render"
+    );
 
     let mut decider_changed = base.clone();
     decider_changed.decider_version = "decide-2".into();
-    assert!(!is_up_to_date(
-        &base,
-        &decider_changed,
-        Some(&out),
-        Some(100)
-    ));
+    assert!(
+        !is_up_to_date(&base, &decider_changed, Some(&out), Some(100)),
+        "a decider_version change must force a re-render"
+    );
 
     let mut content_changed = base.clone();
     content_changed.content_hash = "hash-b".into();
-    assert!(!is_up_to_date(
-        &base,
-        &content_changed,
-        Some(&out),
-        Some(100)
-    ));
+    assert!(
+        !is_up_to_date(&base, &content_changed, Some(&out), Some(100)),
+        "a content_hash change must force a re-render"
+    );
 
-    let mut look_changed = base.clone();
-    look_changed.look_model = Some("lut3d-fivek".into());
-    assert!(!is_up_to_date(&base, &look_changed, Some(&out), Some(100)));
+    let mut renderer_changed = base.clone();
+    renderer_changed.renderer = "vkdt".into();
+    assert!(
+        !is_up_to_date(&base, &renderer_changed, Some(&out), Some(100)),
+        "a renderer change must force a re-render"
+    );
+
+    let mut look_model_changed = base.clone();
+    look_model_changed.look_model = Some("lut3d-fivek".into());
+    assert!(
+        !is_up_to_date(&base, &look_model_changed, Some(&out), Some(100)),
+        "a look_model change (None -> Some) must force a re-render"
+    );
+
+    let mut look_version_changed = base.clone();
+    look_version_changed.look_version = Some("2".into());
+    assert!(
+        !is_up_to_date(&base, &look_version_changed, Some(&out), Some(100)),
+        "a look_version change (None -> Some) must force a re-render"
+    );
+
+    // Some -> Some, not just None -> Some: swapping look models or bumping a
+    // look version must invalidate, and both fields are Option<String> where
+    // a sloppy comparison could treat "both present" as equal.
+    let mut from = base.clone();
+    from.look_model = Some("lut3d-fivek".into());
+    from.look_version = Some("1".into());
+
+    let mut to_other_model = from.clone();
+    to_other_model.look_model = Some("lut3d-own".into());
+    assert!(
+        !is_up_to_date(&from, &to_other_model, Some(&out), Some(100)),
+        "a different look model must force a re-render"
+    );
+
+    let mut to_other_version = from.clone();
+    to_other_version.look_version = Some("2".into());
+    assert!(
+        !is_up_to_date(&from, &to_other_version, Some(&out), Some(100)),
+        "a different look version must force a re-render"
+    );
 }
 
 /// A deleted or truncated output must be rebuilt even when the identity matches.
