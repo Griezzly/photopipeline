@@ -22,9 +22,121 @@ fn temp_catalog() -> (tempfile::TempDir, Catalog) {
 static REAL_RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
-fn migration_v4_creates_develop_tables() {
+fn migration_creates_develop_tables_at_current_version() {
     let (_dir, cat) = temp_catalog();
-    assert_eq!(cat.schema_version().unwrap(), 4);
+    assert_eq!(cat.schema_version().unwrap(), 5);
+}
+
+/// Reproduces the real bug: a catalog created while migration v4 had its
+/// *original* shape (raw_stats without `p99`, edits with `wb_temp_k` /
+/// `wb_green`) and `schema_version` already at 4. Because `Catalog::open`
+/// only ever applies migrations whose version exceeds the recorded one,
+/// such a catalog would be stuck forever without migration v5.
+///
+/// This test builds exactly that on-disk shape, then reopens the same file
+/// through `Catalog::open` (the real code path every `photopipe` invocation
+/// takes) and asserts the v5 migration ran and brought both tables to their
+/// intended final shape.
+#[test]
+fn migration_v5_repairs_catalogs_stuck_at_original_v4_shape() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("catalog.duckdb");
+
+    // Open once so every table up to the *current* shipped schema exists,
+    // then downgrade raw_stats/edits in place to the original (pre-amendment)
+    // v4 DDL and roll schema_version back to 4 — simulating a catalog created
+    // before the v4 amendments landed.
+    {
+        let cat = Catalog::open(&path).unwrap();
+        let conn = cat.raw_conn_for_test();
+        conn.execute_batch(
+            "DROP TABLE raw_stats;
+             DROP TABLE edits;
+             CREATE TABLE raw_stats (
+                 file_id           BIGINT PRIMARY KEY REFERENCES files(id),
+                 p1                REAL NOT NULL,
+                 p50               REAL NOT NULL,
+                 p999              REAL NOT NULL,
+                 clipped_frac      REAL NOT NULL,
+                 black_frac        REAL NOT NULL,
+                 wb_r              REAL NOT NULL,
+                 wb_g              REAL NOT NULL,
+                 wb_b              REAL NOT NULL,
+                 illum_r           REAL,
+                 illum_g           REAL,
+                 illum_b           REAL
+             );
+             CREATE TABLE edits (
+                 file_id            BIGINT PRIMARY KEY REFERENCES files(id),
+                 content_hash       VARCHAR NOT NULL,
+                 exposure_ev        REAL NOT NULL,
+                 wb_temp_k          REAL NOT NULL,
+                 wb_green           REAL NOT NULL,
+                 highlight_recovery REAL NOT NULL,
+                 shadow_lift        REAL NOT NULL,
+                 denoise_luma       REAL NOT NULL,
+                 denoise_chroma     REAL NOT NULL,
+                 sharpen_amount     REAL NOT NULL,
+                 lens_correct       BOOLEAN NOT NULL,
+                 recipe_hash        VARCHAR NOT NULL,
+                 decider_version    VARCHAR NOT NULL,
+                 renderer           VARCHAR NOT NULL,
+                 look_model         VARCHAR,
+                 look_version       VARCHAR,
+                 lut_hash           VARCHAR,
+                 look_applied       BOOLEAN NOT NULL,
+                 iqa_before         REAL,
+                 iqa_after          REAL,
+                 output_path        VARCHAR,
+                 output_size_bytes  BIGINT,
+                 rendered_at        BIGINT
+             );
+             CREATE INDEX idx_edits_hash ON edits(content_hash);
+             DELETE FROM schema_version;
+             INSERT INTO schema_version VALUES (4);",
+        )
+        .unwrap();
+        drop(conn);
+        // Drop the Catalog to release the file so it can be reopened below.
+        drop(cat);
+    }
+
+    // Reopen through the real entry point. This must apply migration v5.
+    let cat = Catalog::open(&path).unwrap();
+    assert_eq!(cat.schema_version().unwrap(), 5);
+
+    let conn = cat.raw_conn_for_test();
+    let raw_stats_columns: Vec<String> = conn
+        .prepare(
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_name = 'raw_stats' ORDER BY column_name",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(
+        raw_stats_columns.iter().any(|c| c == "p99"),
+        "raw_stats should have a p99 column after migrating, got {raw_stats_columns:?}"
+    );
+
+    let edits_columns: Vec<String> = conn
+        .prepare(
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_name = 'edits' ORDER BY column_name",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(
+        !edits_columns
+            .iter()
+            .any(|c| c == "wb_temp_k" || c == "wb_green"),
+        "edits should no longer have wb_temp_k/wb_green after migrating, got {edits_columns:?}"
+    );
 }
 
 #[test]

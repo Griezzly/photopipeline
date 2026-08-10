@@ -131,7 +131,18 @@ impl Pp3Renderer {
         write_file(&base_path, BASE_PP3)?;
         write_file(&photo_path, &emit_pp3(recipe))?;
 
-        let args = build_args(&base_path, &photo_path, &scratch_dir, raw);
+        // `rawtherapee-cli` rejects relative `-c` paths outright ("doesn't
+        // exist!"), even when they are valid relative to the process's cwd.
+        // Catalogs commonly store paths exactly as given on the `scan`
+        // command line, which is often relative (e.g. `./example-pictures`),
+        // so make it absolute here rather than requiring every caller to
+        // canonicalize before it ever reaches the catalog.
+        let raw_abs = std::path::absolute(raw).map_err(|source| DevelopError::Io {
+            path: raw.to_path_buf(),
+            source,
+        })?;
+
+        let args = build_args(&base_path, &photo_path, &scratch_dir, &raw_abs);
         let out =
             Command::new(&self.exe)
                 .args(&args)

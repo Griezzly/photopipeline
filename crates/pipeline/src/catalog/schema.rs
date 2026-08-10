@@ -120,6 +120,69 @@ pub const MIGRATIONS: &[&str] = &[
          file_id           BIGINT PRIMARY KEY REFERENCES files(id),
          p1                REAL NOT NULL,
          p50               REAL NOT NULL,
+         p999              REAL NOT NULL,
+         clipped_frac      REAL NOT NULL,
+         black_frac        REAL NOT NULL,
+         wb_r              REAL NOT NULL,
+         wb_g              REAL NOT NULL,
+         wb_b              REAL NOT NULL,
+         illum_r           REAL,
+         illum_g           REAL,
+         illum_b           REAL
+     );
+     CREATE TABLE edits (
+         file_id            BIGINT PRIMARY KEY REFERENCES files(id),
+         content_hash       VARCHAR NOT NULL,
+         exposure_ev        REAL NOT NULL,
+         wb_temp_k          REAL NOT NULL,
+         wb_green           REAL NOT NULL,
+         highlight_recovery REAL NOT NULL,
+         shadow_lift        REAL NOT NULL,
+         denoise_luma       REAL NOT NULL,
+         denoise_chroma     REAL NOT NULL,
+         sharpen_amount     REAL NOT NULL,
+         lens_correct       BOOLEAN NOT NULL,
+         recipe_hash        VARCHAR NOT NULL,
+         decider_version    VARCHAR NOT NULL,
+         renderer           VARCHAR NOT NULL,
+         look_model         VARCHAR,
+         look_version       VARCHAR,
+         lut_hash           VARCHAR,
+         look_applied       BOOLEAN NOT NULL,
+         iqa_before         REAL,
+         iqa_after          REAL,
+         output_path        VARCHAR,
+         output_size_bytes  BIGINT,
+         rendered_at        BIGINT
+     );
+     CREATE INDEX idx_edits_hash ON edits(content_hash);
+     COMMIT;",
+    // version 5 — fix up raw_stats and edits to their intended final shape.
+    //
+    // Migration v4 was amended in place after catalogs had already been created
+    // at that version (see a8466f0 and fd4c602): raw_stats gained a `p99`
+    // column and edits lost `wb_temp_k`/`wb_green`. Because those catalogs'
+    // schema_version already read 4, the amendments never ran against them,
+    // leaving raw_stats without p99 and edits still carrying the wb_* columns
+    // as NOT NULL. Both tables hold purely derived/regenerable data:
+    // raw_stats is recomputed unconditionally by `finish_one` on every run
+    // (measure_raw + upsert_raw_stats happen before the idempotency check),
+    // and edits is empty in every catalog that exists today because no render
+    // has ever succeeded end to end. Given that, dropping and recreating both
+    // tables is simpler and safer than an ALTER-based migration: ALTER would
+    // have to add `p99` as nullable (a fresh v5 catalog has it NOT NULL) and
+    // there is no clean ALTER path to drop two NOT NULL columns from `edits`
+    // without first proving the table is empty. Drop-and-recreate guarantees
+    // migrated and freshly-created catalogs end up byte-for-byte identical in
+    // schema, which an incremental ALTER path would not.
+    "BEGIN TRANSACTION;
+     INSERT INTO schema_version VALUES (5);
+     DROP TABLE IF EXISTS raw_stats;
+     DROP TABLE IF EXISTS edits;
+     CREATE TABLE raw_stats (
+         file_id           BIGINT PRIMARY KEY REFERENCES files(id),
+         p1                REAL NOT NULL,
+         p50               REAL NOT NULL,
          p99               REAL NOT NULL,
          p999              REAL NOT NULL,
          clipped_frac      REAL NOT NULL,

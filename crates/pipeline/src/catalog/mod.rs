@@ -325,6 +325,7 @@ impl Catalog {
             .map_err(|e| CatalogError::Db(e.to_string()))?;
 
         // Apply any pending migrations.
+        let mut migrated = false;
         for (i, migration_sql) in schema::MIGRATIONS.iter().enumerate() {
             let migration_version = (i + 1) as u32;
             if migration_version > current_version {
@@ -333,7 +334,27 @@ impl Catalog {
                         version: migration_version,
                         reason: e.to_string(),
                     })?;
+                migrated = true;
             }
+        }
+
+        // Migrations that DROP tables (e.g. version 5's raw_stats/edits
+        // rebuild) leave that DROP recorded only in the WAL until a
+        // checkpoint runs. DuckDB has a WAL-replay bug when a *second*
+        // connection opens the same file before that checkpoint happens and
+        // has to replay a DROP TABLE for a table with a foreign-key
+        // constraint (it crashes trying to resolve a "default database"
+        // during replay — see the DROP TABLE / AlterForeignKeyInfo path in
+        // WriteAheadLogDeserializer::ReplayDropTable). This matters here
+        // because photopipe's `serve` API keeps a library's Catalog open
+        // (`AppState::active`) while `list_libraries` opens a *fresh*
+        // connection to every catalog file on disk, including the one
+        // that's still open. Checkpointing immediately after migrating
+        // flushes the WAL into the main file so no later open ever has to
+        // replay it.
+        if migrated {
+            conn.execute_batch("CHECKPOINT;")
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
         }
 
         Ok(Self {
@@ -3349,7 +3370,7 @@ mod tests {
     fn schema_version_reports_current_migration() {
         let (catalog, _dir) = make_catalog();
         // Migrations v1 (base schema) and v2 (decisions table) run at open().
-        assert_eq!(catalog.schema_version().unwrap(), 4);
+        assert_eq!(catalog.schema_version().unwrap(), 5);
     }
 
     /// Insert a file with the given path/hash and return its id.
