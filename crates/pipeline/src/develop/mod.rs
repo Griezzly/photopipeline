@@ -8,6 +8,7 @@
 pub mod decide;
 pub mod illuminant;
 pub mod measure;
+pub mod pp3;
 
 use thiserror::Error;
 
