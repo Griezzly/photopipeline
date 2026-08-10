@@ -4,8 +4,11 @@ use duckdb::Connection;
 
 use crate::error::CatalogError;
 
+pub mod develop;
 pub mod queries;
 pub mod schema;
+
+pub use develop::KeeperToDevelop;
 
 /// Full catalog dump of one file for `photopipe info`. JSON-serialisable.
 #[derive(serde::Serialize)]
