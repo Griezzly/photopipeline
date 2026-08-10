@@ -24,6 +24,7 @@ A library goes through a few stages, each its own command:
 
 ```
 scan ──> calibrate ──> dedupe ──> serve / review-tree ──> export-keepers
+                                        │                      finish
 (ingest,   (per-lens     (group      (triage & record         (materialize the
  defects,   sharpness     near-        keep/reject              kept set as links)
  ML)        baselines)    duplicates)  decisions)
@@ -43,6 +44,17 @@ scan ──> calibrate ──> dedupe ──> serve / review-tree ──> export
   written through to the catalog.
 - **`export-keepers`** — build a `keepers/YYYY-MM/` tree of copies of everything
   you kept, ready to hand to Lightroom / Capture One / a backup.
+- **`finish`** — develop everything you kept into finished JPEGs, automatically.
+  Reads the raw sensor data to decide exposure, white balance, highlight
+  recovery, shadow lift, denoise and sharpening per photo, renders through
+  RawTherapee, and writes a `_finished/YYYY-MM/` tree. Requires
+  `rawtherapee-cli` on your machine — run `photopipe doctor` to check. Each JPEG
+  gets a `.pp3` beside it so you can reopen the photo in RawTherapee and take
+  over by hand.
+
+  `finish` and `export-keepers` are independent: one gives you finished JPEGs,
+  the other hands the untouched RAWs to Lightroom or a backup. Neither requires
+  the other.
 
 ---
 
@@ -73,6 +85,9 @@ photopipe serve ~/Photos/2024 --port 8787      # open http://127.0.0.1:8787/
 
 # export what you kept
 photopipe export-keepers ~/Photos/2024 ~/Photos/_keepers
+
+# develop the keepers into finished JPEGs
+photopipe finish ~/Photos/2024 --out ~/Photos/_finished
 ```
 
 You can run `scan` without the ML models for a quick pass (classical defect
@@ -416,6 +431,7 @@ are no longer used and can be deleted.
 | `serve [folder]` | Launch the local review web UI. Without a folder, opens the Home screen. `--port` (default 8787). |
 | `review-tree <folder> <output>` | Generate/update the review tree (copies). `--include`, `--regenerate`. |
 | `export-keepers <folder> <output>` | Materialize the keepers export tree (copies). `--regenerate`. |
+| `finish <folder>` | Develop every kept photo into finished JPEGs via RawTherapee. `--out <dir>`. |
 | `info <FILE>` | Print all catalog data for one file as JSON (walks up to find the library). |
 | `stats <folder>` | Print catalog summary statistics for a folder's library. |
 | `libraries` | List all analyzed libraries (folder, photo count, last analyzed). |

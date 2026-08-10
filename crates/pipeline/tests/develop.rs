@@ -13,6 +13,14 @@ fn temp_catalog() -> (tempfile::TempDir, Catalog) {
     (dir, cat)
 }
 
+/// Serializes the two tests in this file that drive a real `rawtherapee-cli`
+/// against a real RAW file. `end_to_end_finish_is_idempotent` temporarily
+/// redirects the process-wide temp-dir env var to observe its own cleanup;
+/// without this lock, `real_renderer_produces_a_tiff_and_touches_nothing_beside_the_source`
+/// running concurrently would have its own temp directories swept into that
+/// redirected root and misread as leftovers.
+static REAL_RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn migration_v4_creates_develop_tables() {
     let (_dir, cat) = temp_catalog();
@@ -162,6 +170,8 @@ fn real_renderer_produces_a_tiff_and_touches_nothing_beside_the_source() {
         raw.exists(),
         "PHOTOPIPE_TEST_RAW does not exist: {raw_path}"
     );
+
+    let _guard = REAL_RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let cfg = pipeline::config::DevelopConfig {
         rawtherapee_path: exe,
@@ -741,5 +751,207 @@ fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
     assert!(
         cat.edit_identity(id).unwrap().is_none(),
         "a failed encode must leave no edits row"
+    );
+}
+
+// ── real end-to-end: render, idempotency, and non-destruction together ──
+
+/// Restores an environment variable to its previous value (or removes it) on
+/// drop, so redirecting `TMPDIR` for the duration of a single test cannot leak
+/// into any test that runs after it.
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// The only test in this suite that proves a real render and idempotency
+/// together, against a real RAW file through a real `rawtherapee-cli`. Every
+/// other test in this file uses either no renderer or the fake stub from
+/// `fake_rawtherapee`, which cannot produce a decodable JPEG.
+///
+/// Gated on two environment variables so `cargo test --all` stays green on a
+/// bare checkout: skips with a message (never fails, never `#[ignore]`) when
+/// either is absent.
+#[test]
+fn end_to_end_finish_is_idempotent() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
+    let Some(raw) = std::env::var_os("PHOTOPIPE_TEST_RAW") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAW to a real RAW file");
+        return;
+    };
+    let raw = std::path::PathBuf::from(raw);
+    assert!(
+        raw.exists(),
+        "PHOTOPIPE_TEST_RAW points at a file that does not exist: {}",
+        raw.display()
+    );
+
+    let _guard = REAL_RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Snapshot the source directory: nothing may be written beside the
+    // original, ever — not even a sidecar. `keepers_to_develop` never touches
+    // this directory itself, so any change here means the renderer strayed.
+    let source_dir = raw.parent().unwrap().to_path_buf();
+    let source_entries_before = std::fs::read_dir(&source_dir).unwrap().count();
+
+    // Everything the test itself owns for the whole run — the catalog and the
+    // output tree — is created against the *real* system temp dir, before
+    // TMPDIR is redirected below. Only `finish_folder`'s own internal
+    // scratch directories should ever land inside the redirected root.
+    let (_dir, cat) = temp_catalog();
+    let id = {
+        let conn = cat.raw_conn_for_test();
+        conn.execute(
+            "INSERT INTO files (path, content_hash, size_bytes, mtime_ns, file_format, last_processed)
+             VALUES (?, 'e2e-hash', 0, 0, 'arw', 0)",
+            duckdb::params![raw.to_string_lossy()],
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM files WHERE content_hash = 'e2e-hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO decisions (file_id, verdict, is_keeper, note, decided_at)
+             VALUES (?, 'keep', false, NULL, 0)",
+            duckdb::params![id],
+        )
+        .unwrap();
+        id
+    };
+    let out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    // Redirect the system temp dir into a scratch directory we control, so we
+    // can assert nothing survives finish_folder's own cleanup. Restored on
+    // drop regardless of how the test exits.
+    let tmp_root = tempfile::TempDir::new().unwrap();
+    #[cfg(unix)]
+    let _tmpdir_guard = EnvGuard::set("TMPDIR", tmp_root.path());
+    #[cfg(windows)]
+    let _tmp_guard = EnvGuard::set("TMP", tmp_root.path());
+    #[cfg(windows)]
+    let _temp_guard = EnvGuard::set("TEMP", tmp_root.path());
+
+    // ── first run: a real render ──
+    let first = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    assert_eq!(first.rendered, 1, "first run should render");
+    assert_eq!(first.skipped, 0);
+    assert_eq!(first.errored, 0, "first run should not error");
+
+    let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
+    let jpeg = std::path::PathBuf::from(path.unwrap());
+    assert!(jpeg.exists(), "the JPEG should exist at {}", jpeg.display());
+
+    // Decodable, and a plausible size — not merely "the file is non-empty".
+    let decoded = image::open(&jpeg)
+        .unwrap_or_else(|e| panic!("output JPEG at {} is not decodable: {e}", jpeg.display()));
+    let (w, h) = (decoded.width(), decoded.height());
+    assert!(
+        w > 200 && h > 200,
+        "output JPEG dimensions look implausible for a real photo: {w}x{h}"
+    );
+
+    // The .pp3 escape hatch sits beside the JPEG.
+    let pp3 = jpeg.with_extension("pp3");
+    assert!(pp3.exists(), "the .pp3 escape hatch should sit beside it");
+
+    // Non-destructive contract: nothing was written beside the source RAW.
+    // RawTherapee's own convention (`photo.raw.pp3`) violates this, which is
+    // exactly why this needs an explicit assertion rather than trusting intent.
+    assert!(
+        !raw.with_extension("pp3").exists(),
+        "nothing may be written beside the original"
+    );
+    let source_entries_after_first = std::fs::read_dir(&source_dir).unwrap().count();
+    assert_eq!(
+        source_entries_before, source_entries_after_first,
+        "the source directory's file count must not change"
+    );
+
+    // Output landed in a YYYY-MM subdirectory (or unknown-date, if the RAW
+    // carries no captured_at) under `out`, per the default `output_subdirs =
+    // "month"`.
+    let rel = jpeg.strip_prefix(out.path()).unwrap();
+    let subdir = rel
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .unwrap();
+    assert!(
+        subdir == "unknown-date" || (subdir.len() == 7 && subdir.as_bytes()[4] == b'-'),
+        "expected a YYYY-MM or unknown-date subdirectory, got {subdir}"
+    );
+
+    // ── second run: idempotency is a correctness requirement, not a perf goal ──
+    let second = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    assert_eq!(second.rendered, 0, "second run must render nothing");
+    assert_eq!(second.skipped, 1);
+    assert_eq!(second.errored, 0);
+
+    // ── third run: corrupt the recorded state the way a real change would,
+    // and confirm the idempotency check actually notices. Without this, the
+    // second-run assertion above could pass simply because the code always
+    // skips regardless of whether the output still matches. ──
+    std::fs::File::create(&jpeg).unwrap(); // truncate to 0 bytes
+    let third = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    assert_eq!(
+        third.rendered, 1,
+        "a truncated output must be detected as stale and re-rendered"
+    );
+    assert_eq!(third.skipped, 0);
+    assert_eq!(third.errored, 0);
+    assert!(
+        image::open(&jpeg).is_ok(),
+        "the re-rendered JPEG should be decodable again"
+    );
+
+    // Final non-destruction check, after three runs' worth of opportunity to
+    // slip.
+    let source_entries_final = std::fs::read_dir(&source_dir).unwrap().count();
+    assert_eq!(
+        source_entries_before, source_entries_final,
+        "the source directory's file count must still be unchanged after 3 runs"
+    );
+
+    // No temp files left behind: the run-level temp directory finish_folder
+    // creates, and every per-render scratch directory inside it, are each
+    // owned by a `tempfile::TempDir` that is dropped before finish_folder
+    // returns. With TMPDIR redirected into `tmp_root`, that means nothing
+    // should remain in it once all three calls above have returned.
+    let leftovers: Vec<_> = std::fs::read_dir(tmp_root.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp scratch directories were left behind: {leftovers:?}"
     );
 }

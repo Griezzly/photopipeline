@@ -193,7 +193,9 @@ fn finish_one(
     // in RawTherapee. Never beside the original raw. Copy it before `rendered`
     // is dropped, since the drop removes the scratch directory.
     let pp3_dest = dest.with_extension("pp3");
-    let _ = std::fs::copy(&rendered.pp3, &pp3_dest);
+    if let Err(e) = std::fs::copy(&rendered.pp3, &pp3_dest) {
+        tracing::warn!(path = %pp3_dest.display(), error = %e, "could not write the .pp3 escape hatch");
+    }
 
     // Dropping `rendered` removes its scratch directory, which is what deletes
     // the 16-bit TIFF — roughly 145 MB for a 24 MP frame, and the largest thing

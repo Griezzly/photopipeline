@@ -143,3 +143,22 @@ fn read_only_commands_resolve_library() {
     let v: serde_json::Value = serde_json::from_slice(&info.stdout).expect("info JSON");
     assert_eq!(v["file"]["path"], img.to_string_lossy().as_ref());
 }
+
+#[test]
+fn finish_requires_an_analyzed_library() {
+    let t = tempfile::TempDir::new().unwrap();
+    let cfg = write_config(t.path());
+    let appdata = t.path().join("app");
+    let dir = tempfile::TempDir::new().unwrap();
+
+    let out = run_pp(&appdata, &cfg, &["finish", dir.path().to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "finish on an unscanned folder should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("scan") || stderr.contains("library"),
+        "the error should tell the user to scan first: {stderr}"
+    );
+}

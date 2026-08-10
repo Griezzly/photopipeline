@@ -172,6 +172,20 @@ enum Command {
         #[arg(long)]
         regenerate: bool,
     },
+
+    /// Develop every kept photo into finished JPEGs.
+    ///
+    /// Reads `decisions.verdict = 'keep'`, applies analytic technical
+    /// corrections through RawTherapee, and writes a tree of JPEGs. Runs
+    /// entirely without per-photo input. Requires `rawtherapee-cli` — check
+    /// `photopipe doctor` first.
+    Finish {
+        /// Folder whose library to develop.
+        folder: PathBuf,
+        /// Destination directory. Overrides `[develop] finished_dir`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -212,6 +226,7 @@ fn main() -> Result<()> {
             output,
             regenerate,
         } => cmd_export_keepers(&folder, output, regenerate, &cfg, &roots),
+        Command::Finish { folder, out } => cmd_finish(&folder, out, &cfg, &roots),
     }
 }
 
@@ -404,6 +419,53 @@ fn cmd_export_keepers(
         out.display()
     );
     Ok(())
+}
+
+fn cmd_finish(
+    folder: &std::path::Path,
+    out: Option<PathBuf>,
+    cfg: &config::Config,
+    roots: &LibraryRoots,
+) -> Result<()> {
+    let lib = require_library(roots, folder)?;
+
+    // The CLI argument wins, so a one-off export never needs a config edit.
+    let out_dir = match out {
+        Some(p) => config::expand_tilde(&p),
+        None => config::expand_tilde(&PathBuf::from(
+            cfg.develop
+                .finished_dir
+                .replace("<library>", &lib.folder.to_string_lossy()),
+        )),
+    };
+
+    println!("Developing keepers → {} …", out_dir.display());
+
+    let report = pipeline::finish_folder(&lib.catalog, &cfg.develop, &out_dir, &CliProgress)?;
+
+    println!(
+        "Finished {} photos, {} already current, {} failed → {}",
+        report.rendered,
+        report.skipped,
+        report.errored,
+        out_dir.display()
+    );
+    if report.errored > 0 {
+        println!("Re-run with --log-level debug to see why individual files failed.");
+    }
+    Ok(())
+}
+
+/// Terminal progress sink. A future Develop screen in `serve` passes the
+/// server's job sink to the same `finish_folder` signature instead.
+struct CliProgress;
+
+impl pipeline::ProgressSink for CliProgress {
+    fn stage(&self, stage: &str) {
+        tracing::info!(stage, "finish");
+    }
+    fn set_total(&self, _total: u64) {}
+    fn inc(&self) {}
 }
 
 fn cmd_info(file: PathBuf, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
