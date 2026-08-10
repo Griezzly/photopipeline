@@ -2903,7 +2903,7 @@ impl Catalog {
                  sharpen_amount, lens_correct, recipe_hash, decider_version,
                  renderer, look_model, look_version, lut_hash, look_applied,
                  iqa_before, iqa_after, output_path, output_size_bytes, rendered_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT (file_id) DO UPDATE SET
                  content_hash = excluded.content_hash,
                  exposure_ev = excluded.exposure_ev,
