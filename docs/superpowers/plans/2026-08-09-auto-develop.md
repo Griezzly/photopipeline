@@ -3388,19 +3388,19 @@ fn now_secs() -> i64 {
 }
 ```
 
-- [ ] **Step 5: Add `tempfile` as a real dependency of `pipeline`**
+- [ ] **Step 5: Confirm `tempfile` is a real dependency of `pipeline`**
 
-`finish_folder` uses `tempfile::TempDir` at runtime, not just in tests. Move it
-out of `[dev-dependencies]` in `crates/pipeline/Cargo.toml`:
+`finish_folder` uses `tempfile::TempDir` at runtime, not just in tests. **Task 9
+already moved it** from `[dev-dependencies]` to `[dependencies]`, because
+`Pp3Renderer::render` needs it for its per-call scratch directory. Verify and
+move on:
 
-```toml
-[dependencies]
-# … existing entries …
-tempfile     = { workspace = true }
+```bash
+grep -n -A20 '^\[dependencies\]' crates/pipeline/Cargo.toml | grep tempfile
 ```
 
-Leave the `[dev-dependencies]` entry in place or remove it — Cargo accepts
-either, and a duplicate is harmless.
+Expected: a line is printed. If not, add `tempfile = { workspace = true }` under
+`[dependencies]`.
 
 - [ ] **Step 6: Re-export from `lib.rs`**
 
