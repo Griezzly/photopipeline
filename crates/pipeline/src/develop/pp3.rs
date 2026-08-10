@@ -169,6 +169,10 @@ mod tests {
             out.contains("Chroma=36"),
             "denoise_chroma 0.36 should emit 36:\n{out}"
         );
+        assert!(
+            out.contains("Highlights=0"),
+            "Shadows & Highlights must always pin Highlights=0:\n{out}"
+        );
     }
 
     /// The silent no-op traps from docs/design/pp3-keys.md. Each of these
@@ -199,6 +203,10 @@ mod tests {
         assert!(
             out.contains("CMethod=MAN"),
             "Chroma would be ignored:\n{out}"
+        );
+        assert!(
+            out.contains("Method=Lab"),
+            "Chroma requires Method=Lab AND CMethod=MAN:\n{out}"
         );
     }
 
