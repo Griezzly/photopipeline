@@ -5,6 +5,7 @@
 //! and `pp3` translate a decision into RawTherapee's vocabulary. Keeping those
 //! separate is what makes the tuning logic testable over plain numbers.
 
+pub mod decide;
 pub mod measure;
 
 use thiserror::Error;
