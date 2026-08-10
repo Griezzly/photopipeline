@@ -17,6 +17,7 @@ pub use analyze::{analyze_folder, count_pending, AnalyzeReport, ProgressSink};
 pub use calibration::{run_calibration, CalibrationReport};
 pub use dedupe::{run_dedupe, DedupeReport};
 pub use defect::analyze_defects;
+pub use develop::{finish_folder, is_up_to_date, FinishReport};
 pub use ingest::ingest_directory;
 pub use ingest::preview::{downscale_webp, render_webp};
 pub use library::{

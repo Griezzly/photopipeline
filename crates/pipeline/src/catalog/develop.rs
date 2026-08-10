@@ -10,6 +10,7 @@ use super::Catalog;
 use crate::develop::decide::EditRecipe;
 use crate::develop::measure::RawStats;
 use crate::error::CatalogError;
+use crate::ingest::exif::ExifData;
 
 /// One photo the user kept, with everything `finish` needs to place its output.
 #[derive(Debug, Clone)]
@@ -128,6 +129,40 @@ impl Catalog {
             },
         );
         optional_row(row)
+    }
+
+    /// EXIF plus global sharpness for one file — the two non-raw inputs to
+    /// `decide()`. Missing rows are not an error: `decide()` has a defined
+    /// answer for absent ISO and absent sharpness.
+    pub fn develop_inputs(&self, file_id: i64) -> Result<(ExifData, f32), CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let row = conn.query_row(
+            "SELECT e.iso, e.lens_model, e.camera_model, s.s_global
+             FROM files f
+             LEFT JOIN exif e ON e.file_id = f.id
+             LEFT JOIN sharpness s ON s.file_id = f.id
+             WHERE f.id = ?",
+            duckdb::params![file_id],
+            |r| {
+                let iso: Option<i32> = r.get(0)?;
+                let lens_model: Option<String> = r.get(1)?;
+                let camera_model: Option<String> = r.get(2)?;
+                let s_global: Option<f32> = r.get(3)?;
+                Ok((
+                    ExifData {
+                        iso: iso.map(|v| v as u32),
+                        lens_model,
+                        camera_model,
+                        ..Default::default()
+                    },
+                    s_global.unwrap_or(0.5),
+                ))
+            },
+        );
+        Ok(optional_row(row)?.unwrap_or((ExifData::default(), 0.5)))
     }
 }
 

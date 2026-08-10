@@ -1,8 +1,11 @@
 use pipeline::catalog::{Catalog, EditIdentity, EditRow};
+use pipeline::config::DevelopConfig;
 use pipeline::develop::decide::{EditRecipe, DECIDER_VERSION};
 use pipeline::develop::is_up_to_date;
 use pipeline::develop::measure::RawStats;
 use pipeline::develop::render::Pp3Renderer;
+use pipeline::develop::{finish_folder, FinishReport};
+use pipeline::ProgressSink;
 
 fn temp_catalog() -> (tempfile::TempDir, Catalog) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -556,4 +559,179 @@ fn missing_or_resized_output_forces_a_rerender() {
 
     // Never rendered before: no recorded path at all.
     assert!(!is_up_to_date(&identity("r1"), &identity("r1"), None, None));
+}
+
+// ── finish_folder orchestration ──
+
+/// A sink that records what it was told, so stage order is assertable.
+#[derive(Default)]
+struct RecordingSink {
+    stages: std::sync::Mutex<Vec<String>>,
+}
+
+impl ProgressSink for RecordingSink {
+    fn stage(&self, stage: &str) {
+        self.stages.lock().unwrap().push(stage.to_string());
+    }
+    fn set_total(&self, _total: u64) {}
+    fn inc(&self) {}
+}
+
+#[test]
+fn empty_work_list_renders_nothing_and_still_reports_done() {
+    let (_dir, cat) = temp_catalog();
+    let out = tempfile::TempDir::new().unwrap();
+    let sink = RecordingSink::default();
+    let report: FinishReport =
+        finish_folder(&cat, &DevelopConfig::default(), out.path(), &sink).unwrap();
+    assert_eq!(report.rendered, 0);
+    assert_eq!(report.errored, 0);
+    let stages = sink.stages.lock().unwrap().clone();
+    assert_eq!(stages.last().map(String::as_str), Some("done"));
+}
+
+/// A missing renderer must fail the run up front with one clear error, not
+/// produce one warning per photo deep into a long run.
+#[test]
+fn missing_renderer_fails_before_any_work() {
+    let (_dir, cat) = temp_catalog();
+    seed_file(&cat, "/tmp/a.arw", "keep");
+    let out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: "/nonexistent/rawtherapee-cli".into(),
+        ..Default::default()
+    };
+    let err = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default())
+        .expect_err("a missing renderer should abort the run");
+    assert!(
+        err.to_string().contains("rawtherapee"),
+        "error should name the missing dependency: {err}"
+    );
+}
+
+/// Builds a stand-in `rawtherapee-cli` for tests that need `Pp3Renderer::probe()`
+/// to succeed but do not need a real render. `probe()` authenticates on the
+/// `RawTherapee` version banner (see Task 9), so a plain stub like `/usr/bin/true`
+/// cannot get past it — this script prints one.
+///
+/// For anything other than `--version` it parses out `-o <dir>` and `-c <input>`
+/// and drops a few-byte stub at `<dir>/<input-stem>.tif`. That stub is enough to
+/// satisfy `Pp3Renderer::render`'s own "did the file appear" check, but it is
+/// deliberately NOT a decodable TIFF — a real render is what Task 12's gated
+/// end-to-end test is for.
+///
+/// Returns the owning `TempDir` (keep it alive for as long as the script path is
+/// used) and the script path itself.
+#[cfg(unix)]
+fn fake_rawtherapee() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let script = dir.path().join("rawtherapee-cli");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "RawTherapee, version 5.13 (fake)"
+    exit 0
+fi
+
+outdir=""
+input=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o)
+            outdir="$2"
+            shift 2
+            ;;
+        -c)
+            input="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+stem=$(basename "$input")
+stem="${stem%.*}"
+printf 'fake tiff\n' > "$outdir/$stem.tif"
+exit 0
+"#,
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+    (dir, script)
+}
+
+/// One unreadable raw must not abort the run, and must leave no edits row —
+/// a half-recorded render would make the next run believe it succeeded.
+///
+/// Uses the fake `rawtherapee-cli` above so this runs on a bare machine: the
+/// only thing that needs a real RawTherapee elsewhere is `probe()`'s version
+/// banner check, which the fake satisfies. The failure this test is actually
+/// about happens earlier, in `measure_raw` on a nonexistent RAW, so the fake
+/// renderer is never even reached.
+#[cfg(unix)]
+#[test]
+fn unreadable_raw_is_skipped_without_an_edits_row() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/definitely-missing.arw", "keep");
+    let out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    assert_eq!(report.errored, 1);
+    assert_eq!(report.rendered, 0);
+    assert!(
+        cat.edit_identity(id).unwrap().is_none(),
+        "no row on failure"
+    );
+}
+
+/// Exercises the fake renderer against a real, decodable RAW (one of the
+/// checked-in `example-pictures/`, never a fabricated fixture) so `measure_raw`
+/// and `decide` genuinely run. The fake's stub `.tif` is not a decodable image,
+/// so the JPEG-encode step fails after the (fake) render — a real happy-path
+/// render can only be produced by real RawTherapee. That means this test
+/// cannot demonstrate "second run renders nothing" the way the gated
+/// end-to-end test can: with no successful render, there is no recorded edit
+/// for a second run to find as up to date, so a second run repeats the same
+/// work rather than skipping it. What this test does prove: the renderer ran
+/// (via the fake), the failure isolation extends past the render call into
+/// encoding, and no half-recorded `edits` row is left behind — the same
+/// invariant `unreadable_raw_is_skipped_without_an_edits_row` checks, but with
+/// the renderer actually invoked rather than never reached.
+#[cfg(unix)]
+#[test]
+fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
+    let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../example-pictures/DSC03073.ARW");
+    assert!(raw.exists(), "fixture missing: {}", raw.display());
+
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, raw.to_str().unwrap(), "keep");
+    let out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    assert_eq!(
+        report.errored, 1,
+        "the stub .tif is not a decodable image, so encode must fail"
+    );
+    assert_eq!(report.rendered, 0);
+    assert!(
+        cat.edit_identity(id).unwrap().is_none(),
+        "a failed encode must leave no edits row"
+    );
 }
