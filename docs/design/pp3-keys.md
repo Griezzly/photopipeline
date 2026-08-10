@@ -32,8 +32,7 @@ this table.
 | `highlight_recovery` (on/off) | `[HLRecovery]` | `Enabled` | bool, default `false` | ☑ |
 | `highlight_recovery` (method) | `[HLRecovery]` | `Method` | `Blend` \| `Coloropp` \| … , default `Coloropp` | ☑ |
 | `shadow_lift` | `[Shadows & Highlights]` | `Enabled`, `Shadows` | bool, 0–100 | ☑ |
-| `wb_temp_k` | `[White Balance]` | `Temperature` | K, default `6504` | ☑ |
-| `wb_green` | `[White Balance]` | `Green` | float, default `1` | ☑ |
+| white balance | `[White Balance]` | `Setting` = `Camera` | — applies the camera's own as-shot coefficients | ☑ |
 | `denoise_luma` | `[Directional Pyramid Denoising]` | `Enabled`, `Luma` | bool, 0–100 | ☑ |
 | `denoise_chroma` | same | `Chroma` | 0–100, default `15` | ☑ |
 | `sharpen_amount` | `[PostDemosaicSharpening]` | `Enabled`, `Contrast` | bool, 0–100 | ☑ |
@@ -49,12 +48,31 @@ the render simply comes out as if we had never asked.
 
 | Trap | Default | What it breaks | Fix |
 |---|---|---|---|
-| `[White Balance] Setting` | `Camera` | `Temperature` and `Green` are ignored — the camera's own WB is used | emit `Setting=Custom` |
+| `[White Balance] Setting` | `Camera` | `Temperature` and `Green` are ignored under `Camera` — they apply only under `Custom` | **v1 wants `Camera`**, so emit it explicitly rather than relying on the default (see the note below) |
 | `[White Balance] Enabled` | `true` | — (already correct, but must not be flipped off) | emit `Enabled=true` |
 | `[PostDemosaicSharpening] AutoContrast` | `true` | `Contrast` is ignored; RawTherapee picks its own | emit `AutoContrast=false` |
 | `[PostDemosaicSharpening] AutoRadius` | `true` | `DeconvRadius` is ignored | emit `AutoRadius=false` |
 | `[Directional Pyramid Denoising] CMethod` | `MAN` on a neutral profile, but `AUT` in several bundled profiles | under `AUT`, `Chroma` is ignored | emit `CMethod=MAN` explicitly |
 | `[Directional Pyramid Denoising] Method` | `Lab` | under `Lab`, chroma is split into `Redchro`/`Bluechro`; a single `Chroma` slider is the `Lab`+`MAN` combination | emit `Method=Lab` and `CMethod=MAN` |
+
+## Why v1 uses `Setting=Camera`
+
+An earlier revision converted the as-shot coefficients into `Temperature`/`Green`
+and emitted `Setting=Custom`. That conversion was wrong in two independent ways:
+
+- **Temperature was inverted.** `5000 · (b/r)^0.85` maps warm light to a high
+  kelvin value — tungsten coefficients gave 8214 K, daylight 3713 K, shade
+  5838 K. A high `b/r` means the camera is boosting blue hard, which happens
+  under *warm* low-kelvin light; the relationship ran backwards.
+- **`Green` was systematically offset.** `g / √(r·b)` with camera coefficients,
+  which normalise `g` to 1.0 while `r` and `b` both exceed 1.0, always lands near
+  0.5 against the 1.0 neutral — a magenta cast on every frame.
+
+RawTherapee derives its own multipliers from the camera profile, so asking it for
+the camera's white balance is exact, where restating that white balance in a
+foreign parameterisation was not. The PCA illuminant estimate is still measured
+and persisted in `raw_stats`; acting on it needs a conversion that can be
+validated against reference values, and is deferred to its own spec.
 
 ## Ranges and units
 
