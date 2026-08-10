@@ -2493,6 +2493,12 @@ use crate::develop::DevelopError;
 pub const RENDERER_NAME: &str = "rawtherapee";
 
 /// A completed baseline render.
+///
+/// Owns a private scratch directory. Every render gets its own, so two photos
+/// that happen to share a filename stem cannot overwrite each other's
+/// intermediates — a real hazard because the orchestrator hands the same parent
+/// temp directory to every call. The directory is removed when this struct is
+/// dropped, which is also what deletes the very large TIFF.
 pub struct RenderedTiff {
     /// 16-bit sRGB TIFF in the temp directory. Large — delete it as soon as the
     /// JPEG is encoded (a 60MP raw is roughly 350 MB here).
@@ -2500,6 +2506,9 @@ pub struct RenderedTiff {
     /// The per-photo profile, kept so it can be copied next to the output JPEG
     /// as an escape hatch for reopening the photo in RawTherapee.
     pub pp3: PathBuf,
+    /// Held for its `Drop`: removes the scratch directory and everything in it.
+    /// Never read directly.
+    _scratch: tempfile::TempDir,
 }
 
 pub struct Pp3Renderer {
@@ -2550,11 +2559,20 @@ impl Pp3Renderer {
         })
     }
 
-    /// Render `raw` through `recipe` into `tmp_dir`.
+    /// Render `raw` through `recipe`, using a fresh scratch directory created
+    /// inside `tmp_dir`.
     ///
-    /// Writes both profiles into `tmp_dir` — never beside the original, which
-    /// would violate the non-destructive contract. RawTherapee's own convention
-    /// is to write `photo.raw.pp3` next to the source; we deliberately do not.
+    /// Writes both profiles into that scratch directory — never beside the
+    /// original, which would violate the non-destructive contract. RawTherapee's
+    /// own convention is to write `photo.raw.pp3` next to the source; we
+    /// deliberately do not.
+    ///
+    /// The per-call scratch directory matters: output names are derived from the
+    /// input's filename stem, and the orchestrator passes one shared `tmp_dir`
+    /// for the whole run, so two photos with the same stem — different folders,
+    /// or two unnamed inputs both falling back to `"photo"` — would otherwise
+    /// silently overwrite each other's TIFF and profile. The second would then
+    /// look like it had rendered successfully against the wrong recipe.
     pub fn render(
         &self,
         raw: &Path,
@@ -2567,12 +2585,20 @@ impl Pp3Renderer {
             .unwrap_or("photo")
             .to_string();
 
-        let base_path = tmp_dir.join("base.pp3");
-        let photo_path = tmp_dir.join(format!("{stem}.pp3"));
+        // A fresh directory per render, so stem collisions are impossible by
+        // construction rather than by convention.
+        let scratch = tempfile::TempDir::new_in(tmp_dir).map_err(|source| DevelopError::Io {
+            path: tmp_dir.to_path_buf(),
+            source,
+        })?;
+        let scratch_dir = scratch.path().to_path_buf();
+
+        let base_path = scratch_dir.join("base.pp3");
+        let photo_path = scratch_dir.join(format!("{stem}.pp3"));
         write_file(&base_path, BASE_PP3)?;
         write_file(&photo_path, &emit_pp3(recipe))?;
 
-        let args = build_args(&base_path, &photo_path, tmp_dir, raw);
+        let args = build_args(&base_path, &photo_path, &scratch_dir, raw);
         let out = Command::new(&self.exe)
             .args(&args)
             .output()
@@ -2593,7 +2619,7 @@ impl Pp3Renderer {
         }
 
         // RawTherapee derives the output name from the input stem.
-        let tiff = tmp_dir.join(format!("{stem}.tif"));
+        let tiff = scratch_dir.join(format!("{stem}.tif"));
         if !tiff.exists() {
             return Err(DevelopError::Render {
                 path: raw.to_path_buf(),
@@ -2603,6 +2629,7 @@ impl Pp3Renderer {
         Ok(RenderedTiff {
             tiff,
             pp3: photo_path,
+            _scratch: scratch,
         })
     }
 }
@@ -3291,13 +3318,17 @@ fn finish_one(
         .with_context(|| format!("cannot read rendered TIFF {}", rendered.tiff.display()))?;
     encode_jpeg(&img, &dest, cfg.jpeg_quality)?;
 
-    // Delete the TIFF immediately — it is the largest thing in the pipeline.
-    let _ = std::fs::remove_file(&rendered.tiff);
-
     // The .pp3 sits beside the JPEG as an escape hatch for reopening the photo
-    // in RawTherapee. Never beside the original raw.
+    // in RawTherapee. Never beside the original raw. Copy it before `rendered`
+    // is dropped, since the drop removes the scratch directory.
     let pp3_dest = dest.with_extension("pp3");
     let _ = std::fs::copy(&rendered.pp3, &pp3_dest);
+
+    // Dropping `rendered` removes its scratch directory, which is what deletes
+    // the 16-bit TIFF — roughly 145 MB for a 24 MP frame, and the largest thing
+    // in the pipeline. Explicit rather than incidental, so peak disk stays at
+    // about one TIFF regardless of how many photos the run processes.
+    drop(rendered);
 
     let size = std::fs::metadata(&dest).map(|m| m.len() as i64).ok();
     catalog.upsert_edit(&EditRow {
