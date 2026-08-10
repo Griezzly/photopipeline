@@ -432,10 +432,9 @@ fn cmd_finish(
     // The CLI argument wins, so a one-off export never needs a config edit.
     let out_dir = match out {
         Some(p) => config::expand_tilde(&p),
-        None => config::expand_tilde(&PathBuf::from(
-            cfg.develop
-                .finished_dir
-                .replace("<library>", &lib.folder.to_string_lossy()),
+        None => config::expand_tilde(&pipeline::substitute_library(
+            &cfg.develop.finished_dir,
+            &lib.folder,
         )),
     };
 

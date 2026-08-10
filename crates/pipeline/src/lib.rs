@@ -27,5 +27,5 @@ pub use library::{
 pub use ml::analyze_ml;
 pub use output::{
     build_keepers_tree, build_review_tree, estimate_keepers_copy, estimate_review_copy,
-    humanize_bytes, CopyEstimate, KeepersReport, ReviewTreeReport,
+    humanize_bytes, substitute_library, CopyEstimate, KeepersReport, ReviewTreeReport,
 };

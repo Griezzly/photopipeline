@@ -45,12 +45,12 @@ scan ──> calibrate ──> dedupe ──> serve / review-tree ──> export
 - **`export-keepers`** — build a `keepers/YYYY-MM/` tree of copies of everything
   you kept, ready to hand to Lightroom / Capture One / a backup.
 - **`finish`** — develop everything you kept into finished JPEGs, automatically.
-  Reads the raw sensor data to decide exposure, white balance, highlight
-  recovery, shadow lift, denoise and sharpening per photo, renders through
-  RawTherapee, and writes a `_finished/YYYY-MM/` tree. Requires
-  `rawtherapee-cli` on your machine — run `photopipe doctor` to check. Each JPEG
-  gets a `.pp3` beside it so you can reopen the photo in RawTherapee and take
-  over by hand.
+  Reads the raw sensor data to decide exposure, highlight recovery, shadow
+  lift, denoise and sharpening per photo (the camera's own as-shot white
+  balance is passed through unchanged), renders through RawTherapee, and
+  writes a `_finished/YYYY-MM/` tree. Requires `rawtherapee-cli` on your
+  machine — run `photopipe doctor` to check. Each JPEG gets a `.pp3` beside it
+  so you can reopen the photo in RawTherapee and take over by hand.
 
   `finish` and `export-keepers` are independent: one gives you finished JPEGs,
   the other hands the untouched RAWs to Lightroom or a backup. Neither requires

@@ -9,8 +9,7 @@ use crate::catalog::{ReviewEntry, ReviewGroup};
 const CONFIDENCE_THRESHOLD: f32 = 0.6;
 
 /// Replace a literal `<library>` token in `template` with `scan_root`.
-#[allow(dead_code)]
-pub(crate) fn substitute_library(template: &str, scan_root: &Path) -> PathBuf {
+pub fn substitute_library(template: &str, scan_root: &Path) -> PathBuf {
     PathBuf::from(template.replace("<library>", &scan_root.to_string_lossy()))
 }
 
@@ -541,6 +540,18 @@ mod tests {
     use crate::catalog::{ReviewEntry, ReviewGroup};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn substitute_library_replaces_the_token_with_the_scan_root() {
+        let got = substitute_library("<library>/_finished", Path::new("/photos/2024"));
+        assert_eq!(got, PathBuf::from("/photos/2024/_finished"));
+    }
+
+    #[test]
+    fn substitute_library_leaves_a_template_without_the_token_untouched() {
+        let got = substitute_library("/absolute/out", Path::new("/photos/2024"));
+        assert_eq!(got, PathBuf::from("/absolute/out"));
+    }
 
     #[test]
     fn remove_managed_tree_refuses_unmarked_dir() {
