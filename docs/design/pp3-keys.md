@@ -32,6 +32,7 @@ this table.
 | `highlight_recovery` (on/off) | `[HLRecovery]` | `Enabled` | bool, default `false` | ☑ |
 | `highlight_recovery` (method) | `[HLRecovery]` | `Method` | `Blend` \| `Coloropp` \| … , default `Coloropp` | ☑ |
 | `shadow_lift` | `[Shadows & Highlights]` | `Enabled`, `Shadows` | bool, 0–100 | ☑ |
+| — | `[Shadows & Highlights]` | `Highlights` | 0–100, default `0` — pinned to `0` so lifting shadows never also pulls highlights | ☑ |
 | white balance | `[White Balance]` | `Setting` = `Camera` | — applies the camera's own as-shot coefficients | ☑ |
 | `denoise_luma` | `[Directional Pyramid Denoising]` | `Enabled`, `Luma` | bool, 0–100 | ☑ |
 | `denoise_chroma` | same | `Chroma` | 0–100, default `15` | ☑ |
