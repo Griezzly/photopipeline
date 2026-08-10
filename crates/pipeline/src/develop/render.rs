@@ -17,6 +17,14 @@ use crate::develop::DevelopError;
 pub const RENDERER_NAME: &str = "rawtherapee";
 
 /// A completed baseline render.
+///
+/// Owns a private scratch directory. Every render gets its own, so two photos
+/// that happen to share a filename stem cannot overwrite each other's
+/// intermediates — a real hazard because the orchestrator hands the same parent
+/// temp directory to every call. The directory is removed when this struct is
+/// dropped, which is also what deletes the very large TIFF. Any caller that
+/// wants to keep the `.pp3` (e.g. copying it next to the finished JPEG) must do
+/// so before this struct is dropped, since the copy source disappears with it.
 pub struct RenderedTiff {
     /// 16-bit sRGB TIFF in the temp directory. Large — delete it as soon as the
     /// JPEG is encoded (a 60MP raw is roughly 350 MB here).
@@ -24,6 +32,9 @@ pub struct RenderedTiff {
     /// The per-photo profile, kept so it can be copied next to the output JPEG
     /// as an escape hatch for reopening the photo in RawTherapee.
     pub pp3: PathBuf,
+    /// Held for its `Drop`: removes the scratch directory and everything in it.
+    /// Never read directly.
+    _scratch: tempfile::TempDir,
 }
 
 pub struct Pp3Renderer {
@@ -81,11 +92,20 @@ impl Pp3Renderer {
         })
     }
 
-    /// Render `raw` through `recipe` into `tmp_dir`.
+    /// Render `raw` through `recipe`, using a fresh scratch directory created
+    /// inside `tmp_dir`.
     ///
-    /// Writes both profiles into `tmp_dir` — never beside the original, which
-    /// would violate the non-destructive contract. RawTherapee's own convention
-    /// is to write `photo.raw.pp3` next to the source; we deliberately do not.
+    /// Writes both profiles into that scratch directory — never beside the
+    /// original, which would violate the non-destructive contract. RawTherapee's
+    /// own convention is to write `photo.raw.pp3` next to the source; we
+    /// deliberately do not.
+    ///
+    /// The per-call scratch directory matters: output names are derived from the
+    /// input's filename stem, and the orchestrator passes one shared `tmp_dir`
+    /// for the whole run, so two photos with the same stem — different folders,
+    /// or two unnamed inputs both falling back to `"photo"` — would otherwise
+    /// silently overwrite each other's TIFF and profile. The second would then
+    /// look like it had rendered successfully against the wrong recipe.
     pub fn render(
         &self,
         raw: &Path,
@@ -98,12 +118,20 @@ impl Pp3Renderer {
             .unwrap_or("photo")
             .to_string();
 
-        let base_path = tmp_dir.join("base.pp3");
-        let photo_path = tmp_dir.join(format!("{stem}.pp3"));
+        // A fresh directory per render, so stem collisions are impossible by
+        // construction rather than by convention.
+        let scratch = tempfile::TempDir::new_in(tmp_dir).map_err(|source| DevelopError::Io {
+            path: tmp_dir.to_path_buf(),
+            source,
+        })?;
+        let scratch_dir = scratch.path().to_path_buf();
+
+        let base_path = scratch_dir.join("base.pp3");
+        let photo_path = scratch_dir.join(format!("{stem}.pp3"));
         write_file(&base_path, BASE_PP3)?;
         write_file(&photo_path, &emit_pp3(recipe))?;
 
-        let args = build_args(&base_path, &photo_path, tmp_dir, raw);
+        let args = build_args(&base_path, &photo_path, &scratch_dir, raw);
         let out =
             Command::new(&self.exe)
                 .args(&args)
@@ -125,7 +153,7 @@ impl Pp3Renderer {
         }
 
         // RawTherapee derives the output name from the input stem.
-        let tiff = tmp_dir.join(format!("{stem}.tif"));
+        let tiff = scratch_dir.join(format!("{stem}.tif"));
         if !tiff.exists() {
             return Err(DevelopError::Render {
                 path: raw.to_path_buf(),
@@ -135,6 +163,7 @@ impl Pp3Renderer {
         Ok(RenderedTiff {
             tiff,
             pp3: photo_path,
+            _scratch: scratch,
         })
     }
 }
@@ -246,5 +275,35 @@ mod tests {
         let exe = if cfg!(windows) { "cmd" } else { "true" };
         let r = Pp3Renderer::new(&cfg_with(exe));
         assert!(r.probe().is_err(), "`{exe}` must not pass as RawTherapee");
+    }
+
+    /// This is the property that makes stem collisions impossible: `render()`
+    /// derives every output name from `raw`'s filename stem, and the
+    /// orchestrator (Task 11) hands one shared parent `tmp_dir` to every call,
+    /// so two inputs with the same stem — different source folders, or both
+    /// falling back to `"photo"` — would silently overwrite each other's TIFF
+    /// and profile unless each render gets its own directory. This cannot be
+    /// exercised through `render()` itself without RawTherapee installed, so
+    /// it is checked directly against the primitive `render()` relies on:
+    /// `tempfile::TempDir::new_in` of the same parent always yields distinct
+    /// directories, even when the caller-visible name (the stem, derived
+    /// separately) is identical.
+    #[test]
+    fn scratch_dirs_in_the_same_parent_never_collide() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let a = tempfile::TempDir::new_in(parent.path()).unwrap();
+        let b = tempfile::TempDir::new_in(parent.path()).unwrap();
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two scratch dirs in the same parent must never collide"
+        );
+
+        // The same filename stem inside two distinct scratch dirs necessarily
+        // produces two distinct full paths — this is the mechanism `render()`
+        // depends on to keep same-stem inputs from overwriting each other.
+        let tiff_a = a.path().join("same-stem.tif");
+        let tiff_b = b.path().join("same-stem.tif");
+        assert_ne!(tiff_a, tiff_b, "same stem must not imply same output path");
     }
 }

@@ -214,4 +214,25 @@ fn real_renderer_produces_a_tiff_and_touches_nothing_beside_the_source() {
         before, after,
         "rendering must never write anything beside the original RAW"
     );
+
+    // Render the SAME raw a second time into the SAME parent tmp_dir — the
+    // exact shape of the stem-collision hazard the fix guards against: the
+    // orchestrator hands one shared temp directory to every call, and both
+    // renders here derive their output names from the identical filename
+    // stem. If render() wrote directly into tmp_dir rather than a private
+    // scratch subdirectory, the second render would silently overwrite the
+    // first's TIFF and profile. Asserting the two paths differ, and that both
+    // existed at once, proves the scratch-directory fix is load-bearing.
+    let rendered2 = renderer
+        .render(&raw, &recipe, tmp.path())
+        .expect("second render should succeed");
+    assert_ne!(
+        rendered.tiff, rendered2.tiff,
+        "two renders of the same stem into the same tmp_dir must not collide"
+    );
+    assert!(
+        rendered.tiff.exists(),
+        "first render's TIFF must still exist after the second render completes"
+    );
+    assert!(rendered2.tiff.exists(), "second render's TIFF must exist");
 }
