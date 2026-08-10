@@ -695,25 +695,33 @@ fn unreadable_raw_is_skipped_without_an_edits_row() {
     );
 }
 
-/// Exercises the fake renderer against a real, decodable RAW (one of the
-/// checked-in `example-pictures/`, never a fabricated fixture) so `measure_raw`
-/// and `decide` genuinely run. The fake's stub `.tif` is not a decodable image,
-/// so the JPEG-encode step fails after the (fake) render — a real happy-path
-/// render can only be produced by real RawTherapee. That means this test
-/// cannot demonstrate "second run renders nothing" the way the gated
-/// end-to-end test can: with no successful render, there is no recorded edit
-/// for a second run to find as up to date, so a second run repeats the same
-/// work rather than skipping it. What this test does prove: the renderer ran
-/// (via the fake), the failure isolation extends past the render call into
-/// encoding, and no half-recorded `edits` row is left behind — the same
-/// invariant `unreadable_raw_is_skipped_without_an_edits_row` checks, but with
-/// the renderer actually invoked rather than never reached.
+/// Exercises the fake renderer against a real, decodable RAW so `measure_raw`
+/// and `decide` genuinely run. The fixture is local, gitignored sample data
+/// (`example-pictures/` is never checked into git — see `.gitignore`), never a
+/// fabricated one; this test skips cleanly when it is absent, e.g. on a fresh
+/// clone or in CI. The fake's stub `.tif` is not a decodable image, so the
+/// JPEG-encode step fails after the (fake) render — a real happy-path render
+/// can only be produced by real RawTherapee. That means this test cannot
+/// demonstrate "second run renders nothing" the way the gated end-to-end test
+/// can: with no successful render, there is no recorded edit for a second run
+/// to find as up to date, so a second run repeats the same work rather than
+/// skipping it. What this test does prove: the renderer ran (via the fake),
+/// the failure isolation extends past the render call into encoding, and no
+/// half-recorded `edits` row is left behind — the same invariant
+/// `unreadable_raw_is_skipped_without_an_edits_row` checks, but with the
+/// renderer actually invoked rather than never reached.
 #[cfg(unix)]
 #[test]
 fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
     let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../example-pictures/DSC03073.ARW");
-    assert!(raw.exists(), "fixture missing: {}", raw.display());
+    if !raw.exists() {
+        eprintln!(
+            "skipping: {} not present (example-pictures/ is gitignored local sample data)",
+            raw.display()
+        );
+        return;
+    }
 
     let (_rt_dir, rt) = fake_rawtherapee();
     let (_dir, cat) = temp_catalog();
