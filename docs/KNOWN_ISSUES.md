@@ -3,7 +3,7 @@
 Findings that are real, reproduced, and deliberately **not** fixed in the change
 that surfaced them. Each says why it was left, and what fixing it involves.
 
-Last updated: 2026-08-10. The **Open** section below was filled by the automatic
+Last updated: 2026-08-11. The **Open** section below was filled by the automatic
 RAW development work (`docs/superpowers/specs/2026-07-29-auto-develop-design.md`,
 Phase 1). Everything the review-UI redesign left behind was fixed on
 `fix/known-issues` and is recorded further down.
@@ -17,29 +17,6 @@ reproduced, none is a regression of existing behaviour, and each was left becaus
 it sits outside that phase's scope.
 
 ### Affects photos, not just internals
-
-**KI-1 — `rawler` cannot extract previews from Sony A6300 (ILCE-6300) ARW files.**
-
-`rawler` 0.7.2 returns `None` from **both** `preview_image()` and
-`thumbnail_image()` for these files, so ingest logs "no preview or thumbnail
-available", writes nothing to the preview cache, and still reports the file as
-`Processed`, `Errored: 0`. The previews exist: a byte scan of `DSC03073.ARW`
-finds two embedded JPEGs, ~9 KB at offset 38842 and ~674 KB at offset 144546.
-
-Everything downstream of the preview silently does nothing for these files:
-review-UI thumbnails, blur and back-focus detection, exposure flags, CLIP-IQA
-scoring, DINOv2 embeddings, and therefore duplicate detection. EXIF extraction
-works, so the catalog looks populated at a glance — `sharpness`, `exposure` and
-`iqa` are simply null.
-
-`finish` is unaffected for correctness, because `measure_raw` reads the raw
-sensor plane rather than the embedded preview. But with `sharpness` empty,
-`decide()` falls back to `s_global = 0.5` and `sharpen_amount` is constant across
-the set, which is why the Phase 1 CHECKPOINT could not judge sharpening.
-
-Fixing it means a fallback that scans for the embedded JPEG when `rawler`
-declines — the data is right there — or an upstream fix. Worth doing: it would
-restore the entire ML path for this camera.
 
 **KI-2 — the finished tree is never pruned.** Flipping a verdict from keep to
 reject leaves the JPEG, its `.pp3` and the `edits` row in place, with no way to
@@ -111,6 +88,45 @@ it and holding the lock. Integration tests live in a separate crate, so
 `#[cfg(test)]` cannot work; a `test-support` cargo feature would.
 
 ---
+
+## Fixed on 2026-08-11
+
+**KI-1 — no preview could be extracted from Sony A6300 (ILCE-6300) ARW files.**
+
+`extract_preview_raw` asked `rawler` for `preview_image()` then
+`thumbnail_image()`; both answer `None` for these files, so ingest logged "no
+preview or thumbnail available", wrote nothing to the preview cache, and still
+reported the file as `Processed`, `Errored: 0`. Everything downstream silently
+did nothing for this camera — review-UI thumbnails, blur and back-focus
+detection, exposure flags, CLIP-IQA, DINOv2 embeddings and therefore duplicate
+detection. EXIF worked, so the catalog looked populated at a glance while
+`sharpness`, `exposure` and `iqa` were null. It also left `decide()` falling back
+to `s_global = 0.5`, which is why the Phase 1 CHECKPOINT could not judge
+sharpening.
+
+The cause turned out to be narrower than the original note assumed, and no
+byte-scanner was needed. `rawler` 0.7.2 wires each decoder's embedded JPEG to
+whichever of three trait methods its author picked, inconsistently between
+formats: the ARW decoder implements only `full_image`, whose own doc comment
+reads "return the embedded JPEG preview". Despite the name, no decoder's
+`full_image` develops the sensor plane — each reads an already-encoded image out
+of a tag (embedded JPEG, or an uncompressed RGB strip for CR2), and the trait
+default returns `None`. So `full_image` is now the third step of the fallback
+chain, after `preview_image` and `thumbnail_image`; ordering it last keeps every
+format that already had a preview on exactly the path it was on, and the sources
+stay lazily evaluated so nothing decodes a second image it will not use. The
+chain also no longer aborts on the first erroring step — a decoder that fails one
+entry point can still return a usable image from another — and the final error
+message names all three.
+
+Covered by `arw_preview_falls_back_to_the_embedded_jpeg` in
+`crates/pipeline/src/ingest/preview.rs`, which pins the aspect ratio so the
+1616×1080 preview cannot be confused with the 160×120 thumbnail, and skips
+cleanly where `example-pictures/` is absent. Verified live on the three sample
+ARWs: `photopipe scan` cached 3 previews where it previously cached none, defect
+analysis went from silently no-op to `Analyzed: 3` with one overexposure flag,
+and `sharpness.s_global` holds three distinct real values (357, 128, 1491) where
+the column was empty.
 
 ## Fixed on 2026-08-01
 

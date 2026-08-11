@@ -4,7 +4,23 @@ use image::{imageops::FilterType, DynamicImage};
 
 /// Extract a preview image from a RAW file using rawler.
 ///
-/// Falls back to the thumbnail if no full preview is available.
+/// Tries three rawler entry points in order and takes the first that yields an
+/// image: `preview_image`, `thumbnail_image`, then `full_image`.
+///
+/// The third one matters. `rawler` 0.7.2 wires each decoder's embedded JPEG to
+/// whichever of these three names its author picked, and the choice is not
+/// consistent between formats — the ARW decoder implements only `full_image`
+/// (its doc comment calls it "return the embedded JPEG preview"), so Sony files
+/// answered `None` to both of the other two and got no preview at all, which
+/// silently disabled every downstream ML step for those photos. Despite the
+/// name, no decoder's `full_image` develops the sensor plane: each one reads an
+/// already-encoded image out of a tag (embedded JPEG, or an uncompressed RGB
+/// strip for CR2), and the trait default returns `None`. Ordering it last keeps
+/// formats that already had a preview on exactly the path they were on.
+///
+/// Each step is tried even if an earlier one failed, rather than aborting on
+/// the first error: a decoder that errors on one entry point can still return a
+/// usable image from another, and a real preview beats a propagated error.
 pub fn extract_preview_raw(
     path: &Path,
     max_long_edge: u32,
@@ -22,22 +38,34 @@ pub fn extract_preview_raw(
         })?;
     let params = RawDecodeParams::default();
 
-    // Try full preview first, fall back to thumbnail.
-    let img = decoder
-        .preview_image(&raw_source, &params)
-        .map_err(|e| crate::error::IngestError::Preview {
-            path: path.to_owned(),
-            reason: e.to_string(),
-        })?
-        .or_else(|| {
-            decoder
-                .thumbnail_image(&raw_source, &params)
-                .unwrap_or(None)
-        })
-        .ok_or_else(|| crate::error::IngestError::Preview {
-            path: path.to_owned(),
-            reason: "no preview or thumbnail available".into(),
-        })?;
+    // Each source is decoded only if the previous one came up empty — the array
+    // form would eagerly decode all three on every file.
+    let mut last_err: Option<String> = None;
+    let mut found: Option<DynamicImage> = None;
+    #[allow(clippy::type_complexity)]
+    let sources: [&dyn Fn() -> rawler::Result<Option<DynamicImage>>; 3] = [
+        &|| decoder.preview_image(&raw_source, &params),
+        &|| decoder.thumbnail_image(&raw_source, &params),
+        &|| decoder.full_image(&raw_source, &params),
+    ];
+    for source in sources {
+        match source() {
+            Ok(Some(img)) => {
+                found = Some(img);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+
+    let img = found.ok_or_else(|| crate::error::IngestError::Preview {
+        path: path.to_owned(),
+        reason: match last_err {
+            Some(e) => format!("no preview, thumbnail or embedded image available: {e}"),
+            None => "no preview, thumbnail or embedded image available".into(),
+        },
+    })?;
 
     Ok(resize_to_long_edge(img, max_long_edge))
 }
@@ -156,5 +184,45 @@ mod tests {
     #[test]
     fn downscale_webp_rejects_garbage() {
         assert!(downscale_webp(b"not a webp", 40, 78).is_err());
+    }
+
+    /// KI-1 regression: a Sony ARW must yield a preview. `rawler` 0.7.2 answers
+    /// `None` from both `preview_image` and `thumbnail_image` for these files
+    /// and only exposes the embedded JPEG through `full_image`, so before the
+    /// third fallback this returned `Preview { reason: "no preview or thumbnail
+    /// available" }` and every ML stage downstream of the preview silently did
+    /// nothing for this camera.
+    ///
+    /// The fixture is local, gitignored sample data (`example-pictures/` — see
+    /// `.gitignore`), never a fabricated one; the test skips cleanly when it is
+    /// absent, e.g. on a fresh clone or in CI.
+    #[test]
+    fn arw_preview_falls_back_to_the_embedded_jpeg() {
+        let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../example-pictures/DSC03073.ARW");
+        if !raw.exists() {
+            eprintln!(
+                "skipping: {} not present (example-pictures/ is gitignored local sample data)",
+                raw.display()
+            );
+            return;
+        }
+
+        let img = extract_preview_raw(&raw, 1024).expect("ARW preview extraction");
+        // `resize` fits within the box preserving aspect, so the long edge can
+        // land a pixel under the cap.
+        let long_edge = img.width().max(img.height());
+        assert!(
+            (1023..=1024).contains(&long_edge),
+            "resized to long edge, got {long_edge}"
+        );
+        // The embedded preview is 1616x1080; the 160x120 thumbnail would land
+        // far off this aspect ratio, so this also pins down which one we got.
+        assert!(
+            (img.width() as f64 / img.height() as f64 - 1616.0 / 1080.0).abs() < 0.01,
+            "expected the 1616x1080 embedded preview, got {}x{}",
+            img.width(),
+            img.height()
+        );
     }
 }
