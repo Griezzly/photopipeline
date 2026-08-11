@@ -20,7 +20,7 @@ Copied from `CLAUDE.md` and the spec. Every task's requirements implicitly inclu
 - **No mutation of original photo files.** Reads only, even in error paths. `.pp3` files go next to the output JPEG; `.cube` files go in the cache dir. **Never** beside the source raw.
 - **Idempotency is a correctness requirement, not a perf goal.** A second `finish` run over an unchanged library must perform zero renders.
 - **One corrupt file must never abort a run.** Wrap per-file work so an `Err` logs `tracing::warn!(path = %p.display(), error = %e)` and continues, leaving no `edits` row.
-- **Bulk inserts use the DuckDB Appender API.** Row-at-a-time `INSERT` is a perf bug. Batch size lives in `CatalogConfig::write_batch_size` (default 64).
+- **Bulk inserts use the DuckDB Appender API.** Row-at-a-time `INSERT` is a perf bug. Batch size lives in `CatalogConfig::write_batch_size` (default 64). **Scope (ruled 2026-08-09):** this binds bulk ingest paths. `upsert_raw_stats` and `upsert_edit` use `INSERT … ON CONFLICT` instead, because the Appender cannot express `ON CONFLICT` — the same reason already documented for `flush_blur_flag_batch` in `catalog/mod.rs` — and `finish` writes one row per photo between multi-second renders, so there is no batch to accelerate.
 - **Migrations are atomic** — each wrapped in `BEGIN TRANSACTION; … COMMIT;`.
 - **`ON DELETE CASCADE` is unsupported** in this DuckDB version. Manage cascades in application code.
 - **No `println!` outside user-facing CLI output.** Use `tracing`: `info!` for phase events, `warn!` for per-file failures, `debug!` for detail.
@@ -391,8 +391,7 @@ case-sensitive and RawTherapee silently ignores anything it does not recognise.
 | `highlight_recovery` (on/off) | `[HLRecovery]` | `Enabled` | bool | ☐ |
 | `highlight_recovery` (method) | `[HLRecovery]` | `Method` | `Blend` \| `Color` \| `Coloropp` | ☐ |
 | `shadow_lift` | `[Shadows & Highlights]` | `Enabled`, `Shadows` | bool, 0–100 | ☐ |
-| `wb_temp_k` | `[White Balance]` | `Setting`=`Custom`, `Temperature` | K | ☐ |
-| `wb_green` | `[White Balance]` | `Green` | float ~0.02–5.0 | ☐ |
+| white balance | `[White Balance]` | `Setting`=`Camera` | — (uses the camera's own coefficients) | ☐ |
 | `denoise_luma` | `[Directional Pyramid Denoising]` | `Enabled`, `Luma` | bool, 0–100 | ☐ |
 | `denoise_chroma` | same | `Chroma` | 0–100 | ☐ |
 | `sharpen_amount` | `[PostDemosaicSharpening]` | `Enabled`, `Contrast`, `DeconvRadius` | bool, 0–100, float | ☐ |
@@ -512,6 +511,7 @@ of the approved design, not a suggestion:
          file_id           BIGINT PRIMARY KEY REFERENCES files(id),
          p1                REAL NOT NULL,
          p50               REAL NOT NULL,
+         p99               REAL NOT NULL,
          p999              REAL NOT NULL,
          clipped_frac      REAL NOT NULL,
          black_frac        REAL NOT NULL,
@@ -526,8 +526,6 @@ of the approved design, not a suggestion:
          file_id            BIGINT PRIMARY KEY REFERENCES files(id),
          content_hash       VARCHAR NOT NULL,
          exposure_ev        REAL NOT NULL,
-         wb_temp_k          REAL NOT NULL,
-         wb_green           REAL NOT NULL,
          highlight_recovery REAL NOT NULL,
          shadow_lift        REAL NOT NULL,
          denoise_luma       REAL NOT NULL,
@@ -615,7 +613,7 @@ git commit -m "feat(catalog): schema v4 — raw_stats and edits tables"
 **Interfaces:**
 - Consumes: `rawler::get_decoder`, `rawler::rawsource::RawSource`, `rawler::decoders::RawDecodeParams`, `rawler::rawimage::{RawImage, RawImageData}`
 - Produces:
-  - `pipeline::develop::measure::RawStats { p1: f32, p50: f32, p999: f32, clipped_frac: f32, black_frac: f32, wb_r: f32, wb_g: f32, wb_b: f32, illum_r: Option<f32>, illum_g: Option<f32>, illum_b: Option<f32> }`
+  - `pipeline::develop::measure::RawStats { p1: f32, p50: f32, p99: f32, p999: f32, clipped_frac: f32, black_frac: f32, wb_r: f32, wb_g: f32, wb_b: f32, illum_r: Option<f32>, illum_g: Option<f32>, illum_b: Option<f32> }`
   - `pipeline::develop::measure::measure_raw(path: &Path) -> Result<RawStats, DevelopError>`
   - `pipeline::develop::measure::stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats` — the pure inner function, so percentile logic is testable without a RAW file
   - `pipeline::develop::DevelopError` (thiserror)
@@ -742,6 +740,7 @@ use crate::develop::DevelopError;
 pub struct RawStats {
     pub p1: f32,
     pub p50: f32,
+    pub p99: f32,
     pub p999: f32,
     /// Fraction of samples at or above the white level.
     pub clipped_frac: f32,
@@ -766,6 +765,7 @@ pub fn stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats {
         return RawStats {
             p1: 0.0,
             p50: 0.0,
+            p99: 0.0,
             p999: 0.0,
             clipped_frac: 0.0,
             black_frac: 0.0,
@@ -793,6 +793,7 @@ pub fn stats_from_samples(samples: &[f32], black: f32, white: f32) -> RawStats {
     RawStats {
         p1: percentile(&norm, 0.01),
         p50: percentile(&norm, 0.50),
+        p99: percentile(&norm, 0.99),
         p999: percentile(&norm, 0.999),
         clipped_frac: clipped as f32 / n as f32,
         black_frac: blacked as f32 / n as f32,
@@ -933,6 +934,7 @@ fn sample_stats() -> RawStats {
     RawStats {
         p1: 0.01,
         p50: 0.18,
+        p99: 0.90,
         p999: 0.95,
         clipped_frac: 0.002,
         black_frac: 0.004,
@@ -1100,17 +1102,18 @@ impl Catalog {
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         conn.execute(
             "INSERT INTO raw_stats
-                (file_id, p1, p50, p999, clipped_frac, black_frac,
+                (file_id, p1, p50, p99, p999, clipped_frac, black_frac,
                  wb_r, wb_g, wb_b, illum_r, illum_g, illum_b)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (file_id) DO UPDATE SET
-                 p1 = excluded.p1, p50 = excluded.p50, p999 = excluded.p999,
+                 p1 = excluded.p1, p50 = excluded.p50, p99 = excluded.p99,
+                 p999 = excluded.p999,
                  clipped_frac = excluded.clipped_frac, black_frac = excluded.black_frac,
                  wb_r = excluded.wb_r, wb_g = excluded.wb_g, wb_b = excluded.wb_b,
                  illum_r = excluded.illum_r, illum_g = excluded.illum_g,
                  illum_b = excluded.illum_b",
             duckdb::params![
-                file_id, s.p1, s.p50, s.p999, s.clipped_frac, s.black_frac,
+                file_id, s.p1, s.p50, s.p99, s.p999, s.clipped_frac, s.black_frac,
                 s.wb_r, s.wb_g, s.wb_b, s.illum_r, s.illum_g, s.illum_b
             ],
         )
@@ -1124,7 +1127,7 @@ impl Catalog {
             .lock()
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         let row = conn.query_row(
-            "SELECT p1, p50, p999, clipped_frac, black_frac, wb_r, wb_g, wb_b,
+            "SELECT p1, p50, p99, p999, clipped_frac, black_frac, wb_r, wb_g, wb_b,
                     illum_r, illum_g, illum_b
              FROM raw_stats WHERE file_id = ?",
             duckdb::params![file_id],
@@ -1132,15 +1135,16 @@ impl Catalog {
                 Ok(RawStats {
                     p1: r.get(0)?,
                     p50: r.get(1)?,
-                    p999: r.get(2)?,
-                    clipped_frac: r.get(3)?,
-                    black_frac: r.get(4)?,
-                    wb_r: r.get(5)?,
-                    wb_g: r.get(6)?,
-                    wb_b: r.get(7)?,
-                    illum_r: r.get(8)?,
-                    illum_g: r.get(9)?,
-                    illum_b: r.get(10)?,
+                    p99: r.get(2)?,
+                    p999: r.get(3)?,
+                    clipped_frac: r.get(4)?,
+                    black_frac: r.get(5)?,
+                    wb_r: r.get(6)?,
+                    wb_g: r.get(7)?,
+                    wb_b: r.get(8)?,
+                    illum_r: r.get(9)?,
+                    illum_g: r.get(10)?,
+                    illum_b: r.get(11)?,
                 })
             },
         );
@@ -1194,7 +1198,7 @@ below is copied from spec §6.
 **Interfaces:**
 - Consumes: `RawStats` (Task 4), `ExifData` (`crates/pipeline/src/ingest/exif.rs:4`)
 - Produces:
-  - `pipeline::develop::decide::EditRecipe { exposure_ev: f32, wb_temp_k: f32, wb_green: f32, highlight_recovery: f32, shadow_lift: f32, denoise_luma: f32, denoise_chroma: f32, sharpen_amount: f32, lens_correct: bool }`
+  - `pipeline::develop::decide::EditRecipe { exposure_ev: f32, highlight_recovery: f32, shadow_lift: f32, denoise_luma: f32, denoise_chroma: f32, sharpen_amount: f32, lens_correct: bool }`
   - `pipeline::develop::decide::Sharpness { s_global: f32 }`
   - `pipeline::develop::decide::decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe`
   - `pipeline::develop::decide::DECIDER_VERSION: &str`
@@ -1213,6 +1217,7 @@ mod tests {
         RawStats {
             p1: 0.01,
             p50: 0.18,
+            p99: 0.90,
             p999: 0.95,
             clipped_frac: 0.0,
             black_frac: 0.0,
@@ -1238,7 +1243,7 @@ mod tests {
     }
 
     /// A correctly exposed frame needs no correction: p50 already sits at
-    /// middle grey and p999 leaves headroom.
+    /// middle grey and p99 leaves headroom.
     #[test]
     fn correct_exposure_is_left_alone() {
         let r = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
@@ -1246,12 +1251,12 @@ mod tests {
     }
 
     /// An underexposed frame is lifted — but never past clipping. p50 at 0.045
-    /// wants +2 EV; p999 at 0.5 only allows +0.93.
+    /// wants +2 EV; p99 at 0.5 only allows +0.93.
     #[test]
     fn lift_is_bounded_by_available_headroom() {
         let mut s = neutral_stats();
         s.p50 = 0.045;
-        s.p999 = 0.5;
+        s.p99 = 0.5;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         let headroom = (0.95f32 / 0.5).log2();
         assert!(
@@ -1266,25 +1271,65 @@ mod tests {
     fn overexposure_produces_negative_ev() {
         let mut s = neutral_stats();
         s.p50 = 0.5;
-        s.p999 = 1.0;
+        s.p99 = 1.0;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         assert!(r.exposure_ev < 0.0, "ev should be negative, was {}", r.exposure_ev);
     }
 
-    /// Exposure is hard-clamped to ±3 EV whatever the measurements say.
+    /// REGRESSION GUARD. A dark frame containing a few blown specular
+    /// highlights must still be lifted. These are the real measured values from
+    /// `example-pictures/DSC03073.ARW`: p999 is fully saturated at 1.0 because
+    /// 2.1% of pixels clip, but p99 shows plenty of headroom remains.
+    ///
+    /// Deriving headroom from p999 — as the original spec §6 did — emitted
+    /// -0.07 EV here and threw away a wanted +1.62 EV lift. Any change that
+    /// reintroduces a p999-based headroom will fail this test.
     #[test]
-    fn exposure_is_clamped_to_three_stops() {
+    fn saturated_p999_does_not_suppress_the_lift() {
+        let mut s = neutral_stats();
+        s.p50 = 0.05866;
+        s.p99 = 0.42;
+        s.p999 = 1.0;
+        s.clipped_frac = 0.0212;
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert!(
+            r.exposure_ev > 1.0,
+            "a dark frame with a few clipped highlights must still be lifted, got {}",
+            r.exposure_ev
+        );
+    }
+
+    /// The +3 EV clamp is reachable and must bind: a nearly black frame wants
+    /// far more than three stops.
+    #[test]
+    fn extreme_underexposure_is_clamped_to_three_stops() {
         let mut s = neutral_stats();
         s.p50 = 0.0001;
-        s.p999 = 0.001;
+        s.p99 = 0.001;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        assert!(r.exposure_ev <= 3.0, "ev was {}", r.exposure_ev);
+        assert_eq!(r.exposure_ev, 3.0, "the upper clamp must bind exactly");
+    }
 
-        let mut s2 = neutral_stats();
-        s2.p50 = 0.99;
-        s2.p999 = 1.0;
-        let r2 = decide(&s2, &exif_at_iso(100), &sharp(0.5));
-        assert!(r2.exposure_ev >= -3.0, "ev was {}", r2.exposure_ev);
+    /// The -3 EV clamp is UNREACHABLE by construction, and this test records
+    /// why so nobody mistakes it for tested behaviour. Percentiles are
+    /// normalised to 0..=1, so the most negative `lift` obtainable is
+    /// log2(0.18 / 1.0) = -2.474 EV, and `headroom` only ever raises the
+    /// minimum further. The clamp stays as defence-in-depth against a future
+    /// change to the percentile range; what is asserted here is the real
+    /// reachable floor.
+    #[test]
+    fn maximum_pull_down_is_the_reachable_floor_not_the_clamp() {
+        let mut s = neutral_stats();
+        s.p50 = 1.0;
+        s.p99 = 1.0;
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        let reachable_floor = (0.18f32 / 1.0).log2(); // -2.474
+        assert!(
+            (r.exposure_ev - reachable_floor).abs() < 0.01,
+            "expected the reachable floor {reachable_floor}, got {}",
+            r.exposure_ev
+        );
+        assert!(r.exposure_ev > -3.0, "the -3 clamp should never be what binds");
     }
 
     /// Degenerate percentiles must not produce NaN — log2(0) is -inf and would
@@ -1293,10 +1338,35 @@ mod tests {
     fn zero_percentiles_do_not_produce_nan() {
         let mut s = neutral_stats();
         s.p50 = 0.0;
+        s.p99 = 0.0;
         s.p999 = 0.0;
         let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
         assert!(r.exposure_ev.is_finite(), "ev was {}", r.exposure_ev);
         assert!(r.shadow_lift.is_finite());
+    }
+
+    /// NEGATIVE percentiles are the case the LOG_FLOOR guards actually carry:
+    /// `log2` of a negative number is NaN, and unlike an infinity a NaN
+    /// survives `clamp`. Zeroed percentiles alone do not prove the guards are
+    /// load-bearing, because they produce an infinity that the trailing clamp
+    /// would rescue on its own.
+    #[test]
+    fn negative_percentiles_do_not_produce_nan() {
+        let mut s = neutral_stats();
+        s.p1 = -0.5;
+        s.p50 = -0.5;
+        s.p99 = -0.5;
+        s.p999 = -0.5;
+        let r = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        for (name, v) in [
+            ("exposure_ev", r.exposure_ev),
+            ("highlight_recovery", r.highlight_recovery),
+            ("shadow_lift", r.shadow_lift),
+            ("denoise_luma", r.denoise_luma),
+            ("sharpen_amount", r.sharpen_amount),
+        ] {
+            assert!(v.is_finite(), "{name} was {v}");
+        }
     }
 
     /// Denoise rises monotonically with ISO across the spec's anchor points.
@@ -1362,6 +1432,17 @@ mod tests {
         assert_eq!(r_none.highlight_recovery, 0.0);
         assert!(r_heavy.highlight_recovery > 0.5);
         assert!(r_heavy.highlight_recovery <= 1.0);
+
+        // An interior point, so a wrong scale divisor cannot hide behind the
+        // clamped extremes: clipped_frac 0.025 against the 0.05 scale is 0.5.
+        let mut mid = neutral_stats();
+        mid.clipped_frac = 0.025;
+        let r_mid = decide(&mid, &exif_at_iso(100), &sharp(0.5));
+        assert!(
+            (r_mid.highlight_recovery - 0.5).abs() < 0.01,
+            "expected 0.5 at the midpoint, got {}",
+            r_mid.highlight_recovery
+        );
     }
 
     /// A soft frame is never sharpened into crunch.
@@ -1383,41 +1464,20 @@ mod tests {
         assert!(!without.lens_correct);
     }
 
-    /// With no illuminant estimate, as-shot coefficients are kept.
+    /// v1 has no white-balance override: the recipe carries no WB field and the
+    /// illuminant estimate must not change any decision. A frame with a wildly
+    /// disagreeing illuminant must produce the same recipe as one with none.
     #[test]
-    fn absent_illuminant_keeps_as_shot_wb() {
-        let r = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
-        let as_shot = coeffs_to_temp_green(2.0, 1.0, 1.5);
-        assert!((r.wb_temp_k - as_shot.0).abs() < 1.0);
-        assert!((r.wb_green - as_shot.1).abs() < 0.001);
-    }
-
-    /// An illuminant estimate that agrees with as-shot changes nothing.
-    #[test]
-    fn agreeing_illuminant_keeps_as_shot_wb() {
-        let mut s = neutral_stats();
-        // Same direction as the as-shot coefficients, so angular distance ~0.
-        s.illum_r = Some(0.5);
-        s.illum_g = Some(1.0);
-        s.illum_b = Some(0.667);
-        let agreed = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        let as_shot = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
-        assert!((agreed.wb_temp_k - as_shot.wb_temp_k).abs() < 50.0);
-    }
-
-    /// A wildly disagreeing estimate means mixed or artificial light, where
-    /// neither estimator is trustworthy — blend 50/50 rather than commit.
-    #[test]
-    fn disagreeing_illuminant_blends_halfway() {
+    fn illuminant_estimate_does_not_affect_the_recipe() {
+        let plain = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
         let mut s = neutral_stats();
         s.illum_r = Some(1.0);
         s.illum_g = Some(1.0);
         s.illum_b = Some(0.1);
-        let blended = decide(&s, &exif_at_iso(100), &sharp(0.5));
-        let as_shot = decide(&neutral_stats(), &exif_at_iso(100), &sharp(0.5));
-        assert!(
-            (blended.wb_temp_k - as_shot.wb_temp_k).abs() > 50.0,
-            "a disagreeing estimate should move the temperature"
+        let with_estimate = decide(&s, &exif_at_iso(100), &sharp(0.5));
+        assert_eq!(
+            plain, with_estimate,
+            "v1 must not act on the illuminant estimate"
         );
     }
 
@@ -1464,7 +1524,7 @@ use crate::ingest::exif::ExifData;
 
 /// Bumped whenever any formula below changes. Stored in `edits.decider_version`
 /// and part of the idempotency key, so a tuning change re-renders everything.
-pub const DECIDER_VERSION: &str = "decide-1";
+pub const DECIDER_VERSION: &str = "decide-2";
 
 /// The sharpness measurement `decide` consumes. A struct rather than a bare f32
 /// so adding subject/background terms later does not churn the signature.
@@ -1475,12 +1535,13 @@ pub struct Sharpness {
 }
 
 /// A complete, renderer-agnostic development recipe. Every field is normalised
-/// 0..1 except `exposure_ev` (stops), `wb_temp_k` (kelvin) and `wb_green`.
+/// 0..1 except `exposure_ev`, which is in stops.
+///
+/// Carries NO white-balance fields. v1 emits RawTherapee's `Setting=Camera`,
+/// which applies the camera's own as-shot coefficients exactly. See `decide()`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditRecipe {
     pub exposure_ev: f32,
-    pub wb_temp_k: f32,
-    pub wb_green: f32,
     pub highlight_recovery: f32,
     pub shadow_lift: f32,
     pub denoise_luma: f32,
@@ -1497,8 +1558,6 @@ impl EditRecipe {
         let mut h = xxhash_rust::xxh3::Xxh3::new();
         for v in [
             self.exposure_ev,
-            self.wb_temp_k,
-            self.wb_green,
             self.highlight_recovery,
             self.shadow_lift,
             self.denoise_luma,
@@ -1525,49 +1584,64 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
 
     // ── exposure ──
     // Lift toward middle grey, but never past the point where the brightest
-    // real detail clips. An overexposed frame has negative headroom, which
-    // pulls the exposure down.
-    let headroom = (HIGHLIGHT_TARGET / raw.p999.max(LOG_FLOOR)).log2();
+    // *recoverable* detail clips. An overexposed frame has negative headroom,
+    // which pulls the exposure down.
+    //
+    // Headroom is measured from p99, NOT p999. p999 saturates to 1.0 as soon as
+    // more than 0.1% of pixels clip — true of almost any frame containing sky, a
+    // specular highlight, or a light source — after which it reports zero
+    // headroom regardless of how dark the image actually is, and the lift is
+    // silently thrown away. Measured on a real frame: p50 = 0.0587 (median 1.62
+    // stops below middle grey), p999 = 1.0, clipped_frac = 2.1%; the p999 form
+    // emitted -0.07 EV where +1.62 EV was wanted. Pixels that already clipped
+    // are unrecoverable, so protecting them costs the rest of the image.
+    let headroom = (HIGHLIGHT_TARGET / raw.p99.max(LOG_FLOOR)).log2();
     let lift = (MID_GREY / raw.p50.max(LOG_FLOOR)).log2();
-    let exposure_ev = lift.min(headroom).clamp(-3.0, 3.0);
+    let wanted = lift.min(headroom).clamp(-3.0, 3.0);
+    // Soft deadband. Modern camera metering is good, and the CHECKPOINT review
+    // showed the unguarded correction actively made well-metered frames worse:
+    // on three real frames the baseline render beat ours wherever a lift was
+    // applied, because `MID_GREY` is a grey-card reflectance target and the
+    // median of a scene full of dark conifers is legitimately far below it.
+    // So correct outliers, not every frame — the same reasoning already applied
+    // to white balance.
+    //
+    // Subtracting the deadband rather than thresholding on it keeps the response
+    // continuous: a frame wanting 0.76 EV gets 0.01 rather than jumping to 0.76.
+    // It is also inherently conservative, since the applied correction is always
+    // smaller than the computed one.
+    let exposure_ev = deadband(wanted, EXPOSURE_DEADBAND_EV);
 
     // ── white balance ──
-    let (as_shot_k, as_shot_g) = coeffs_to_temp_green(raw.wb_r, raw.wb_g, raw.wb_b);
-    let (wb_temp_k, wb_green) = match (raw.illum_r, raw.illum_g, raw.illum_b) {
-        (Some(r), Some(g), Some(b)) => {
-            // The illuminant is an estimate of the light; the as-shot
-            // coefficients are its reciprocal. Invert before comparing.
-            let (est_k, est_g) = coeffs_to_temp_green(
-                1.0 / r.max(LOG_FLOOR),
-                1.0 / g.max(LOG_FLOOR),
-                1.0 / b.max(LOG_FLOOR),
-            );
-            let angle = angular_distance([raw.wb_r, raw.wb_g, raw.wb_b], [1.0 / r, 1.0 / g, 1.0 / b]);
-            if angle < AGREEMENT_RADIANS {
-                // Cameras are usually right; a confirming estimate adds nothing.
-                (as_shot_k, as_shot_g)
-            } else {
-                // Large disagreement means mixed or artificial light, where
-                // neither estimator is trustworthy. Split the difference rather
-                // than committing to either.
-                (
-                    0.5 * as_shot_k + 0.5 * est_k,
-                    0.5 * as_shot_g + 0.5 * est_g,
-                )
-            }
-        }
-        _ => (as_shot_k, as_shot_g),
-    };
+    // Nothing to decide. v1 emits RawTherapee's `Setting=Camera`, so the camera's
+    // own as-shot coefficients are applied exactly and no conversion error can
+    // enter. `EditRecipe` therefore carries no white-balance field at all.
+    //
+    // An earlier revision converted the as-shot coefficients into RawTherapee's
+    // Temperature/Green parameterisation and got it wrong twice: the temperature
+    // relation was inverted (tungsten -> 8214 K, daylight -> 3713 K) and Green
+    // landed near 0.5 against its 1.0 neutral, casting every frame magenta.
+    //
+    // The PCA illuminant estimate in `raw.illum_*` is measured and persisted for
+    // the audit record but deliberately not acted on: overriding the camera needs
+    // a conversion we can verify, which is deferred to its own spec.
 
     // ── highlight recovery ──
     // Scales with how much actually clipped. 5% clipped is already severe.
     let highlight_recovery = (raw.clipped_frac / 0.05).clamp(0.0, 1.0);
 
     // ── shadow lift ──
-    // Driven by how much sits at the bottom, throttled by a noise penalty:
-    // lifting shadows at high ISO only reveals noise.
-    let shadow_demand = (raw.black_frac / 0.05).clamp(0.0, 1.0)
-        + ((0.02 - raw.p1).max(0.0) / 0.02).clamp(0.0, 1.0);
+    // Driven only by genuinely crushed blacks, with its own deadband, and
+    // throttled by a noise penalty since lifting shadows at high ISO only
+    // reveals noise.
+    //
+    // The `p1` term this replaced was the same category of error as the exposure
+    // target: a low 1st percentile means the scene *has* deep shadows, not that
+    // it is broken. On a real frame p1 = 0.0018 drove shadow_lift to 0.46, which
+    // flattened the image badly. `black_frac` already measures what matters —
+    // how much actually hit the black level — so the deadband keys on that alone.
+    let shadow_demand =
+        ((raw.black_frac - SHADOW_DEADBAND_FRAC) / 0.045).clamp(0.0, 1.0);
     let noise_penalty = 1.0 - denoise_curve(iso);
     let shadow_lift = (shadow_demand * 0.5 * noise_penalty).clamp(0.0, 1.0);
 
@@ -1578,13 +1652,14 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
 
     // ── sharpening ──
     // Modulated by measured sharpness and hard-capped, so a genuinely soft
-    // frame is never sharpened into crunch.
-    let sharpen_amount = (sharp.s_global.clamp(0.0, 1.0) * 0.8).clamp(0.0, 0.8);
+    // frame is never sharpened into crunch. The cap is structural: the input is
+    // clamped to 0..1 and then scaled, so the product cannot exceed SHARPEN_MAX.
+    // An outer `.clamp(0.0, SHARPEN_MAX)` here would be a no-op and would make
+    // the cap untestable, since removing it could not change any result.
+    let sharpen_amount = sharp.s_global.clamp(0.0, 1.0) * SHARPEN_MAX;
 
     EditRecipe {
         exposure_ev,
-        wb_temp_k,
-        wb_green,
         highlight_recovery,
         shadow_lift,
         denoise_luma,
@@ -1594,9 +1669,25 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     }
 }
 
-/// Angular distance below which the PCA estimate is treated as confirming the
-/// camera rather than contradicting it. ~11°.
-const AGREEMENT_RADIANS: f32 = 0.2;
+/// Exposure corrections smaller than this are not applied at all; larger ones
+/// have it subtracted. Tuned at the CHECKPOINT against real frames.
+const EXPOSURE_DEADBAND_EV: f32 = 0.75;
+
+/// Shadow lift stays at zero until at least this fraction of the frame has
+/// actually hit the black level.
+const SHADOW_DEADBAND_FRAC: f32 = 0.005;
+
+/// Subtract `dz` from the magnitude of `v`, preserving sign, floored at zero.
+/// Continuous, and always returns something no larger than `v`.
+fn deadband(v: f32, dz: f32) -> f32 {
+    let out = (v.abs() - dz).max(0.0);
+    if v.is_sign_negative() { -out } else { out }
+}
+
+/// Ceiling on capture-sharpening strength. Applied as a scale factor rather
+/// than an outer clamp so the bound is structural and a change to it is
+/// observable in the tests.
+const SHARPEN_MAX: f32 = 0.8;
 
 /// Piecewise-linear denoise strength in ISO, through the spec's anchor points:
 /// (100→0), (1600→0.3), (6400→0.6), (25600→0.85).
@@ -1623,35 +1714,6 @@ fn denoise_curve(iso: f32) -> f32 {
     (last.1 + (iso.log2() - last.0.log2()) * 0.05).clamp(0.0, 0.98)
 }
 
-/// Convert raw RGB white-balance coefficients into RawTherapee's
-/// Temperature/Green parameterisation.
-///
-/// Approximate by design: RawTherapee re-derives its own multipliers from the
-/// camera profile, so this needs to land in the right neighbourhood, not be
-/// colorimetrically exact.
-pub fn coeffs_to_temp_green(r: f32, g: f32, b: f32) -> (f32, f32) {
-    let r = r.max(LOG_FLOOR);
-    let g = g.max(LOG_FLOOR);
-    let b = b.max(LOG_FLOOR);
-    // A high red multiplier means the scene was blue (cool) and needs warming.
-    let ratio = (b / r).max(LOG_FLOOR);
-    let temp = (5000.0 * ratio.powf(0.85)).clamp(1500.0, 25000.0);
-    // Green sits between the two chroma channels.
-    let green = (g / (r * b).sqrt()).clamp(0.02, 5.0);
-    (temp, green)
-}
-
-/// Angle between two coefficient vectors, in radians. The standard measure for
-/// comparing illuminant estimates, since only the direction carries colour.
-fn angular_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na = (a.iter().map(|x| x * x).sum::<f32>()).sqrt();
-    let nb = (b.iter().map(|x| x * x).sum::<f32>()).sqrt();
-    if na < LOG_FLOOR || nb < LOG_FLOOR {
-        return 0.0;
-    }
-    (dot / (na * nb)).clamp(-1.0, 1.0).acos()
-}
 ```
 
 - [ ] **Step 5: Add `xxhash-rust` to the pipeline crate if it is not already there**
@@ -2030,8 +2092,6 @@ mod tests {
     fn fixed_recipe() -> EditRecipe {
         EditRecipe {
             exposure_ev: 0.75,
-            wb_temp_k: 5500.0,
-            wb_green: 1.05,
             highlight_recovery: 0.6,
             shadow_lift: 0.4,
             denoise_luma: 0.3,
@@ -2056,6 +2116,18 @@ mod tests {
         let out = emit_pp3(&fixed_recipe());
         assert!(out.contains("Luma=30"), "denoise_luma 0.3 should emit 30:\n{out}");
         assert!(out.contains("Chroma=36"), "denoise_chroma 0.36 should emit 36:\n{out}");
+    }
+
+    /// The three silent no-op traps from docs/design/pp3-keys.md. Each of
+    /// these keys defaults to a value that makes a neighbouring key we DO set
+    /// be ignored, with no warning from RawTherapee.
+    #[test]
+    fn silent_no_op_traps_are_defused() {
+        let out = emit_pp3(&fixed_recipe());
+        assert!(out.contains("Setting=Camera"), "WB must use the camera's own coefficients:\n{out}");
+        assert!(out.contains("AutoContrast=false"), "Contrast would be ignored:\n{out}");
+        assert!(out.contains("AutoRadius=false"), "DeconvRadius would be ignored:\n{out}");
+        assert!(out.contains("CMethod=MAN"), "Chroma would be ignored:\n{out}");
     }
 
     /// Zeroed corrections emit disabled tools, not enabled ones set to zero —
@@ -2196,16 +2268,33 @@ pub fn emit_pp3(recipe: &EditRecipe) -> String {
     }
 
     // ── white balance ──
+    // ── white balance ──
+    // Setting=Camera applies the camera's own as-shot coefficients exactly.
+    //
+    // We deliberately do NOT convert those coefficients into RawTherapee's
+    // Temperature/Green parameterisation. An earlier revision did, and the
+    // conversion was wrong twice over: the temperature relation was inverted
+    // (tungsten light produced 8214 K, daylight 3713 K) and Green landed
+    // systematically near 0.5 against its 1.0 neutral, casting every frame
+    // magenta. RawTherapee derives its own multipliers from the camera profile,
+    // so asking it to use the camera WB is both exact and simpler than
+    // restating that WB in a foreign parameterisation.
+    //
+    // The PCA illuminant estimate is still measured and stored in `raw_stats`;
+    // acting on it needs a verifiable conversion and is deferred.
     s.push_str("\n[White Balance]\n");
-    s.push_str("Setting=Custom\n");
-    s.push_str(&format!("Temperature={}\n", recipe.wb_temp_k.round() as i32));
-    s.push_str(&format!("Green={}\n", f3(recipe.wb_green)));
+    s.push_str("Enabled=true\n");
+    s.push_str("Setting=Camera\n");
 
     // ── denoise ──
     s.push_str("\n[Directional Pyramid Denoising]\n");
     if recipe.denoise_luma > 0.0 || recipe.denoise_chroma > 0.0 {
         s.push_str("Enabled=true\n");
-        s.push_str("Method=RGB\n");
+        // TRAP: a single Chroma slider requires Method=Lab AND CMethod=MAN.
+        // Under CMethod=AUT — which several bundled profiles use — Chroma is
+        // ignored. See docs/design/pp3-keys.md.
+        s.push_str("Method=Lab\n");
+        s.push_str("CMethod=MAN\n");
         s.push_str(&format!("Luma={}\n", pct(recipe.denoise_luma)));
         s.push_str(&format!("Chroma={}\n", pct(recipe.denoise_chroma)));
     } else {
@@ -2216,6 +2305,10 @@ pub fn emit_pp3(recipe: &EditRecipe) -> String {
     s.push_str("\n[PostDemosaicSharpening]\n");
     if recipe.sharpen_amount > 0.0 {
         s.push_str("Enabled=true\n");
+        // TRAP: AutoContrast and AutoRadius both default to true, and each
+        // overrides the manual value below it. See docs/design/pp3-keys.md.
+        s.push_str("AutoContrast=false\n");
+        s.push_str("AutoRadius=false\n");
         s.push_str(&format!("Contrast={}\n", pct(recipe.sharpen_amount)));
         s.push_str("DeconvRadius=0.750\n");
     } else {
@@ -2265,7 +2358,7 @@ section header or key name disagrees with what your GUI diff showed.
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p pipeline --lib develop::pp3`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 7: Prove the emitted profile actually changes the render**
 
@@ -2383,6 +2476,18 @@ mod tests {
         let err = r.probe().expect_err("probe should fail");
         assert!(matches!(err, DevelopError::Render { .. }), "got {err:?}");
     }
+
+    /// A binary that runs but is not RawTherapee must be rejected. Guards the
+    /// exit-status trap from the other side: since probe() cannot gate on the
+    /// status (RawTherapee 5.13 exits 2 on --version), the version banner is
+    /// the only success signal, so a successful non-RawTherapee binary must
+    /// still fail.
+    #[test]
+    fn a_non_rawtherapee_binary_is_rejected() {
+        let exe = if cfg!(windows) { "cmd" } else { "true" };
+        let r = Pp3Renderer::new(&cfg_with(exe));
+        assert!(r.probe().is_err(), "`{exe}` must not pass as RawTherapee");
+    }
 }
 ```
 
@@ -2423,6 +2528,12 @@ use crate::develop::DevelopError;
 pub const RENDERER_NAME: &str = "rawtherapee";
 
 /// A completed baseline render.
+///
+/// Owns a private scratch directory. Every render gets its own, so two photos
+/// that happen to share a filename stem cannot overwrite each other's
+/// intermediates — a real hazard because the orchestrator hands the same parent
+/// temp directory to every call. The directory is removed when this struct is
+/// dropped, which is also what deletes the very large TIFF.
 pub struct RenderedTiff {
     /// 16-bit sRGB TIFF in the temp directory. Large — delete it as soon as the
     /// JPEG is encoded (a 60MP raw is roughly 350 MB here).
@@ -2430,6 +2541,9 @@ pub struct RenderedTiff {
     /// The per-photo profile, kept so it can be copied next to the output JPEG
     /// as an escape hatch for reopening the photo in RawTherapee.
     pub pp3: PathBuf,
+    /// Held for its `Drop`: removes the scratch directory and everything in it.
+    /// Never read directly.
+    _scratch: tempfile::TempDir,
 }
 
 pub struct Pp3Renderer {
@@ -2450,6 +2564,13 @@ impl Pp3Renderer {
     /// Confirm the binary exists and runs. Called once before a run rather than
     /// per photo, so a missing dependency fails immediately instead of
     /// producing hundreds of identical per-file warnings.
+    ///
+    /// **Do not gate on the exit status here.** Verified against RawTherapee
+    /// 5.13: `--version` exits 2 and `-h` exits 255, while a real render exits
+    /// 0. Treating a non-zero status as failure would make `probe()` fail on
+    /// every machine and abort `finish` unconditionally. The presence of a
+    /// parseable version banner is the actual success signal, and it arrives on
+    /// stdout or stderr depending on build.
     pub fn probe(&self) -> Result<String, DevelopError> {
         let out = Command::new(&self.exe)
             .arg("--version")
@@ -2458,25 +2579,35 @@ impl Pp3Renderer {
                 path: self.exe.clone(),
                 reason: format!("cannot execute: {e}"),
             })?;
-        if !out.status.success() {
-            return Err(DevelopError::Render {
-                path: self.exe.clone(),
-                reason: format!("--version exited {}", out.status),
-            });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("unknown")
-            .trim()
-            .to_string())
+        let banner = [&out.stdout, &out.stderr]
+            .into_iter()
+            .filter_map(|buf| {
+                String::from_utf8_lossy(buf)
+                    .lines()
+                    .find(|l| l.contains("RawTherapee"))
+                    .map(|l| l.trim().to_string())
+            })
+            .next();
+        banner.ok_or_else(|| DevelopError::Render {
+            path: self.exe.clone(),
+            reason: "ran, but printed no RawTherapee version banner".into(),
+        })
     }
 
-    /// Render `raw` through `recipe` into `tmp_dir`.
+    /// Render `raw` through `recipe`, using a fresh scratch directory created
+    /// inside `tmp_dir`.
     ///
-    /// Writes both profiles into `tmp_dir` — never beside the original, which
-    /// would violate the non-destructive contract. RawTherapee's own convention
-    /// is to write `photo.raw.pp3` next to the source; we deliberately do not.
+    /// Writes both profiles into that scratch directory — never beside the
+    /// original, which would violate the non-destructive contract. RawTherapee's
+    /// own convention is to write `photo.raw.pp3` next to the source; we
+    /// deliberately do not.
+    ///
+    /// The per-call scratch directory matters: output names are derived from the
+    /// input's filename stem, and the orchestrator passes one shared `tmp_dir`
+    /// for the whole run, so two photos with the same stem — different folders,
+    /// or two unnamed inputs both falling back to `"photo"` — would otherwise
+    /// silently overwrite each other's TIFF and profile. The second would then
+    /// look like it had rendered successfully against the wrong recipe.
     pub fn render(
         &self,
         raw: &Path,
@@ -2489,12 +2620,20 @@ impl Pp3Renderer {
             .unwrap_or("photo")
             .to_string();
 
-        let base_path = tmp_dir.join("base.pp3");
-        let photo_path = tmp_dir.join(format!("{stem}.pp3"));
+        // A fresh directory per render, so stem collisions are impossible by
+        // construction rather than by convention.
+        let scratch = tempfile::TempDir::new_in(tmp_dir).map_err(|source| DevelopError::Io {
+            path: tmp_dir.to_path_buf(),
+            source,
+        })?;
+        let scratch_dir = scratch.path().to_path_buf();
+
+        let base_path = scratch_dir.join("base.pp3");
+        let photo_path = scratch_dir.join(format!("{stem}.pp3"));
         write_file(&base_path, BASE_PP3)?;
         write_file(&photo_path, &emit_pp3(recipe))?;
 
-        let args = build_args(&base_path, &photo_path, tmp_dir, raw);
+        let args = build_args(&base_path, &photo_path, &scratch_dir, raw);
         let out = Command::new(&self.exe)
             .args(&args)
             .output()
@@ -2515,7 +2654,7 @@ impl Pp3Renderer {
         }
 
         // RawTherapee derives the output name from the input stem.
-        let tiff = tmp_dir.join(format!("{stem}.tif"));
+        let tiff = scratch_dir.join(format!("{stem}.tif"));
         if !tiff.exists() {
             return Err(DevelopError::Render {
                 path: raw.to_path_buf(),
@@ -2525,6 +2664,7 @@ impl Pp3Renderer {
         Ok(RenderedTiff {
             tiff,
             pp3: photo_path,
+            _scratch: scratch,
         })
     }
 }
@@ -2607,8 +2747,6 @@ use pipeline::develop::is_up_to_date;
 fn sample_recipe() -> EditRecipe {
     EditRecipe {
         exposure_ev: 0.5,
-        wb_temp_k: 5500.0,
-        wb_green: 1.0,
         highlight_recovery: 0.2,
         shadow_lift: 0.1,
         denoise_luma: 0.0,
@@ -2711,7 +2849,7 @@ fn each_identity_component_forces_a_rerender() {
     assert!(!is_up_to_date(&base, &recipe_changed, Some(&out), Some(100)));
 
     let mut decider_changed = base.clone();
-    decider_changed.decider_version = "decide-2".into();
+    decider_changed.decider_version = "some-other-decider".into();
     assert!(!is_up_to_date(&base, &decider_changed, Some(&out), Some(100)));
 
     let mut content_changed = base.clone();
@@ -2795,17 +2933,15 @@ impl Catalog {
         let r = &row.recipe;
         conn.execute(
             "INSERT INTO edits
-                (file_id, content_hash, exposure_ev, wb_temp_k, wb_green,
+                (file_id, content_hash, exposure_ev,
                  highlight_recovery, shadow_lift, denoise_luma, denoise_chroma,
                  sharpen_amount, lens_correct, recipe_hash, decider_version,
                  renderer, look_model, look_version, lut_hash, look_applied,
                  iqa_before, iqa_after, output_path, output_size_bytes, rendered_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT (file_id) DO UPDATE SET
                  content_hash = excluded.content_hash,
                  exposure_ev = excluded.exposure_ev,
-                 wb_temp_k = excluded.wb_temp_k,
-                 wb_green = excluded.wb_green,
                  highlight_recovery = excluded.highlight_recovery,
                  shadow_lift = excluded.shadow_lift,
                  denoise_luma = excluded.denoise_luma,
@@ -2825,7 +2961,7 @@ impl Catalog {
                  output_size_bytes = excluded.output_size_bytes,
                  rendered_at = excluded.rendered_at",
             duckdb::params![
-                row.file_id, row.content_hash, r.exposure_ev, r.wb_temp_k, r.wb_green,
+                row.file_id, row.content_hash, r.exposure_ev,
                 r.highlight_recovery, r.shadow_lift, r.denoise_luma, r.denoise_chroma,
                 r.sharpen_amount, r.lens_correct, row.recipe_hash, row.decider_version,
                 row.renderer, row.look_model, row.look_version, row.lut_hash,
@@ -3005,31 +3141,27 @@ fn missing_renderer_fails_before_any_work() {
 
 /// One unreadable raw must not abort the run, and must leave no edits row —
 /// a half-recorded render would make the next run believe it succeeded.
+///
+/// Needs a real RawTherapee: `probe()` authenticates the binary by its version
+/// banner (see Task 9), so a stand-in like `true` cannot get us past it to the
+/// per-file path this test is about. Gated, and skips cleanly when absent.
 #[test]
 fn unreadable_raw_is_skipped_without_an_edits_row() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
     let (_dir, cat) = temp_catalog();
     let id = seed_file(&cat, "/tmp/definitely-missing.arw", "keep");
     let out = tempfile::TempDir::new().unwrap();
-    // Point at a real executable that is not RawTherapee, so probe() passes
-    // and the failure happens per-file during measure instead.
     let cfg = DevelopConfig {
-        rawtherapee_path: fake_renderer_path(),
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
     };
     let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
     assert_eq!(report.errored, 1);
     assert_eq!(report.rendered, 0);
     assert!(cat.edit_identity(id).unwrap().is_none(), "no row on failure");
-}
-
-/// A stand-in binary that exits 0 for `--version`. `probe()` only checks the
-/// exit status, so this lets the test reach the per-file path.
-fn fake_renderer_path() -> String {
-    if cfg!(windows) {
-        "cmd".into()
-    } else {
-        "true".into()
-    }
 }
 ```
 
@@ -3221,13 +3353,17 @@ fn finish_one(
         .with_context(|| format!("cannot read rendered TIFF {}", rendered.tiff.display()))?;
     encode_jpeg(&img, &dest, cfg.jpeg_quality)?;
 
-    // Delete the TIFF immediately — it is the largest thing in the pipeline.
-    let _ = std::fs::remove_file(&rendered.tiff);
-
     // The .pp3 sits beside the JPEG as an escape hatch for reopening the photo
-    // in RawTherapee. Never beside the original raw.
+    // in RawTherapee. Never beside the original raw. Copy it before `rendered`
+    // is dropped, since the drop removes the scratch directory.
     let pp3_dest = dest.with_extension("pp3");
     let _ = std::fs::copy(&rendered.pp3, &pp3_dest);
+
+    // Dropping `rendered` removes its scratch directory, which is what deletes
+    // the 16-bit TIFF — roughly 145 MB for a 24 MP frame, and the largest thing
+    // in the pipeline. Explicit rather than incidental, so peak disk stays at
+    // about one TIFF regardless of how many photos the run processes.
+    drop(rendered);
 
     let size = std::fs::metadata(&dest).map(|m| m.len() as i64).ok();
     catalog.upsert_edit(&EditRow {
@@ -3287,19 +3423,19 @@ fn now_secs() -> i64 {
 }
 ```
 
-- [ ] **Step 5: Add `tempfile` as a real dependency of `pipeline`**
+- [ ] **Step 5: Confirm `tempfile` is a real dependency of `pipeline`**
 
-`finish_folder` uses `tempfile::TempDir` at runtime, not just in tests. Move it
-out of `[dev-dependencies]` in `crates/pipeline/Cargo.toml`:
+`finish_folder` uses `tempfile::TempDir` at runtime, not just in tests. **Task 9
+already moved it** from `[dev-dependencies]` to `[dependencies]`, because
+`Pp3Renderer::render` needs it for its per-call scratch directory. Verify and
+move on:
 
-```toml
-[dependencies]
-# … existing entries …
-tempfile     = { workspace = true }
+```bash
+grep -n -A20 '^\[dependencies\]' crates/pipeline/Cargo.toml | grep tempfile
 ```
 
-Leave the `[dev-dependencies]` entry in place or remove it — Cargo accepts
-either, and a duplicate is harmless.
+Expected: a line is printed. If not, add `tempfile = { workspace = true }` under
+`[dependencies]`.
 
 - [ ] **Step 6: Re-export from `lib.rs`**
 
@@ -3597,9 +3733,12 @@ Open `/tmp/finished-baseline` in a file browser and look at every image:
 1. **Exposure** — is anything obviously too dark or blown out? A systematic bias
    in one direction means the `MID_GREY` / `HIGHLIGHT_TARGET` constants in
    `decide.rs` need adjusting, not individual photos.
-2. **White balance** — are there colour casts the camera got right and we got
-   wrong? If so, check whether `AGREEMENT_RADIANS` is too wide (blending when it
-   should trust as-shot) or the `coeffs_to_temp_green` approximation is off.
+2. **White balance** — v1 passes the camera's own WB through untouched
+   (`Setting=Camera`), so any cast you see is the camera's, not ours. If casts
+   are common enough to matter, that is the evidence for specifying a WB
+   override — which needs a *verifiable* coefficient-to-Temperature/Green
+   conversion, the thing that was got wrong and removed. The PCA illuminant
+   estimate is already persisted in `raw_stats` and ready to drive it.
 3. **Denoise at high ISO** — this is spec open item 2. Pick your highest-ISO
    frames and compare against the same file developed in Lightroom. Smeared
    detail means the anchors in `denoise_curve` are too aggressive; visible

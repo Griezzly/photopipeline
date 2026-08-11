@@ -13,6 +13,7 @@ pub struct Config {
     pub defect: DefectConfig,
     pub dedupe: DedupeConfig,
     pub output: OutputConfig,
+    pub develop: DevelopConfig,
 }
 
 // ── catalog ───────────────────────────────────────────────────────────────────
@@ -216,6 +217,65 @@ pub enum KeeperStrategy {
     IqaThenSharpness,
 }
 
+// ── develop ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DevelopConfig {
+    /// Only "rawtherapee" is implemented in v1.
+    pub renderer: String,
+    /// Absolute path to `rawtherapee-cli`. Empty = search PATH.
+    pub rawtherapee_path: String,
+    /// Literal `<library>` is substituted with the scan root, matching
+    /// `[output].review_tree`.
+    pub finished_dir: String,
+    pub jpeg_quality: u8,
+    pub output_subdirs: OutputSubdirs,
+    pub look: LookConfig,
+}
+
+impl Default for DevelopConfig {
+    fn default() -> Self {
+        Self {
+            renderer: "rawtherapee".into(),
+            rawtherapee_path: String::new(),
+            finished_dir: "<library>/_finished".into(),
+            jpeg_quality: 92,
+            output_subdirs: OutputSubdirs::Month,
+            look: LookConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputSubdirs {
+    Month,
+    Flat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LookConfig {
+    pub enable: bool,
+    pub model: String,
+    /// Fall back to baseline-only if the look lowers the IQA score.
+    pub guard_iqa: bool,
+    /// Allowed IQA drop before the look is rejected.
+    pub guard_margin: f32,
+}
+
+impl Default for LookConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            model: "lut3d-fivek".into(),
+            guard_iqa: true,
+            guard_margin: 0.02,
+        }
+    }
+}
+
 // ── loading ───────────────────────────────────────────────────────────────────
 
 /// Default config-file path: `<config dir>/photopipe/photopipe.toml`.
@@ -307,5 +367,32 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_str).expect("legacy link_type should be ignored");
         assert_eq!(cfg.output.review_tree, "<library>/_review");
+    }
+
+    #[test]
+    fn develop_defaults_and_override() {
+        let cfg = Config::default();
+        assert_eq!(cfg.develop.renderer, "rawtherapee");
+        assert_eq!(cfg.develop.finished_dir, "<library>/_finished");
+        assert_eq!(cfg.develop.jpeg_quality, 92);
+        assert_eq!(cfg.develop.output_subdirs, OutputSubdirs::Month);
+        assert!(cfg.develop.look.enable);
+        assert!(cfg.develop.look.guard_iqa);
+
+        let toml_str = r#"
+            [develop]
+            jpeg_quality = 85
+            output_subdirs = "flat"
+
+            [develop.look]
+            enable = false
+        "#;
+        let parsed: Config = toml::from_str(toml_str).expect("parse");
+        assert_eq!(parsed.develop.jpeg_quality, 85);
+        assert_eq!(parsed.develop.output_subdirs, OutputSubdirs::Flat);
+        assert!(!parsed.develop.look.enable);
+        // untouched fields keep their defaults
+        assert_eq!(parsed.develop.renderer, "rawtherapee");
+        assert_eq!(parsed.develop.look.guard_margin, 0.02);
     }
 }

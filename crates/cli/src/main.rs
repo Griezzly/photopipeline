@@ -172,6 +172,20 @@ enum Command {
         #[arg(long)]
         regenerate: bool,
     },
+
+    /// Develop every kept photo into finished JPEGs.
+    ///
+    /// Reads `decisions.verdict = 'keep'`, applies analytic technical
+    /// corrections through RawTherapee, and writes a tree of JPEGs. Runs
+    /// entirely without per-photo input. Requires `rawtherapee-cli` — check
+    /// `photopipe doctor` first.
+    Finish {
+        /// Folder whose library to develop.
+        folder: PathBuf,
+        /// Destination directory. Overrides `[develop] finished_dir`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -212,6 +226,7 @@ fn main() -> Result<()> {
             output,
             regenerate,
         } => cmd_export_keepers(&folder, output, regenerate, &cfg, &roots),
+        Command::Finish { folder, out } => cmd_finish(&folder, out, &cfg, &roots),
     }
 }
 
@@ -406,6 +421,59 @@ fn cmd_export_keepers(
     Ok(())
 }
 
+fn cmd_finish(
+    folder: &std::path::Path,
+    out: Option<PathBuf>,
+    cfg: &config::Config,
+    roots: &LibraryRoots,
+) -> Result<()> {
+    let lib = require_library(roots, folder)?;
+
+    // The CLI argument wins, so a one-off export never needs a config edit.
+    let out_dir = match out {
+        Some(p) => config::expand_tilde(&p),
+        None => config::expand_tilde(&pipeline::substitute_library(
+            &cfg.develop.finished_dir,
+            &lib.folder,
+        )),
+    };
+
+    println!("Developing keepers → {} …", out_dir.display());
+
+    let report = pipeline::finish_folder(&lib.catalog, &cfg.develop, &out_dir, &CliProgress)?;
+
+    println!(
+        "Finished {} photos, {} already current, {} skipped (not RAW), {} failed → {}",
+        report.rendered,
+        report.skipped,
+        report.skipped_unsupported,
+        report.errored,
+        out_dir.display()
+    );
+    if report.skipped_unsupported > 0 {
+        println!(
+            "{} keeper(s) are not RAW files; `finish` only develops RAWs.",
+            report.skipped_unsupported
+        );
+    }
+    if report.errored > 0 {
+        println!("Re-run with --log-level debug to see why individual files failed.");
+    }
+    Ok(())
+}
+
+/// Terminal progress sink. A future Develop screen in `serve` passes the
+/// server's job sink to the same `finish_folder` signature instead.
+struct CliProgress;
+
+impl pipeline::ProgressSink for CliProgress {
+    fn stage(&self, stage: &str) {
+        tracing::info!(stage, "finish");
+    }
+    fn set_total(&self, _total: u64) {}
+    fn inc(&self) {}
+}
+
 fn cmd_info(file: PathBuf, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
     let _ = cfg;
     let file = config::expand_tilde(&file);
@@ -540,6 +608,7 @@ fn cmd_doctor(
     let mut checks: Vec<DoctorCheck> = Vec::new();
     checks.push(doctor_check_cache_writable(&roots.cache));
     checks.push(doctor_check_disk_free(&roots.data));
+    checks.push(doctor_check_rawtherapee(&cfg.develop));
 
     // Actually attempt to load models so we report which slots came up.
     match ModelHub::from_config(&cfg.models) {
@@ -620,6 +689,32 @@ fn doctor_check_disk_free(path: &std::path::Path) -> DoctorCheck {
             }
         }
         None => DoctorCheck::warn("Disk free", "could not determine free space".to_string()),
+    }
+}
+
+/// Locate `rawtherapee-cli` and confirm it runs. Non-critical: `finish` is the
+/// only command that needs it, so a missing binary must not fail `doctor` for a
+/// user who only scans and reviews.
+///
+/// Delegates to `Pp3Renderer::probe`, which authenticates on the RawTherapee
+/// version banner rather than the exit status (RawTherapee 5.13 exits 2 on
+/// `--version`), and — unlike the check this replaced — rejects a binary that
+/// runs but never mentions RawTherapee, so a misconfigured `rawtherapee_path`
+/// pointing at some other executable no longer reports `[ ok ]`.
+fn doctor_check_rawtherapee(cfg: &config::DevelopConfig) -> DoctorCheck {
+    let renderer = pipeline::develop::render::Pp3Renderer::new(cfg);
+    match renderer.probe() {
+        Ok(banner) => DoctorCheck::ok(
+            "RawTherapee",
+            format!("{} ({})", banner, renderer.exe_path().display()),
+        ),
+        Err(e) => DoctorCheck::warn(
+            "RawTherapee",
+            format!(
+                "{e} — install it and set [develop] rawtherapee_path, \
+                 or `photopipe finish` will not work"
+            ),
+        ),
     }
 }
 
