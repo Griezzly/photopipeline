@@ -70,7 +70,7 @@ separate path→function mapping for restores; two mappings will drift.
 | Hash | Applies |
 |---|---|
 | `#/libraries` | `openLibraries()` |
-| `#/analyze` | `startAnalyze()` — always `replace`-navigated, see below |
+| `#/analyze` | `startAnalyze()` — pushed on entry, replaced on exit; see A2 |
 | `#/review` | `openReview(state.activeFolder)` |
 | `#/review/photo/:id` | `openReview` (if not already there) + `openDetail(indexOf(id))` |
 | `#/duplicates` | `openDuplicates(state.activeFolder)` |
@@ -123,11 +123,13 @@ the parent route instead of calling `back()`.
 
 ### Analyze
 
-`#/analyze` is `replace`d rather than pushed, so `#/libraries` → `#/analyze` →
-`#/review` leaves two entries and Back from review lands on libraries rather
-than re-entering a finished job screen. A reload on `#/analyze` resolves via
-`GET /api/analyze/status`: a running job shows progress; anything else redirects
-per the empty-route rule.
+Entering `#/analyze` pushes a history entry; leaving it — job done, "Review N
+so far", or a failed start — **replaces** that entry rather than stacking a
+third. So `#/libraries` → `#/analyze` → `#/review` leaves two entries and Back
+from review lands on libraries rather than re-entering a finished job screen.
+A reload on `#/analyze` resolves via `GET /api/analyze/status`: a running job
+shows progress; anything else redirects per the empty-route rule. See
+amendment A2 — an earlier draft of this section claimed the opposite split.
 
 ## Error handling
 
