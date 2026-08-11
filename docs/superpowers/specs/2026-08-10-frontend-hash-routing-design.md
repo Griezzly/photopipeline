@@ -75,6 +75,8 @@ separate path→function mapping for restores; two mappings will drift.
 | `#/review/photo/:id` | `openReview` (if not already there) + `openDetail(indexOf(id))` |
 | `#/duplicates` | `openDuplicates(state.activeFolder)` |
 | `#/duplicates/compare/:groupId` | `openDuplicates` + `openCompare(groupId)` |
+| `#/review/compare/:groupId` | `openReview` + `openCompare(groupId)` |
+| `#/review/photo/:photoId/compare/:groupId` | `openReview` + `openDetail` + `openCompare(groupId)` |
 | `#/export` | parent screen + `openExport()` modal |
 | empty or unknown | `replace()` to `#/review` if a library is active, else `#/libraries` |
 
@@ -171,3 +173,29 @@ decision.
 - `crates/cli/tests/serve.rs` — asset delivery assertion
 
 No Rust changes beyond the test. The hash never reaches the server.
+
+## Amendments
+
+Recorded 2026-08-11, while writing the implementation plan.
+
+### A1 — Compare has three parents, not one
+
+The original route table gave compare a single route under `/duplicates`.
+`openCompare` is in fact reached from three places — the duplicates list
+(`duplicates.js:277`, `duplicates.js:544`), the review grid via `c`
+(`review.js:778`), and the photo detail overlay via `c` (`detail.js:224`) —
+and `compare.js:266-268` already branches on which one it was, returning to
+the duplicates list only when that is where it came from. A single
+`/duplicates`-parented route would silently change that. Compare therefore
+gets one route per parent, listed in the route table above. `parentPath()`
+in `router.js` is the single place that mapping lives.
+
+### A2 — Analyze pushes on entry, replaces on exit
+
+The "Analyze" section said `#/analyze` is "`replace`d rather than pushed",
+but the worked example in the same paragraph — `#/libraries` → `#/analyze` →
+`#/review` leaving two entries, with Back from review landing on libraries —
+requires the opposite split: **entering** analyze pushes a history entry,
+and **leaving** it (job done, "Review N so far", or a start failure)
+replaces that entry rather than stacking a third. The worked example is
+correct and is what gets implemented; the sentence before it was wrong.
