@@ -910,3 +910,56 @@ async fn keyboard_modules_carry_cross_library_stand_down_guards() {
         "unexpected set of modules with a lastFolder comparison"
     );
 }
+
+/// The SPA is served from rust-embed, so a file that exists on disk but was
+/// not embedded 404s at runtime with no build-time warning. Assert both that
+/// router.js ships and that app.js actually pulls it in — a router nobody
+/// imports is the failure mode this catches.
+#[tokio::test]
+async fn router_asset_is_served_and_imported() {
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let state = app_state_active(catalog, cache);
+
+    let resp = photopipe::serve::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/router.js")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "text/javascript; charset=utf-8"
+    );
+
+    let resp = photopipe::serve::router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/app.js")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let app_js = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        app_js.contains("/router.js"),
+        "app.js does not import /router.js"
+    );
+    assert!(
+        app_js.contains("startRouter"),
+        "app.js never starts the router"
+    );
+}
