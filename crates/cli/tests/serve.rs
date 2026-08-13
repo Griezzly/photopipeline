@@ -1137,3 +1137,63 @@ async fn router_asset_is_served_and_imported() {
         "app.js never starts the router"
     );
 }
+
+/// Every path the nav rail navigates to must be one the router can parse.
+///
+/// This is the failure this test exists for, and it has already happened once:
+/// the Develop screen shipped while the routing branch was open, so the branch
+/// carried a rail cell and a screen module with no route behind them. A rail
+/// cell calling `go()` with a path `parsePath` returns null for does not error
+/// — the router silently resolves the default instead, and the cell appears to
+/// do nothing or bounces to Review.
+///
+/// Crude on purpose, in the same spirit as
+/// `keyboard_modules_carry_cross_library_stand_down_guards`: it proves the
+/// route's first segment is a string `router.js` knows, not that the applier
+/// behind it is correct. Behavioural coverage of the router is manual (see the
+/// design doc's Testing section). Catching "nobody wired the route at all" is
+/// worth a grep; the rest is not.
+#[tokio::test]
+async fn every_rail_destination_is_a_route_the_router_knows() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    let state = app_state_active(catalog, cache);
+
+    let rail = fetch_asset(&state, "rail.js").await;
+    let router = fetch_asset(&state, "router.js").await;
+
+    // window.pp.go('/review') → "review"
+    let mut dests: Vec<String> = Vec::new();
+    for (i, _) in rail.match_indices("window.pp.go('/") {
+        let rest = &rail[i + "window.pp.go('/".len()..];
+        let Some(end) = rest.find('\'') else { continue };
+        dests.push(rest[..end].to_string());
+    }
+    dests.sort_unstable();
+    dests.dedup();
+
+    assert_eq!(
+        dests,
+        ["develop", "duplicates", "export", "libraries", "review"],
+        "unexpected set of rail destinations — a new rail cell needs a route in \
+         router.js, and this list updated in the same commit"
+    );
+
+    // Scoped to parsePath's own body. Searching the whole file would pass on
+    // an incidental mention — 'develop' also appears in OVERLAY_ROUTES, in
+    // closeOverlays and in comments, and a first draft of this test went green
+    // with parsePath's develop arm deliberately renamed out of existence.
+    let parse = block_after(&router, "export function parsePath")
+        .expect("router.js has no parsePath function to check against");
+
+    for d in &dests {
+        let seg = d.split('/').next().unwrap();
+        assert!(
+            parse.contains(&format!("'{seg}'")),
+            "the rail navigates to /{d}, but router.js's parsePath never matches \
+             '{seg}' — it would return null and the router would silently resolve \
+             the default route instead"
+        );
+    }
+}
