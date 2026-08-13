@@ -541,8 +541,13 @@ async fn fs_open_and_active_flow() {
     assert_eq!(ov["pending_new"], 0);
 }
 
-/// While a job is in flight, both a concurrent analyze and an open of the same
-/// folder are rejected with 409 (rather than attempting a second DuckDB open).
+/// While a job is in flight, a concurrent analyze, a concurrent finish, and an
+/// open of the same folder are all rejected with 409 (rather than attempting a
+/// second DuckDB open, or two runs that each want every core).
+///
+/// Both directions are covered: analyze and finish share one job slot, so
+/// either must reject the other. That single slot is the policy — finish is
+/// serial precisely because `rawtherapee-cli` saturates the machine on its own.
 #[tokio::test]
 async fn busy_job_rejects_concurrent_analyze_and_open() {
     use axum::http::StatusCode;
@@ -551,23 +556,32 @@ async fn busy_job_rejects_concurrent_analyze_and_open() {
     let folder = dir.path().join("shoot");
     std::fs::create_dir_all(&folder).unwrap();
 
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
     let state = photopipe::serve::AppState {
         cfg: std::sync::Arc::new(pipeline::config::Config::default()),
         roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
             data: dir.path().join("data"),
             cache: dir.path().join("cache"),
         }),
-        active: std::sync::Arc::new(Mutex::new(None)),
+        // A library *is* open, so a 409 from /api/finish below can only be the
+        // busy guard — not the no-library-open guard wearing the same code.
+        active: std::sync::Arc::new(Mutex::new(Some(photopipe::serve::ActiveLibrary {
+            folder: folder.clone(),
+            catalog: std::sync::Arc::new(catalog),
+            cache: std::sync::Arc::new(cache),
+        }))),
         job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
     };
 
     // Seed a running job on `folder` (simulates a fresh analyze in flight).
     {
         let mut j = state.job.lock().unwrap();
+        j.kind = "analyze".into();
         j.stage = "scanning".into();
         j.folder = folder.to_string_lossy().into_owned();
     }
-    let app = photopipe::serve::router(state);
+    let app = photopipe::serve::router(state.clone());
 
     // A second analyze (any folder) is rejected.
     let (s, _) = post_json(
@@ -586,6 +600,166 @@ async fn busy_job_rejects_concurrent_analyze_and_open() {
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT);
+
+    // A finish while the analyze runs is rejected too. Skipped where no real
+    // rawtherapee-cli is installed: post_finish probes the renderer *before*
+    // the busy guard, on purpose (a setup problem must never take the job
+    // slot), so without one this would 400 rather than 409 and prove nothing.
+    if pipeline::develop::render::Pp3Renderer::new(&pipeline::config::DevelopConfig::default())
+        .probe()
+        .is_ok()
+    {
+        let (s, _) = post_json(app.clone(), "/api/finish", serde_json::json!({})).await;
+        assert_eq!(
+            s,
+            StatusCode::CONFLICT,
+            "a develop run must not start while an analysis is in flight"
+        );
+    }
+
+    // …and the other direction: with a finish in the slot, analyze is rejected.
+    {
+        let mut j = state.job.lock().unwrap();
+        j.kind = "finish".into();
+        j.stage = "developing".into();
+    }
+    let (s, _) = post_json(
+        app,
+        "/api/analyze",
+        serde_json::json!({"folder": folder.to_str().unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "an analysis must not start while a develop run is in flight"
+    );
+}
+
+// ── Develop screen endpoints ─────────────────────────────────────────────────
+
+/// Like `post_json`, but keeps the body as text. `post_finish`'s renderer
+/// refusal is a plain-string explanation, and asserting on it is the point of
+/// `post_finish_reports_a_clear_error_when_the_renderer_is_missing`.
+async fn post_text(
+    app: axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, String) {
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// An active library holding two kept RAWs and one kept JPG, so the estimate's
+/// `keepers` and `raw_keepers` cannot be confused with one another.
+fn state_with_keepers() -> (tempfile::TempDir, photopipe::serve::AppState) {
+    use pipeline::catalog::Verdict;
+    use pipeline::ingest::{FileFormat, IngestedFile};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = pipeline::catalog::Catalog::open(&dir.path().join("c.duckdb")).unwrap();
+    let seeded: Vec<_> = [
+        ("/lib/a.arw", FileFormat::Arw),
+        ("/lib/b.arw", FileFormat::Arw),
+        ("/lib/c.jpg", FileFormat::Jpg),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (path, format))| {
+        (
+            IngestedFile {
+                path: std::path::PathBuf::from(path),
+                content_hash: 0x100 + i as u128,
+                size: 1,
+                mtime_ns: 1,
+                format,
+                has_sidecar_jpg: false,
+            },
+            None,
+        )
+    })
+    .collect();
+    for id in catalog.flush_batch(&seeded).unwrap() {
+        catalog.set_decision(id, Verdict::Keep, None).unwrap();
+    }
+    let cache = pipeline::cache::Cache::open(dir.path().join("cache")).unwrap();
+    (dir, app_state_active(catalog, cache))
+}
+
+#[tokio::test]
+async fn finish_estimate_reports_keepers_and_output_dir() {
+    let (_dir, state) = state_with_keepers();
+    let app = photopipe::serve::router(state);
+
+    let (s, v) = get_json(app, "/api/finish/estimate").await;
+    assert_eq!(s, axum::http::StatusCode::OK);
+    assert_eq!(v["keepers"], 3);
+    assert_eq!(
+        v["raw_keepers"], 2,
+        "a kept JPG is not developable — finish only develops RAWs"
+    );
+    // `<library>` resolved against the active library, not left as a template.
+    assert_eq!(v["out_dir"], "/lib/_finished");
+    // Present either way, and both are booleans rather than absent: the screen
+    // branches on them before it will start a run.
+    assert!(v["renderer_available"].is_boolean());
+    assert!(v["look_available"].is_boolean());
+}
+
+#[tokio::test]
+async fn finish_estimate_409_without_a_library() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let state = photopipe::serve::AppState {
+        cfg: std::sync::Arc::new(pipeline::config::Config::default()),
+        roots: std::sync::Arc::new(pipeline::library::LibraryRoots {
+            data: dir.path().join("d"),
+            cache: dir.path().join("c"),
+        }),
+        active: std::sync::Arc::new(Mutex::new(None)),
+        job: std::sync::Arc::new(Mutex::new(photopipe::serve::JobState::default())),
+    };
+    let (s, _) = get_json(photopipe::serve::router(state), "/api/finish/estimate").await;
+    assert_eq!(s, axum::http::StatusCode::CONFLICT);
+}
+
+/// A missing renderer is a setup problem. It must be refused up front with an
+/// explanation, not accepted as a job that starts and dies on its first call —
+/// which would also occupy the single job slot for no reason.
+#[tokio::test]
+async fn post_finish_reports_a_clear_error_when_the_renderer_is_missing() {
+    let (_dir, mut state) = state_with_keepers();
+    let mut cfg = pipeline::config::Config::default();
+    cfg.develop.rawtherapee_path = "/nonexistent/rawtherapee-cli".into();
+    state.cfg = std::sync::Arc::new(cfg);
+    let job = state.job.clone();
+    let app = photopipe::serve::router(state);
+
+    let (s, body) = post_text(app, "/api/finish", serde_json::json!({"regenerate": false})).await;
+    assert_eq!(s, axum::http::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("rawtherapee"),
+        "the refusal must name the missing dependency: {body}"
+    );
+    assert_eq!(
+        job.lock().unwrap().stage,
+        "idle",
+        "a refused start must leave the job slot free"
+    );
 }
 
 /// The embedded font must be served as a font, not application/octet-stream —
