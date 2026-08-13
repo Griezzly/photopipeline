@@ -368,6 +368,7 @@ export function closeCompare() {
  *  The unmount happens in closeCompare() when the router applies the parent
  *  route, so Escape and Back do the same thing. */
 function dismissCompare() {
+  if (!root) return;
   if (leaving) return;
   leaving = true;
   // The parent differs per route (amendment A1), and on a cold deep link

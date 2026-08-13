@@ -27,6 +27,7 @@ let shownFileId = null; // the file `dump` and the stage belong to
 let dumpState = 'loading'; // 'loading' | 'ready' | 'error'
 let zoom = 'fit'; // 'fit' | 1 | 2
 let deciding = false; // one decision in flight at a time, as in review.js
+let leaving = false;  // dismissal queued; the overlay is still mounted but must not act
 
 // /api/photos/:id has no notion of "how many frames are in this group" (it
 // only lists the group ids a file belongs to). That count only exists on
@@ -165,8 +166,15 @@ export function openDetail(index) {
   const list = window.pp.reviewPhotos();
   if (!list.length) return;
   idx = Math.max(0, Math.min(list.length - 1, index));
-  zoom = 'fit';
-  if (!root) mount();
+  // zoom only resets on a fresh open, not on every call: stepping now goes
+  // through the router (move() names a URL, ROUTES.photo calls openDetail
+  // per frame), so unconditionally resetting here would snap 100%/200% back
+  // to fit on every arrow key.
+  if (!root) {
+    zoom = 'fit';
+    mount();
+  }
+  leaving = false;
   window.pp.reviewSetIndex(idx);
   loadDump();
 }
@@ -182,17 +190,21 @@ export function closeDetail() {
   dump = null;
   shownFileId = null;
   dumpState = 'loading';
+  leaving = false;
 }
 
-/** What every user-facing close path calls: Escape, the ✕ button, `f`, and
- *  the defensive "the list emptied under us" branches. The unmount itself
- *  happens in closeDetail(), which the router calls when it applies the
- *  parent route. Stepping pushes one history entry per frame, so leaving
- *  goes through exitOverlay() — one hop across the whole run, not one step
- *  back to whatever frame was visited last — which is what makes Escape and
- *  Back interchangeable regardless of how far the run has gone.
+/** The user-facing close: Escape, the ✕ button, `f`, and the defensive
+ *  "the list emptied under us" branches. exitOverlay leaves the whole run in
+ *  one hop — stepping pushes an entry per frame, so a plain back() would only
+ *  reach the previous photo. The unmount happens in closeDetail() when the
+ *  router applies the parent route, so Escape and Back do the same thing.
+ *  compare.js's dismissCompare and export.js's modal onClose are the same
+ *  contract with different mechanisms; the guard matters most here, because
+ *  this is the exit that traverses more than one entry.
  *  closeDetail() must stay a pure unmount or this recurses. */
 function dismissDetail() {
+  if (leaving) return;
+  leaving = true;
   window.pp.exitOverlay('/review');
 }
 
@@ -497,6 +509,7 @@ function onKey(e) {
   // keys typed over compare also reach the photo hidden underneath.
   const host = el('modal-host');
   if (host && root && host.lastElementChild !== root) return;
+  if (leaving) return;
   // stopPropagation for the same reason as the `f` branch below: without it a
   // single Escape closes this overlay *and* reaches review.js's handler, which
   // then also shuts the shortcut sheet or a filter popover the user left open
@@ -542,18 +555,6 @@ function onKey(e) {
   if (k === 'c' || k === 'C') { compare(); }
 }
 
-/**
- * Repaint the overlay against whatever `window.pp.reviewPhotos()` now returns.
- * A no-op when detail is closed, so callers never have to know.
- *
- * This exists for compare.js: a keeper set from compare closes compare and
- * reloads the review list, but when compare was opened from *this* screen with
- * `c`, the .detail underneath is still mounted and would otherwise keep showing
- * the pre-decision state — "Undecided" for a frame that is now keeper or
- * reject — while `idx` indexes into a freshly replaced array behind stale DOM.
- * The header comment on this module claims the decision bar here and the tile
- * behind it can never disagree; this is what keeps that true across compare.
- */
 /** Keep the URL pointed at the frame actually on screen — but only when the
  *  router is on a bare photo route. detailRefresh can run while a dismissal
  *  is queued but not yet landed (compare.js's setKeeper does exactly that),
@@ -569,6 +570,18 @@ function syncDetailPath(fileId) {
   }
 }
 
+/**
+ * Repaint the overlay against whatever `window.pp.reviewPhotos()` now returns.
+ * A no-op when detail is closed, so callers never have to know.
+ *
+ * This exists for compare.js: a keeper set from compare closes compare and
+ * reloads the review list, but when compare was opened from *this* screen with
+ * `c`, the .detail underneath is still mounted and would otherwise keep showing
+ * the pre-decision state — "Undecided" for a frame that is now keeper or
+ * reject — while `idx` indexes into a freshly replaced array behind stale DOM.
+ * The header comment on this module claims the decision bar here and the tile
+ * behind it can never disagree; this is what keeps that true across compare.
+ */
 export function detailRefresh() {
   if (!root) return;
   const list = window.pp.reviewPhotos();

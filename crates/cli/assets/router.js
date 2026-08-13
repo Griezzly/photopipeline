@@ -258,12 +258,15 @@ const ROUTES = {
 
   async photo(r) {
     closeOverlays('detail');
+    // Captured before the await: a navigation landing in apply()'s `queued`
+    // slot during ensureLibrary() would otherwise make this check read a
+    // newer entry's stamp once the await resolves (M-1).
+    const stamped = history.state && history.state.ppFolder;
     const folder = await ensureLibrary();
     if (!folder) return '/libraries';
     // file_id is only meaningful against the catalog it came from — every
     // library restarts the sequence at 1, so a stale id from another library
     // lands on a real, unrelated photo rather than missing.
-    const stamped = history.state && history.state.ppFolder;
     if (stamped && stamped !== folder) {
       window.pp.toast({
         kind: 'info',
@@ -290,6 +293,8 @@ const ROUTES = {
 
   async compare(r, payload) {
     closeOverlays('compare');
+    // Captured before the await — same reasoning as ROUTES.photo (M-1).
+    const stamped = history.state && history.state.ppFolder;
     const folder = await ensureLibrary();
     if (!folder) return '/libraries';
     // group_id is only meaningful against the catalog it came from — every
@@ -299,7 +304,6 @@ const ROUTES = {
     // hardcoded path, since compare's parent varies with `over`. Checked
     // before restoring the layer underneath, so a rejected route never
     // flashes the wrong nested screen first.
-    const stamped = history.state && history.state.ppFolder;
     if (stamped && stamped !== folder) {
       window.pp.toast({
         kind: 'info',
@@ -320,7 +324,14 @@ const ROUTES = {
       if (r.over === 'photo') {
         const list = window.pp.reviewPhotos();
         const i = list.findIndex((p) => p.file_id === r.photoId);
-        if (i < 0) return '/review';
+        if (i < 0) {
+          window.pp.toast({
+            kind: 'info',
+            title: 'That photo is not in the current view',
+            body: 'It may be filtered out, or it belongs to a different library.',
+          });
+          return '/review';
+        }
         window.pp.openDetail(i);
       }
     }
