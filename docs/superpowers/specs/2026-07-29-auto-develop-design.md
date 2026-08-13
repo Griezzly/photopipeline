@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-29
 **Revised:** 2026-08-09 — see §0
-**Status:** Approved (brainstorm) — ready for implementation planning
+**Status:** Implemented (2026-08-13). Phase 1 baseline, the CHECKPOINT (A11),
+and Phase 2's look all landed; see §13 for what each open item turned out to be.
 **Scope:** Step 3 of the pipeline (*edit*). Turn curated keepers into finished
 JPEGs automatically, with no per-photo human input. Adds a `finish` command, a
 `raw_stats` + `edits` schema pair, an analytic decision layer, a RawTherapee
@@ -528,7 +529,10 @@ Open items:
    them. Reliable method: set each tool in the RT GUI, save, and diff the
    resulting `.pp3`. [AI-PP3](https://github.com/tychenjiajun/art) provides
    templates worth cross-checking (GPL-2.0; reference only, no code reuse).
-   *Scheduled as Phase 0 work.*
+   *Scheduled as Phase 0 work.* **Closed in Phase 0.** The keys were
+   recovered by the GUI-diff method and are recorded with their verified ranges
+   in `docs/design/pp3-keys.md`; `base.pp3` and the emitter are built from that
+   table rather than from RawPedia.
 2. **ISO→denoise anchors** in §6 need calibration against the user's real
    high-ISO files before they can be claimed as tuned. *Phase 1.* **Still open
    after the 2026-08-13 CHECKPOINT: no high-ISO material exists to calibrate
@@ -543,7 +547,20 @@ Open items:
    the anchors for the wrong sensor.
 3. **`tools/export_lut3d.py`** — export the predictor CNN and dump basis LUTs,
    confirming the custom CUDA op is excluded from the traced graph. *Phase 2;
-   downgraded from research risk to routine by A5.*
+   downgraded from research risk to routine by A5.* **Closed 2026-08-13.** The custom
+   op never reached the graph and needed no excluding: the reference applies its
+   LUT outside the module that gets traced, so exporting the predictor alone is
+   the natural result rather than a surgical one. The exporter asserts this
+   anyway, since a future upstream change could fold the apply back in.
+
+   What did need care was everything around it. Upstream ships the basis LUTs
+   and the classifier as two checkpoints, not one; the predictor's head is a
+   `Conv2d(128, 3, 8)` over an 8x8 feature map rather than global-pool +
+   `Linear`, which is why the 256×256 input size is load-bearing; and the basis
+   tensors sit at `state[str(i)]["LUT"]`. The exporter therefore loads with
+   `strict=True` and checks its ONNX output against PyTorch numerically —
+   `strict=False` plus a key pattern that matched nothing would have exported a
+   graph of random weights that still passed every structural check.
 4. **PCA illuminant estimator** — confirm the Cheng-2014 variant behaves on the
    fixture set; fall back to as-shot coefficients whenever it fails rather than
    propagating an error. *Phase 1.*

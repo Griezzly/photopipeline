@@ -4029,7 +4029,7 @@ git commit -m "feat(tools): export the Image-Adaptive-3DLUT predictor and basis 
   - `Lut33::content_hash(&self) -> String`
   - `pipeline::develop::lut::LUT_DIM: usize` = 33
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/pipeline/src/develop/lut.rs` with only a test module:
 
@@ -4123,12 +4123,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --lib develop::lut`
 Expected: FAIL — module not declared.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Prepend to `crates/pipeline/src/develop/lut.rs`:
 
@@ -4274,12 +4274,12 @@ Declare it in `crates/pipeline/src/develop/mod.rs`:
 pub mod lut;
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p pipeline --lib develop::lut`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Verify green and commit**
+- [x] **Step 5: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -4300,7 +4300,7 @@ git commit -m "feat(develop): Lut33 type, .cube I/O, and basis fusion"
 - Consumes: `Lut33`, `LUT_DIM` (Task 14)
 - Produces: `pipeline::develop::lut_apply::apply_lut(img: &image::DynamicImage, lut: &Lut33) -> image::DynamicImage`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/pipeline/src/develop/lut_apply.rs` with only a test module:
 
@@ -4379,12 +4379,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --lib develop::lut_apply`
 Expected: FAIL — module not declared.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Prepend to `crates/pipeline/src/develop/lut_apply.rs`:
 
@@ -4482,7 +4482,7 @@ Declare it in `crates/pipeline/src/develop/mod.rs`:
 pub mod lut_apply;
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p pipeline --lib develop::lut_apply`
 Expected: PASS, 5 tests.
@@ -4491,7 +4491,7 @@ If `identity_lut_round_trips_bit_exactly` is off by one, the culprit is almost
 always the 8↔16-bit conversion, not the interpolation: `to_rgb16` scales a `u8`
 `v` to `v * 257`, so the reverse must divide by 257, not by 256.
 
-- [ ] **Step 5: Verify green and commit**
+- [x] **Step 5: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -4519,7 +4519,7 @@ is already `[develop.look] model` from Task 1.
   - `pipeline::models::lut_predictor::Lut3dPredictor::load(onnx: &Path, basis: &Path) -> Result<Self>`
   - `ModelHub.look: Option<Arc<dyn LookPredictor>>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/pipeline/src/models/lut_predictor.rs` with only a test module.
 These cover the parts that do not need the weights — basis parsing and the
@@ -4571,12 +4571,12 @@ mod tests {
 `descr='<f4'`, `fortran_order: False`, and the shape tuple) followed by the
 right number of zero bytes.
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --lib models::lut_predictor`
 Expected: FAIL — module not declared.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Prepend to `crates/pipeline/src/models/lut_predictor.rs`:
 
@@ -4729,7 +4729,7 @@ pub(crate) fn read_basis(path: &Path) -> Result<Vec<Lut33>> {
 }
 ```
 
-- [ ] **Step 4: Add the trait and the hub slot**
+- [x] **Step 4: Add the trait and the hub slot**
 
 In `crates/pipeline/src/models/mod.rs`, add next to the other traits:
 
@@ -4782,12 +4782,12 @@ and logs a notice rather than failing, matching the existing contract:
 Leave `is_empty()` as it is — it gates the scan pipeline, which does not use the
 look predictor.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p pipeline --lib models::lut_predictor`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Verify green and commit**
+- [x] **Step 6: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -4810,7 +4810,7 @@ git commit -m "feat(models): image-adaptive 3D LUT predictor behind the LookPred
   - `finish_folder(catalog: &Catalog, cfg: &DevelopConfig, hub: &ModelHub, cache_dir: &Path, out_dir: &Path, progress: &dyn ProgressSink) -> anyhow::Result<FinishReport>` — Task 11's signature gains `hub` and `cache_dir`
   - `pipeline::develop::guard_verdict(before: Option<f32>, after: Option<f32>, margin: f32) -> bool`
 
-- [ ] **Step 1: Write the failing tests for the guard predicate**
+- [x] **Step 1: Write the failing tests for the guard predicate**
 
 Append to `crates/pipeline/tests/develop.rs`:
 
@@ -4848,12 +4848,12 @@ fn guard_passes_when_scores_are_unavailable() {
 }
 ```
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --test develop guard`
 Expected: FAIL — `guard_verdict` does not exist.
 
-- [ ] **Step 3: Implement the guard and wire the look in**
+- [x] **Step 3: Implement the guard and wire the look in**
 
 Append the predicate to `crates/pipeline/src/develop/mod.rs`:
 
@@ -4988,7 +4988,7 @@ This must be computed **before** the render, from the hub rather than from the
 prediction result — otherwise turning the look off would not invalidate the
 existing looked JPEGs.
 
-- [ ] **Step 4: Update the two callers**
+- [x] **Step 4: Update the two callers**
 
 `cmd_finish` in `crates/cli/src/main.rs` already opens a `Library`, which
 carries `cache` — pass `lib.cache.root()` (or the equivalent accessor; check
@@ -5011,12 +5011,12 @@ Update every `finish_folder` call in `crates/pipeline/tests/develop.rs` to pass
 so those tests keep asserting baseline behaviour — which is what they were
 written for.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p pipeline --test develop`
 Expected: PASS, 20 tests.
 
-- [ ] **Step 6: Run the end-to-end test with the look enabled**
+- [x] **Step 6: Run the end-to-end test with the look enabled**
 
 ```bash
 PHOTOPIPE_TEST_RAWTHERAPEE=/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli \
@@ -5027,7 +5027,7 @@ cargo test -p pipeline --test develop end_to_end -- --nocapture
 Expected: PASS, and idempotency still holds — the second run renders nothing
 even with the look in the identity key.
 
-- [ ] **Step 7: Verify green and commit**
+- [x] **Step 7: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -5043,7 +5043,7 @@ git commit -m "feat(develop): apply the adaptive look with a CLIP-IQA quality gu
 - Modify: `README.md`, `models/README.md`
 - Modify: `docs/superpowers/specs/2026-07-29-auto-develop-design.md`
 
-- [ ] **Step 1: Review the look on real photos**
+- [x] **Step 1: Review the look on real photos**
 
 ```bash
 cargo build --release
@@ -5064,7 +5064,7 @@ Check specifically:
    adaptation swing wildly between neighbouring frames of the same scene?
    Wild swings mean the predictor is reacting to framing rather than to colour.
 
-- [ ] **Step 2: Document the look in the README**
+- [x] **Step 2: Document the look in the README**
 
 Extend the `finish` bullet added in Task 12:
 
@@ -5078,7 +5078,7 @@ Extend the `finish` bullet added in Task 12:
   baseline JPEGs and says so.
 ```
 
-- [ ] **Step 3: Close the spec's open items**
+- [x] **Step 3: Close the spec's open items**
 
 In `docs/superpowers/specs/2026-07-29-auto-develop-design.md` §13, mark items 1
 and 3 resolved with a line each on what was actually found — the verified `.pp3`
@@ -5087,7 +5087,7 @@ closed at the CHECKPOINT.
 
 Update the spec's **Status** line to `Implemented`.
 
-- [ ] **Step 4: Final verification**
+- [x] **Step 4: Final verification**
 
 ```bash
 cargo fmt
@@ -5098,7 +5098,7 @@ cargo test --all
 
 Expected: all green, and `doctor` reports both RawTherapee and the look model.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md models/README.md docs/superpowers/specs/2026-07-29-auto-develop-design.md

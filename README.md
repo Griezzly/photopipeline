@@ -52,6 +52,14 @@ scan ──> calibrate ──> dedupe ──> serve / review-tree ──> export
   machine — run `photopipe doctor` to check. Each JPEG gets a `.pp3` beside it
   so you can reopen the photo in RawTherapee and take over by hand.
 
+  With the look model installed (`models/lut3d_predictor.onnx`), `finish` also
+  applies a per-image colour look — a 33³ LUT predicted from the photo itself
+  and applied at 16-bit. Each LUT is written to the cache as a `.cube` you can
+  load in RawTherapee or darktable. A CLIP-IQA guard falls back to the baseline
+  render whenever the look would lower the measured quality; `edits` records
+  which happened and why. Without the model, `finish` produces the baseline
+  JPEGs and says so.
+
   `finish` and `export-keepers` are independent: one gives you finished JPEGs,
   the other hands the untouched RAWs to Lightroom or a backup. Neither requires
   the other.

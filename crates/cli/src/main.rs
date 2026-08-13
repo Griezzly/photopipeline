@@ -788,6 +788,29 @@ fn doctor_check_models(cfg: &config::ModelsConfig, hub: &ModelHub) -> Vec<Doctor
             ));
         }
     }
+
+    // The look predictor is deliberately *not* critical. Its weights are
+    // FiveK-derived and research-use only, so a checkout without them is a
+    // normal state: `finish` then produces baseline JPEGs and says so.
+    let onnx = cfg.model_dir.join("lut3d_predictor.onnx");
+    let basis = cfg.model_dir.join("lut3d_basis.npy");
+    checks.push(
+        match (onnx.exists() && basis.exists(), hub.look.is_some()) {
+            (true, true) => DoctorCheck::ok(
+                "Model look",
+                "'lut3d-fivek' loaded (lut3d_predictor.onnx + lut3d_basis.npy)",
+            ),
+            (true, false) => DoctorCheck::warn(
+                "Model look",
+                "look model files present but failed to load; `finish` will produce baseline JPEGs",
+            ),
+            (false, _) => DoctorCheck::warn(
+                "Model look",
+                "not installed (run tools/export_lut3d.py); `finish` produces baseline JPEGs",
+            ),
+        },
+    );
+
     checks
 }
 
