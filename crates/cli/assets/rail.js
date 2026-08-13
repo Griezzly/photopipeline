@@ -6,7 +6,7 @@ const ITEMS = [
   { id: 'review',     label: 'Review',     ico: 'grid',     needsLib: true, go: () => window.pp.openReview(state.activeFolder) },
   { id: 'duplicates', label: 'Duplicates', ico: 'layers',   needsLib: true, go: () => window.pp.openDuplicates(state.activeFolder) },
   { id: 'export',     label: 'Export',     ico: 'download', needsLib: true, go: () => window.pp.openExport() },
-  { id: 'develop',    label: 'Develop — not yet available', ico: 'develop', soon: true },
+  { id: 'develop',    label: 'Develop',    ico: 'develop',  needsLib: true, go: () => window.pp.openDevelop() },
 ];
 
 function renderRail() {

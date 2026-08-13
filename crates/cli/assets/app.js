@@ -25,7 +25,7 @@ export function humanBytes(n) {
   return i ? `${v.toFixed(1)} ${u[i]}` : `${n} B`;
 }
 
-const VIEWS = ['libraries', 'analyze', 'review', 'duplicates'];
+const VIEWS = ['libraries', 'analyze', 'review', 'duplicates', 'develop'];
 
 /** Mutable app state shared across screens. */
 export const state = { activeFolder: null, view: 'libraries' };
@@ -75,6 +75,7 @@ Promise.all([
   import('/duplicates.js'),
   import('/compare.js'),
   import('/export.js'),
+  import('/develop.js'),
 ]).then(() => boot()).catch((e) => {
   // A module that fails to parse would otherwise leave a blank window with the
   // error buried in the console.
