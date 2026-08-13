@@ -1,6 +1,7 @@
 pub mod detector;
 pub mod embedder;
 pub mod iqa;
+pub mod lut_predictor;
 
 use std::sync::Arc;
 
@@ -54,12 +55,25 @@ pub trait SubjectDetector: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Predicts an image-specific look as a 33³ LUT. Kept behind a trait because
+/// the look is the one stage the spec expects to swap: the current weights are
+/// FiveK-derived and research-use only (see `models/README.md`).
+pub trait LookPredictor: Send + Sync {
+    fn predict(&self, img: &DynamicImage) -> Result<crate::develop::lut::Lut33>;
+    fn name(&self) -> &str;
+    /// Stored in `edits.look_version`; part of the idempotency key.
+    fn version(&self) -> &str;
+}
+
 // ── ModelHub ──────────────────────────────────────────────────────────────────
 
 pub struct ModelHub {
     pub embedder: Option<Arc<dyn Embedder>>,
     pub iqa: Option<Arc<dyn Iqa>>,
     pub detector: Option<Arc<dyn SubjectDetector>>,
+    /// Only `finish` uses this; `is_empty()` deliberately ignores it, since
+    /// that gates the scan pipeline.
+    pub look: Option<Arc<dyn LookPredictor>>,
     /// Human-readable name of the ORT execution provider in use.
     pub provider: String,
 }
@@ -142,10 +156,31 @@ impl ModelHub {
             }
         };
 
+        let look: Option<Arc<dyn LookPredictor>> = {
+            let onnx = cfg.model_dir.join("lut3d_predictor.onnx");
+            let basis = cfg.model_dir.join("lut3d_basis.npy");
+            if onnx.exists() && basis.exists() {
+                match lut_predictor::Lut3dPredictor::load(&onnx, &basis) {
+                    Ok(p) => {
+                        tracing::info!("loaded look: {} v{}", p.name(), p.version());
+                        Some(Arc::new(p))
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "look predictor failed to load; baseline only");
+                        None
+                    }
+                }
+            } else {
+                tracing::info!("look predictor not present; `finish` will produce baseline JPEGs");
+                None
+            }
+        };
+
         Ok(Self {
             embedder,
             iqa,
             detector,
+            look,
             provider,
         })
     }
@@ -156,6 +191,7 @@ impl ModelHub {
             embedder: None,
             iqa: None,
             detector: None,
+            look: None,
             provider: "CPUExecutionProvider".into(),
         }
     }
