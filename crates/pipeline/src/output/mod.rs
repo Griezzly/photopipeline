@@ -98,7 +98,7 @@ pub(crate) fn plan_links(
 }
 
 /// The marker file written at the root of every photopipe-managed tree.
-const TREE_MARKER: &str = ".photopipe-tree";
+pub(crate) const TREE_MARKER: &str = ".photopipe-tree";
 
 /// Summary of a review-tree build.
 #[derive(Debug, Default, Clone)]
@@ -206,12 +206,12 @@ fn estimate_copy(output_root: &Path, planned: &[PlannedLink]) -> CopyEstimate {
 }
 
 /// True if `root` is a photopipe-managed tree (has the marker at its root).
-fn is_managed_tree(root: &Path) -> bool {
+pub(crate) fn is_managed_tree(root: &Path) -> bool {
     root.join(TREE_MARKER).exists()
 }
 
 /// True if `dir` exists and contains no entries.
-fn dir_is_empty(dir: &Path) -> bool {
+pub(crate) fn dir_is_empty(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut r| r.next().is_none())
         .unwrap_or(false)
@@ -233,7 +233,7 @@ fn ensure_safe_to_write(output_root: &Path) -> anyhow::Result<()> {
 
 /// Remove a photopipe-managed tree wholesale. Refuses a non-empty directory
 /// that lacks the marker.
-fn remove_managed_tree(output_root: &Path) -> anyhow::Result<()> {
+pub(crate) fn remove_managed_tree(output_root: &Path) -> anyhow::Result<()> {
     if !output_root.exists() {
         return Ok(());
     }

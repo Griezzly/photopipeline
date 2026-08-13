@@ -1,7 +1,9 @@
 pub mod detector;
 pub mod embedder;
 pub mod iqa;
+pub mod lut_predictor;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -54,12 +56,45 @@ pub trait SubjectDetector: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Predicts an image-specific look as a 33³ LUT. Kept behind a trait because
+/// the look is the one stage the spec expects to swap: the current weights are
+/// FiveK-derived and research-use only (see `models/README.md`).
+pub trait LookPredictor: Send + Sync {
+    fn predict(&self, img: &DynamicImage) -> Result<crate::develop::lut::Lut33>;
+    fn name(&self) -> &str;
+    /// Stored in `edits.look_version`; part of the idempotency key.
+    fn version(&self) -> &str;
+}
+
 // ── ModelHub ──────────────────────────────────────────────────────────────────
+
+/// Where the look predictor's two weight files live, as `(onnx, basis)`.
+fn look_weight_paths(cfg: &crate::config::ModelsConfig) -> (PathBuf, PathBuf) {
+    (
+        cfg.model_dir.join("lut3d_predictor.onnx"),
+        cfg.model_dir.join("lut3d_basis.npy"),
+    )
+}
+
+/// True when the look predictor's weights are on disk, *without* loading them.
+///
+/// The Develop screen needs to say up front whether a run will produce looked
+/// or baseline JPEGs, and building a whole [`ModelHub`] to answer that would
+/// mean an ONNX session init on a plain `GET`. Absent weights are the normal
+/// case, not an error: they are FiveK-derived and research-use only, so a
+/// checkout without them is expected.
+pub fn look_weights_present(cfg: &crate::config::ModelsConfig) -> bool {
+    let (onnx, basis) = look_weight_paths(cfg);
+    onnx.exists() && basis.exists()
+}
 
 pub struct ModelHub {
     pub embedder: Option<Arc<dyn Embedder>>,
     pub iqa: Option<Arc<dyn Iqa>>,
     pub detector: Option<Arc<dyn SubjectDetector>>,
+    /// Only `finish` uses this; `is_empty()` deliberately ignores it, since
+    /// that gates the scan pipeline.
+    pub look: Option<Arc<dyn LookPredictor>>,
     /// Human-readable name of the ORT execution provider in use.
     pub provider: String,
 }
@@ -142,10 +177,30 @@ impl ModelHub {
             }
         };
 
+        let look: Option<Arc<dyn LookPredictor>> = {
+            let (onnx, basis) = look_weight_paths(cfg);
+            if look_weights_present(cfg) {
+                match lut_predictor::Lut3dPredictor::load(&onnx, &basis) {
+                    Ok(p) => {
+                        tracing::info!("loaded look: {} v{}", p.name(), p.version());
+                        Some(Arc::new(p))
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "look predictor failed to load; baseline only");
+                        None
+                    }
+                }
+            } else {
+                tracing::info!("look predictor not present; `finish` will produce baseline JPEGs");
+                None
+            }
+        };
+
         Ok(Self {
             embedder,
             iqa,
             detector,
+            look,
             provider,
         })
     }
@@ -156,6 +211,7 @@ impl ModelHub {
             embedder: None,
             iqa: None,
             detector: None,
+            look: None,
             provider: "CPUExecutionProvider".into(),
         }
     }

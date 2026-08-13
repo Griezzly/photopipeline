@@ -3,6 +3,11 @@
 *.duckdb.wal
 models/*.onnx
 models/*.onnx.data
+# basis LUTs, produced alongside lut3d_predictor.onnx
+models/*.npy
+# upstream checkpoints cached by tools/export_lut3d.py — FiveK-derived weights,
+# research-use only, never redistributed from this repo
+tools/.checkpoints/
 # subagent-driven-development scratch
 .superpowers/
 

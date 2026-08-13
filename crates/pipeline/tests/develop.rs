@@ -1,11 +1,30 @@
 use pipeline::catalog::{Catalog, EditIdentity, EditRow};
-use pipeline::config::DevelopConfig;
+use pipeline::config::{DefectConfig, DevelopConfig};
 use pipeline::develop::decide::{EditRecipe, DECIDER_VERSION};
 use pipeline::develop::is_up_to_date;
 use pipeline::develop::measure::RawStats;
 use pipeline::develop::render::Pp3Renderer;
 use pipeline::develop::{finish_folder, FinishReport};
+use pipeline::models::ModelHub;
 use pipeline::ProgressSink;
+
+/// A scratch cache root shared by the tests in this file.
+///
+/// Only the look stage writes here, and every test below runs with an empty
+/// `ModelHub`, so nothing is actually written — but `finish_folder` still needs
+/// a real path. Held in a `OnceLock` so the directory outlives every test.
+///
+/// **Initialised lazily, and deliberately never removed.** Any test that
+/// redirects `TMPDIR` to observe what was cleaned up must therefore not be the
+/// first caller, or this directory is created inside the redirected root and
+/// reads as a leftover. `end_to_end_finish_is_idempotent` avoids the trap by
+/// owning its cache directory outright rather than by ordering — see there.
+fn test_cache() -> &'static std::path::Path {
+    static TEST_CACHE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    TEST_CACHE
+        .get_or_init(|| tempfile::TempDir::new().unwrap())
+        .path()
+}
 
 fn temp_catalog() -> (tempfile::TempDir, Catalog) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -716,14 +735,34 @@ fn missing_or_resized_output_forces_a_rerender() {
 #[derive(Default)]
 struct RecordingSink {
     stages: std::sync::Mutex<Vec<String>>,
+    /// `(step, item)` pairs, in the order `finish_folder` emitted them.
+    steps: std::sync::Mutex<Vec<(String, String)>>,
+    /// Every `(files_done, files_total)` a UI would have been able to draw at a
+    /// step boundary. `set_total` must survive the per-photo steps, or the
+    /// screen loses its "N of M" — the reason `step` exists at all.
+    counts: std::sync::Mutex<Vec<(u64, u64)>>,
+    total: std::sync::Mutex<u64>,
+    done: std::sync::Mutex<u64>,
 }
 
 impl ProgressSink for RecordingSink {
     fn stage(&self, stage: &str) {
         self.stages.lock().unwrap().push(stage.to_string());
     }
-    fn set_total(&self, _total: u64) {}
-    fn inc(&self) {}
+    fn set_total(&self, total: u64) {
+        *self.total.lock().unwrap() = total;
+    }
+    fn inc(&self) {
+        *self.done.lock().unwrap() += 1;
+    }
+    fn step(&self, step: &str, item: &str) {
+        self.steps
+            .lock()
+            .unwrap()
+            .push((step.to_string(), item.to_string()));
+        let counts = (*self.done.lock().unwrap(), *self.total.lock().unwrap());
+        self.counts.lock().unwrap().push(counts);
+    }
 }
 
 #[test]
@@ -731,8 +770,19 @@ fn empty_work_list_renders_nothing_and_still_reports_done() {
     let (_dir, cat) = temp_catalog();
     let out = tempfile::TempDir::new().unwrap();
     let sink = RecordingSink::default();
-    let report: FinishReport =
-        finish_folder(&cat, &DevelopConfig::default(), out.path(), &sink).unwrap();
+    let report: FinishReport = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &DevelopConfig::default(),
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &sink,
+    )
+    .unwrap();
     assert_eq!(report.rendered, 0);
     assert_eq!(report.errored, 0);
     let stages = sink.stages.lock().unwrap().clone();
@@ -750,8 +800,19 @@ fn missing_renderer_fails_before_any_work() {
         rawtherapee_path: "/nonexistent/rawtherapee-cli".into(),
         ..Default::default()
     };
-    let err = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default())
-        .expect_err("a missing renderer should abort the run");
+    let err = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .expect_err("a missing renderer should abort the run");
     assert!(
         err.to_string().contains("rawtherapee"),
         "error should name the missing dependency: {err}"
@@ -835,7 +896,19 @@ fn unreadable_raw_is_skipped_without_an_edits_row() {
         rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(report.errored, 1);
     assert_eq!(report.rendered, 0);
     assert!(
@@ -859,7 +932,19 @@ fn jpg_keeper_is_counted_as_skipped_unsupported_not_errored() {
         rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(report.skipped_unsupported, 1);
     assert_eq!(report.errored, 0);
     assert_eq!(report.rendered, 0);
@@ -902,7 +987,19 @@ fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
         ..Default::default()
     };
 
-    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(
         report.errored, 1,
         "the stub .tif is not a decodable image, so encode must fail"
@@ -1003,6 +1100,15 @@ fn end_to_end_finish_is_idempotent() {
         id
     };
     let out = tempfile::TempDir::new().unwrap();
+    // This test owns its cache root rather than sharing `test_cache()`. That
+    // one is a lazily-initialised `OnceLock` that is never removed, so if this
+    // test were its first caller it would be created *inside* the redirected
+    // root below and the final assertion would read it as a leftover — which is
+    // exactly what happened (KI-13). Running the whole file hid it, because
+    // some earlier test always initialised the OnceLock first; running this
+    // test alone failed every time. Owning the directory fixes it by
+    // construction instead of by test ordering.
+    let cache = tempfile::TempDir::new().unwrap();
     let cfg = DevelopConfig {
         rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
@@ -1020,10 +1126,57 @@ fn end_to_end_finish_is_idempotent() {
     let _temp_guard = EnvGuard::set("TEMP", tmp_root.path());
 
     // ── first run: a real render ──
-    let first = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let sink = RecordingSink::default();
+    let first = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &sink,
+    )
+    .unwrap();
     assert_eq!(first.rendered, 1, "first run should render");
     assert_eq!(first.skipped, 0);
     assert_eq!(first.errored, 0, "first run should not error");
+
+    // KI-7: the run must be audible. These assertions are here, in the only
+    // test that performs a real render, rather than against the stub — the
+    // point is that a real photo walks the whole sequence, and a stub render
+    // never reaches the look or the encoder.
+    //
+    // This sequence is the contract crates/cli/assets/develop.js draws.
+    let file_name = raw.file_name().unwrap().to_str().unwrap().to_string();
+    assert_eq!(
+        sink.steps.lock().unwrap().clone(),
+        vec![
+            ("measuring".to_string(), file_name.clone()),
+            ("rendering".to_string(), file_name.clone()),
+            ("applying look".to_string(), file_name.clone()),
+            ("encoding".to_string(), file_name.clone()),
+        ],
+        "every phase of a real render must be reported, naming the photo"
+    );
+    assert_eq!(
+        sink.stages.lock().unwrap().clone(),
+        vec![
+            "developing".to_string(),
+            "pruning".to_string(),
+            "done".to_string()
+        ]
+    );
+    // One counted phase across the whole run: `step` must not reset what
+    // `set_total` established, or the screen loses its "N of M photos".
+    assert_eq!(
+        sink.counts.lock().unwrap().clone(),
+        vec![(0, 1), (0, 1), (0, 1), (0, 1)],
+        "the run-level total must survive every per-photo step"
+    );
+    assert_eq!(*sink.done.lock().unwrap(), 1, "one inc() per photo");
 
     let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
     let jpeg = std::path::PathBuf::from(path.unwrap());
@@ -1070,17 +1223,49 @@ fn end_to_end_finish_is_idempotent() {
     );
 
     // ── second run: idempotency is a correctness requirement, not a perf goal ──
-    let second = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let second_sink = RecordingSink::default();
+    let second = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &second_sink,
+    )
+    .unwrap();
     assert_eq!(second.rendered, 0, "second run must render nothing");
     assert_eq!(second.skipped, 1);
     assert_eq!(second.errored, 0);
+    // A photo found to be already current stops at `measuring` — the screen
+    // must not claim a render that never happened.
+    assert_eq!(
+        second_sink.steps.lock().unwrap().clone(),
+        vec![("measuring".to_string(), file_name.clone())],
+        "an up-to-date photo must not report rendering, look or encoding"
+    );
 
     // ── third run: corrupt the recorded state the way a real change would,
     // and confirm the idempotency check actually notices. Without this, the
     // second-run assertion above could pass simply because the code always
     // skips regardless of whether the output still matches. ──
     std::fs::File::create(&jpeg).unwrap(); // truncate to 0 bytes
-    let third = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let third = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(
         third.rendered, 1,
         "a truncated output must be detected as stale and re-rendered"
@@ -1113,5 +1298,606 @@ fn end_to_end_finish_is_idempotent() {
     assert!(
         leftovers.is_empty(),
         "temp scratch directories were left behind: {leftovers:?}"
+    );
+}
+
+// ── KI-2: the finished tree is pruned ─────────────────────────────────────────
+
+/// Write an `edits` row that claims `dest`, plus the JPEG and `.pp3` on disk,
+/// as an earlier successful run would have left them.
+fn seed_rendered_output(cat: &Catalog, file_id: i64, dest: &std::path::Path) {
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(dest, b"pretend jpeg").unwrap();
+    std::fs::write(dest.with_extension("pp3"), b"pretend pp3").unwrap();
+    let size = std::fs::metadata(dest).unwrap().len() as i64;
+    cat.upsert_edit(&EditRow {
+        file_id,
+        content_hash: "hash-a".into(),
+        recipe: EditRecipe {
+            exposure_ev: 0.0,
+            highlight_recovery: 0.0,
+            shadow_lift: 0.0,
+            denoise_luma: 0.0,
+            denoise_chroma: 0.0,
+            sharpen_amount: 0.4,
+            lens_correct: false,
+        },
+        recipe_hash: "recipe-1".into(),
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+        lut_hash: None,
+        look_applied: false,
+        iqa_before: None,
+        iqa_after: None,
+        output_path: Some(dest.display().to_string()),
+        output_size_bytes: Some(size),
+        rendered_at: 0,
+    })
+    .unwrap();
+}
+
+/// KI-2: flipping a verdict from keep to reject used to leave the JPEG, the
+/// `.pp3` and the `edits` row in place forever, so `_finished/` only grew.
+///
+/// The renderer is never reached — with no keepers left there is nothing to
+/// render — so this needs no RawTherapee.
+#[cfg(unix)]
+#[test]
+fn rejecting_a_keeper_prunes_its_output_and_its_edits_row() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/rejected.arw", "reject");
+    let out = tempfile::TempDir::new().unwrap();
+    let dest = out.path().join("2024-05/DSC1.jpg");
+    seed_rendered_output(&cat, id, &dest);
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.rendered, 0, "nothing to render");
+    assert_eq!(report.pruned, 2, "the JPEG and its .pp3 should both go");
+    assert!(!dest.exists(), "stale JPEG survived the prune");
+    assert!(!dest.with_extension("pp3").exists(), "stale .pp3 survived");
+    assert!(
+        cat.edit_identity(id).unwrap().is_none(),
+        "the edits row must not outlive the file it names"
+    );
+    // The now-empty capture-month directory goes too.
+    assert!(
+        !out.path().join("2024-05").exists(),
+        "empty dir left behind"
+    );
+}
+
+/// A keeper's output must survive the prune pass — the obvious way to get the
+/// test above passing is to delete everything, and this is what stops that.
+#[cfg(unix)]
+#[test]
+fn a_still_kept_photos_output_is_not_pruned() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let keep_id = seed_file(&cat, "/tmp/kept.arw", "keep");
+    let reject_id = seed_file(&cat, "/tmp/gone.arw", "reject");
+    let out = tempfile::TempDir::new().unwrap();
+
+    // The kept photo's recorded output must match where `finish` would put it,
+    // or it is pruned as unexpected and re-rendered instead.
+    let kept_dest = out.path().join("unknown-date/kept.jpg");
+    seed_rendered_output(&cat, keep_id, &kept_dest);
+    let gone_dest = out.path().join("2024-05/gone.jpg");
+    seed_rendered_output(&cat, reject_id, &gone_dest);
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert!(!gone_dest.exists(), "the rejected photo's JPEG should go");
+    assert!(
+        cat.edit_identity(reject_id).unwrap().is_none(),
+        "the rejected photo's row should go"
+    );
+    assert!(
+        cat.edit_identity(keep_id).unwrap().is_some(),
+        "the kept photo's row must survive, report was {report:?}"
+    );
+}
+
+/// Refuse to prune a directory photopipe cannot show it wrote. `--out` can be
+/// pointed anywhere, and deleting a stranger's files would be unforgivable.
+#[cfg(unix)]
+#[test]
+fn an_unmarked_directory_full_of_strangers_is_never_pruned() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    seed_file(&cat, "/tmp/whatever.arw", "reject");
+    let out = tempfile::TempDir::new().unwrap();
+    let precious = out.path().join("holiday.jpg");
+    std::fs::write(&precious, b"someone's actual photo").unwrap();
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.pruned, 0);
+    assert!(
+        precious.exists(),
+        "a file photopipe never wrote was deleted"
+    );
+    assert!(
+        !out.path().join(".photopipe-tree").exists(),
+        "an unowned directory must not be claimed as managed"
+    );
+}
+
+// ── KI-5: a zero-work run does not decode ─────────────────────────────────────
+
+/// KI-5: `finish_one` used to measure — a full raw decode — before consulting
+/// the idempotency check, so an unchanged library paid a decode per photo only
+/// to skip it.
+///
+/// The RAW here does not exist. Under the old order that is an immediate
+/// `measure_raw` failure and `errored == 1`; if the persisted `raw_stats` are
+/// reused, the file is never opened and the photo skips cleanly. So this asserts
+/// the absence of a decode by making a decode impossible.
+#[cfg(unix)]
+#[test]
+fn an_up_to_date_photo_is_skipped_without_decoding_its_raw() {
+    use pipeline::develop::decide::{decide, Sharpness, NEUTRAL_RELATIVE_SHARPNESS};
+    use pipeline::ingest::exif::ExifData;
+
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/definitely-not-here.arw", "keep");
+    let out = tempfile::TempDir::new().unwrap();
+
+    // Persist stats as a previous successful run would have.
+    let stats = sample_stats();
+    cat.upsert_raw_stats(id, &stats).unwrap();
+
+    // The recorded identity has to be the one this run will ask for, or the
+    // photo is stale and re-renders. With no `sharpness` row and no baseline,
+    // `resolve_relative_sharpness` yields the neutral value.
+    let recipe = decide(
+        &stats,
+        &ExifData::default(),
+        &Sharpness {
+            s_relative: NEUTRAL_RELATIVE_SHARPNESS,
+        },
+    );
+    let dest = out.path().join("unknown-date/definitely-not-here.jpg");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(&dest, b"pretend jpeg").unwrap();
+    let size = std::fs::metadata(&dest).unwrap().len() as i64;
+    cat.upsert_edit(&EditRow {
+        file_id: id,
+        content_hash: "hash-a".into(),
+        recipe_hash: recipe.recipe_hash(),
+        recipe,
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+        lut_hash: None,
+        look_applied: false,
+        iqa_before: None,
+        iqa_after: None,
+        output_path: Some(dest.display().to_string()),
+        output_size_bytes: Some(size),
+        rendered_at: 0,
+    })
+    .unwrap();
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.errored, 0,
+        "the raw was opened: only a decode attempt can fail on a missing file"
+    );
+    assert_eq!(report.skipped, 1, "should skip on the recorded identity");
+    assert_eq!(report.rendered, 0);
+    assert!(dest.exists(), "the output must survive its own prune pass");
+}
+
+/// The complement: when the file's content hash has moved on, the cached stats
+/// must NOT be trusted, because they describe the old bytes.
+#[cfg(unix)]
+#[test]
+fn changed_content_forces_a_fresh_measurement() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/also-not-here.arw", "keep");
+    let out = tempfile::TempDir::new().unwrap();
+    cat.upsert_raw_stats(id, &sample_stats()).unwrap();
+    // An edits row recorded against *different* bytes than files.content_hash.
+    seed_rendered_output(&cat, id, &out.path().join("unknown-date/x.jpg"));
+    {
+        let conn = cat.raw_conn_for_test();
+        conn.execute(
+            "UPDATE edits SET content_hash = 'stale-hash' WHERE file_id = ?",
+            duckdb::params![id],
+        )
+        .unwrap();
+    }
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.errored, 1,
+        "stale stats must not be reused; the missing raw should be measured and fail"
+    );
+    assert_eq!(report.skipped, 0);
+}
+
+/// A photo recorded as finished *somewhere else* is not current here. Without
+/// this, `finish --out somewhere-new` reported every photo as already current
+/// and left the new directory empty, because the idempotency check only ever
+/// looked at the path the previous run recorded.
+#[cfg(unix)]
+#[test]
+fn changing_the_output_directory_forces_a_rerender() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/missing-on-purpose.arw", "keep");
+    let old_out = tempfile::TempDir::new().unwrap();
+    seed_rendered_output(&cat, id, &old_out.path().join("unknown-date/x.jpg"));
+
+    // A different destination. The raw does not exist, so a re-render attempt
+    // fails at `measure_raw` — which is precisely the observable proving the
+    // photo was *not* treated as already current.
+    let new_out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: new_out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.skipped, 0, "must not claim to be already current");
+    assert_eq!(report.errored, 1, "it should have tried to render again");
+}
+
+// ── Task 17: the IQA quality guard ───────────────────────────────────────────
+
+use pipeline::develop::guard_verdict;
+
+/// The look is kept when it improves or holds quality.
+#[test]
+fn guard_keeps_an_improving_look() {
+    assert!(guard_verdict(Some(0.60), Some(0.70), 0.02));
+    assert!(guard_verdict(Some(0.60), Some(0.60), 0.02));
+}
+
+/// A drop inside the margin is tolerated — a look is a stylistic change and
+/// a tiny IQA dip is not evidence it made the photo worse.
+#[test]
+fn guard_tolerates_a_drop_inside_the_margin() {
+    assert!(guard_verdict(Some(0.60), Some(0.59), 0.02));
+}
+
+/// A drop past the margin rejects the look.
+#[test]
+fn guard_rejects_a_drop_past_the_margin() {
+    assert!(!guard_verdict(Some(0.60), Some(0.50), 0.02));
+}
+
+/// With no scores available the guard cannot judge, so it must not reject —
+/// silently dropping the look on every photo because the IQA model is absent
+/// would be a confusing failure mode.
+#[test]
+fn guard_passes_when_scores_are_unavailable() {
+    assert!(guard_verdict(None, None, 0.02));
+    assert!(guard_verdict(Some(0.6), None, 0.02));
+    assert!(guard_verdict(None, Some(0.6), 0.02));
+}
+
+// ── the look stage ────────────────────────────────────────────────────────────
+
+/// The look-related audit columns for one file. `edit_identity` exposes only
+/// the idempotency fields, and these are what the look stage records.
+struct LookAudit {
+    model: Option<String>,
+    version: Option<String>,
+    lut_hash: Option<String>,
+    applied: bool,
+    iqa_before: Option<f32>,
+    iqa_after: Option<f32>,
+}
+
+fn look_audit(cat: &Catalog, file_id: i64) -> LookAudit {
+    let conn = cat.raw_conn_for_test();
+    conn.query_row(
+        "SELECT look_model, look_version, lut_hash, look_applied, iqa_before, iqa_after
+         FROM edits WHERE file_id = ?",
+        duckdb::params![file_id],
+        |r| {
+            Ok(LookAudit {
+                model: r.get(0)?,
+                version: r.get(1)?,
+                lut_hash: r.get(2)?,
+                applied: r.get(3)?,
+                iqa_before: r.get(4)?,
+                iqa_after: r.get(5)?,
+            })
+        },
+    )
+    .unwrap()
+}
+
+/// A predictor that always returns the same LUT, so a test can assert on the
+/// exact pixels the look must produce.
+struct StubLook {
+    lut: pipeline::develop::lut::Lut33,
+}
+
+impl pipeline::models::LookPredictor for StubLook {
+    fn predict(&self, _img: &image::DynamicImage) -> anyhow::Result<pipeline::develop::lut::Lut33> {
+        Ok(self.lut.clone())
+    }
+    fn name(&self) -> &str {
+        "stub-look"
+    }
+    fn version(&self) -> &str {
+        "7"
+    }
+}
+
+/// An IQA model returning fixed scores, to drive the guard from a test.
+struct StubIqa {
+    scores: std::sync::Mutex<Vec<f32>>,
+}
+
+impl pipeline::models::Iqa for StubIqa {
+    fn score(&self, _img: &image::DynamicImage) -> anyhow::Result<f32> {
+        let mut s = self.scores.lock().unwrap();
+        Ok(if s.is_empty() { 0.5 } else { s.remove(0) })
+    }
+    fn name(&self) -> &str {
+        "stub-iqa"
+    }
+}
+
+fn hub_with(look: Option<StubLook>, iqa: Option<StubIqa>) -> ModelHub {
+    let mut hub = ModelHub::empty();
+    hub.look =
+        look.map(|l| std::sync::Arc::new(l) as std::sync::Arc<dyn pipeline::models::LookPredictor>);
+    hub.iqa = iqa.map(|i| std::sync::Arc::new(i) as std::sync::Arc<dyn pipeline::models::Iqa>);
+    hub
+}
+
+/// Every other test in this file runs with an empty hub, so the look stage is
+/// never entered. This drives the whole path with a real render and a stub
+/// predictor whose LUT maps everything to black: if the look reaches the
+/// encoder, the JPEG is black, and no amount of correct-looking wiring can fake
+/// that. It also pins the audit record and the `.cube` cache write.
+///
+/// Gated the same way as `end_to_end_finish_is_idempotent`.
+#[test]
+fn the_look_reaches_the_encoder_and_is_recorded() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
+    let Some(raw) = std::env::var_os("PHOTOPIPE_TEST_RAW") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAW to a real RAW file");
+        return;
+    };
+    let _guard = REAL_RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(
+        &cat,
+        &std::path::PathBuf::from(&raw).to_string_lossy(),
+        "keep",
+    );
+    let out = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    let mut black = pipeline::develop::lut::Lut33::identity();
+    black.data.iter_mut().for_each(|v| *v = 0.0);
+    let hub = hub_with(Some(StubLook { lut: black }), None);
+
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &hub,
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+    assert_eq!(report.rendered, 1, "the render must succeed");
+
+    let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
+    let jpeg = std::path::PathBuf::from(path.unwrap());
+    let decoded = image::open(&jpeg).unwrap().to_rgb8();
+    let brightest = decoded.pixels().flat_map(|p| p.0).max().unwrap();
+    assert!(
+        brightest <= 2,
+        "the all-black LUT did not reach the encoder; brightest channel was {brightest}"
+    );
+
+    // The audit record names the look and the exact table used.
+    let audit = look_audit(&cat, id);
+    assert_eq!(audit.model.as_deref(), Some("stub-look"));
+    assert_eq!(audit.version.as_deref(), Some("7"));
+    assert!(audit.applied, "look_applied should be true");
+    let hash = audit.lut_hash.expect("a lut hash");
+
+    // …and the .cube is cached under the library's cache root, content-addressed.
+    let cube = cache.path().join("luts").join(format!("{hash}.cube"));
+    assert!(
+        cube.exists(),
+        "expected a cached .cube at {}",
+        cube.display()
+    );
+    let text = std::fs::read_to_string(&cube).unwrap();
+    assert!(text.contains("LUT_3D_SIZE 33"), "not a usable .cube");
+}
+
+/// The guard's rejection path, end to end: the same black LUT, but an IQA model
+/// that reports a large drop. The baseline must ship instead — and the row must
+/// still record that a look was attempted, or the next run cannot tell the
+/// difference between "guard rejected it" and "never tried".
+#[test]
+fn a_look_rejected_by_the_guard_ships_the_baseline() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
+    let Some(raw) = std::env::var_os("PHOTOPIPE_TEST_RAW") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAW to a real RAW file");
+        return;
+    };
+    let _guard = REAL_RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(
+        &cat,
+        &std::path::PathBuf::from(&raw).to_string_lossy(),
+        "keep",
+    );
+    let out = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    let mut black = pipeline::develop::lut::Lut33::identity();
+    black.data.iter_mut().for_each(|v| *v = 0.0);
+    // before = 0.9, after = 0.1 — far past the default margin.
+    let hub = hub_with(
+        Some(StubLook { lut: black }),
+        Some(StubIqa {
+            scores: std::sync::Mutex::new(vec![0.9, 0.1]),
+        }),
+    );
+
+    finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &hub,
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
+    let jpeg = std::path::PathBuf::from(path.unwrap());
+    let decoded = image::open(&jpeg).unwrap().to_rgb8();
+    let brightest = decoded.pixels().flat_map(|p| p.0).max().unwrap();
+    assert!(
+        brightest > 2,
+        "the guard should have rejected the black LUT, but the JPEG is black"
+    );
+
+    let audit = look_audit(&cat, id);
+    assert!(!audit.applied, "look_applied must be false when rejected");
+    assert_eq!(audit.iqa_before, Some(0.9));
+    assert_eq!(audit.iqa_after, Some(0.1));
+    assert!(
+        audit.model.is_some(),
+        "the attempt must still be recorded, or the identity flips between runs"
     );
 }

@@ -3719,14 +3719,14 @@ a look sits on top of the baseline, a bad `exposure_ev` and a bad LUT are
 indistinguishable in the output. The whole reason the analytic layer comes first
 is that it can be judged alone.
 
-- [ ] **Render a real shoot**
+- [x] **Render a real shoot** — 2026-08-13, on the ILCE-6300 sample set (three frames; the Grindelwald library referenced below is no longer registered).
 
 ```bash
 cargo build --release
 ./target/release/photopipe finish ~/Photos/Grindelwald --out /tmp/finished-baseline
 ```
 
-- [ ] **Review the output by eye and answer each question**
+- [x] **Review the output by eye and answer each question**
 
 Open `/tmp/finished-baseline` in a file browser and look at every image:
 
@@ -3755,7 +3755,7 @@ Open `/tmp/finished-baseline` in a file browser and look at every image:
    default-converted sRGB, so a baseline with its own contrast curve feeds it an
    input distribution it never saw.
 
-- [ ] **Record the outcome**
+- [x] **Record the outcome** — spec open item 5 closed, item 2 carried forward with reasons; see A11.
 
 Write what you changed and why into the spec's open-items section, ticking off
 items 2 and 5. If you changed any formula, bump `DECIDER_VERSION` in `decide.rs`
@@ -3766,11 +3766,19 @@ git add docs/superpowers/specs/2026-07-29-auto-develop-design.md crates/pipeline
 git commit -m "docs(spec): close open items 2 and 5 after baseline review"
 ```
 
-- [ ] **Explicit go/no-go**
+- [x] **Explicit go/no-go** — **GO, reviewed 2026-08-13.** Recorded as A11 in the
+spec. Exposure, white balance, highlight recovery and `base.pp3` neutrality pass.
+Sharpening failed and was fixed, not tuned: `decide()` clamped an unbounded
+variance-of-Laplacian to 0..1, pinning every frame to `SHARPEN_MAX`; it now
+normalises against the calibrated baseline (`DECIDER_VERSION` = `decide-3`).
+Denoise is explicitly carried forward — no high-ISO material exists to judge it,
+and the look does not depend on it.
 
-State plainly whether the baseline is good enough to build a look on. If it is
-not, iterate on Phase 1 and review again. Phase 2 does not start on a baseline
-you are not happy with.
+Two limits on this sign-off, so Phase 2 does not inherit false confidence: the
+corpus is three photographs, and the sharpness baseline they were normalised
+against was built from those same three, so its p10/p90 are the set's own min and
+max. The mechanism is verified end-to-end; its calibration is not. Re-run
+`photopipe calibrate` and re-review once a few hundred frames per lens exist.
 
 ---
 
@@ -3796,7 +3804,7 @@ predictor CNN is exported; the basis LUTs come out as plain tensors.
   - `models/lut3d_basis.npy` — float32 `[N,3,33,33,33]`, the basis LUTs
   - Both gitignored, following the existing `models/*.onnx` rule.
 
-- [ ] **Step 1: Write the exporter**
+- [x] **Step 1: Write the exporter**
 
 Create `tools/export_lut3d.py`, following the structure of the three existing
 exporters:
@@ -3939,7 +3947,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run it and verify the outputs**
+- [x] **Step 2: Run it and verify the outputs**
 
 ```bash
 cd tools
@@ -3954,7 +3962,7 @@ custom operator, and the basis shape prints as `(3, 3, 33, 33, 33)`.
 If the checkpoint key names do not match any of the three patterns tried, the
 error prints the keys that *are* present — add the right pattern to the loop.
 
-- [ ] **Step 3: Confirm the weights are gitignored**
+- [x] **Step 3: Confirm the weights are gitignored**
 
 ```bash
 git status --short models/
@@ -3967,7 +3975,7 @@ Expected: `lut3d_predictor.onnx` does not appear (covered by `models/*.onnx`).
 models/*.npy
 ```
 
-- [ ] **Step 4: Document the model**
+- [x] **Step 4: Document the model**
 
 Add a section to `models/README.md` matching the existing entries: what the file
 is, which script produces it, and the FiveK licence constraint — that photopipe
@@ -3977,12 +3985,30 @@ this would need revisiting before any commercial distribution.
 Add the corresponding lines to `models/download.sh` following its existing
 pattern, and `onnx` to `tools/requirements.txt` if it is not already listed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/export_lut3d.py tools/requirements.txt models/README.md models/download.sh .gitignore
 git commit -m "feat(tools): export the Image-Adaptive-3DLUT predictor and basis LUTs"
 ```
+
+---
+
+> **As built (2026-08-13).** The script above assumed one combined checkpoint;
+> upstream ships two (`LUTs.pth` and `classifier.pth`), so the exporter takes
+> `--luts` and `--classifier` and fetches both when omitted, matching how the
+> other exporters self-serve from HuggingFace. Two details of the architecture
+> came from the checkpoint rather than the sketch: the head is a
+> `Conv2d(128, 3, 8)` over the final 8x8 feature map, not global-pool +
+> `Linear`, and index 0 is an `Upsample` — so the `nn.Sequential` indices are
+> reproduced exactly and `load_state_dict` runs with `strict=True`, because
+> silently loading nothing would have exported random weights. The basis tensors
+> live at `state[str(i)]["LUT"]`, not any of the three key patterns tried.
+>
+> Added beyond the plan: a parity check against PyTorch on a random input, since
+> the op-name assertion cannot catch weights that failed to load. Result:
+> basis `(3, 3, 33, 33, 33)`, no custom ops, max |Δ| 1.85e-06, and the graph
+> loads under the pinned `ort` 2.0.0-rc.12 returning `weights` `[1, 3]`.
 
 ---
 
@@ -4003,7 +4029,7 @@ git commit -m "feat(tools): export the Image-Adaptive-3DLUT predictor and basis 
   - `Lut33::content_hash(&self) -> String`
   - `pipeline::develop::lut::LUT_DIM: usize` = 33
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/pipeline/src/develop/lut.rs` with only a test module:
 
@@ -4097,12 +4123,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --lib develop::lut`
 Expected: FAIL — module not declared.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Prepend to `crates/pipeline/src/develop/lut.rs`:
 
@@ -4248,12 +4274,12 @@ Declare it in `crates/pipeline/src/develop/mod.rs`:
 pub mod lut;
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p pipeline --lib develop::lut`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Verify green and commit**
+- [x] **Step 5: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -4274,7 +4300,7 @@ git commit -m "feat(develop): Lut33 type, .cube I/O, and basis fusion"
 - Consumes: `Lut33`, `LUT_DIM` (Task 14)
 - Produces: `pipeline::develop::lut_apply::apply_lut(img: &image::DynamicImage, lut: &Lut33) -> image::DynamicImage`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/pipeline/src/develop/lut_apply.rs` with only a test module:
 
@@ -4353,12 +4379,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --lib develop::lut_apply`
 Expected: FAIL — module not declared.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Prepend to `crates/pipeline/src/develop/lut_apply.rs`:
 
@@ -4456,7 +4482,7 @@ Declare it in `crates/pipeline/src/develop/mod.rs`:
 pub mod lut_apply;
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p pipeline --lib develop::lut_apply`
 Expected: PASS, 5 tests.
@@ -4465,7 +4491,7 @@ If `identity_lut_round_trips_bit_exactly` is off by one, the culprit is almost
 always the 8↔16-bit conversion, not the interpolation: `to_rgb16` scales a `u8`
 `v` to `v * 257`, so the reverse must divide by 257, not by 256.
 
-- [ ] **Step 5: Verify green and commit**
+- [x] **Step 5: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -4493,7 +4519,7 @@ is already `[develop.look] model` from Task 1.
   - `pipeline::models::lut_predictor::Lut3dPredictor::load(onnx: &Path, basis: &Path) -> Result<Self>`
   - `ModelHub.look: Option<Arc<dyn LookPredictor>>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/pipeline/src/models/lut_predictor.rs` with only a test module.
 These cover the parts that do not need the weights — basis parsing and the
@@ -4545,12 +4571,12 @@ mod tests {
 `descr='<f4'`, `fortran_order: False`, and the shape tuple) followed by the
 right number of zero bytes.
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --lib models::lut_predictor`
 Expected: FAIL — module not declared.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Prepend to `crates/pipeline/src/models/lut_predictor.rs`:
 
@@ -4703,7 +4729,7 @@ pub(crate) fn read_basis(path: &Path) -> Result<Vec<Lut33>> {
 }
 ```
 
-- [ ] **Step 4: Add the trait and the hub slot**
+- [x] **Step 4: Add the trait and the hub slot**
 
 In `crates/pipeline/src/models/mod.rs`, add next to the other traits:
 
@@ -4756,12 +4782,12 @@ and logs a notice rather than failing, matching the existing contract:
 Leave `is_empty()` as it is — it gates the scan pipeline, which does not use the
 look predictor.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p pipeline --lib models::lut_predictor`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Verify green and commit**
+- [x] **Step 6: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -4784,7 +4810,7 @@ git commit -m "feat(models): image-adaptive 3D LUT predictor behind the LookPred
   - `finish_folder(catalog: &Catalog, cfg: &DevelopConfig, hub: &ModelHub, cache_dir: &Path, out_dir: &Path, progress: &dyn ProgressSink) -> anyhow::Result<FinishReport>` — Task 11's signature gains `hub` and `cache_dir`
   - `pipeline::develop::guard_verdict(before: Option<f32>, after: Option<f32>, margin: f32) -> bool`
 
-- [ ] **Step 1: Write the failing tests for the guard predicate**
+- [x] **Step 1: Write the failing tests for the guard predicate**
 
 Append to `crates/pipeline/tests/develop.rs`:
 
@@ -4822,12 +4848,12 @@ fn guard_passes_when_scores_are_unavailable() {
 }
 ```
 
-- [ ] **Step 2: Run them to confirm they fail**
+- [x] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test -p pipeline --test develop guard`
 Expected: FAIL — `guard_verdict` does not exist.
 
-- [ ] **Step 3: Implement the guard and wire the look in**
+- [x] **Step 3: Implement the guard and wire the look in**
 
 Append the predicate to `crates/pipeline/src/develop/mod.rs`:
 
@@ -4962,7 +4988,7 @@ This must be computed **before** the render, from the hub rather than from the
 prediction result — otherwise turning the look off would not invalidate the
 existing looked JPEGs.
 
-- [ ] **Step 4: Update the two callers**
+- [x] **Step 4: Update the two callers**
 
 `cmd_finish` in `crates/cli/src/main.rs` already opens a `Library`, which
 carries `cache` — pass `lib.cache.root()` (or the equivalent accessor; check
@@ -4985,12 +5011,12 @@ Update every `finish_folder` call in `crates/pipeline/tests/develop.rs` to pass
 so those tests keep asserting baseline behaviour — which is what they were
 written for.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p pipeline --test develop`
 Expected: PASS, 20 tests.
 
-- [ ] **Step 6: Run the end-to-end test with the look enabled**
+- [x] **Step 6: Run the end-to-end test with the look enabled**
 
 ```bash
 PHOTOPIPE_TEST_RAWTHERAPEE=/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli \
@@ -5001,7 +5027,7 @@ cargo test -p pipeline --test develop end_to_end -- --nocapture
 Expected: PASS, and idempotency still holds — the second run renders nothing
 even with the look in the identity key.
 
-- [ ] **Step 7: Verify green and commit**
+- [x] **Step 7: Verify green and commit**
 
 ```bash
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all
@@ -5017,7 +5043,7 @@ git commit -m "feat(develop): apply the adaptive look with a CLIP-IQA quality gu
 - Modify: `README.md`, `models/README.md`
 - Modify: `docs/superpowers/specs/2026-07-29-auto-develop-design.md`
 
-- [ ] **Step 1: Review the look on real photos**
+- [x] **Step 1: Review the look on real photos**
 
 ```bash
 cargo build --release
@@ -5038,7 +5064,7 @@ Check specifically:
    adaptation swing wildly between neighbouring frames of the same scene?
    Wild swings mean the predictor is reacting to framing rather than to colour.
 
-- [ ] **Step 2: Document the look in the README**
+- [x] **Step 2: Document the look in the README**
 
 Extend the `finish` bullet added in Task 12:
 
@@ -5052,7 +5078,7 @@ Extend the `finish` bullet added in Task 12:
   baseline JPEGs and says so.
 ```
 
-- [ ] **Step 3: Close the spec's open items**
+- [x] **Step 3: Close the spec's open items**
 
 In `docs/superpowers/specs/2026-07-29-auto-develop-design.md` §13, mark items 1
 and 3 resolved with a line each on what was actually found — the verified `.pp3`
@@ -5061,7 +5087,7 @@ closed at the CHECKPOINT.
 
 Update the spec's **Status** line to `Implemented`.
 
-- [ ] **Step 4: Final verification**
+- [x] **Step 4: Final verification**
 
 ```bash
 cargo fmt
@@ -5072,7 +5098,7 @@ cargo test --all
 
 Expected: all green, and `doctor` reports both RawTherapee and the look model.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md models/README.md docs/superpowers/specs/2026-07-29-auto-develop-design.md
@@ -5085,9 +5111,12 @@ git commit -m "docs: close out the automatic develop spec"
 
 Named here so they are not mistaken for gaps:
 
-- **A Develop screen in `serve`.** `finish_folder` already reports through
-  `ProgressSink`, so the remaining work is a `POST /api/finish` +
-  `/api/finish/status` pair and a nav-rail screen reusing the analyze checklist.
+- ~~**A Develop screen in `serve`.**~~ **Shipped 2026-08-13.** It was the wiring
+  job this predicted, plus two things it did not: `ProgressSink` needed a
+  `step()` channel (see spec A2) and the screen needed a
+  `GET /api/finish/estimate` preflight so a missing renderer is refused rather
+  than started. KI-7 was fixed first, as its own commit — a screen built on the
+  old two-stage reporting would have looked hung for an hour.
 - **Crop, rotation, straightening, and local adjustments.** Spec §12.
 - **Learning the user's own look** from paired RAW/export files. Spec §12 and A7 —
   blocked on having such a corpus, not on the technique.

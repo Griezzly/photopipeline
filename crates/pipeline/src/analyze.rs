@@ -5,7 +5,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use walkdir::WalkDir;
 
 use crate::cache::Cache;
 use crate::catalog::Catalog;
@@ -27,6 +26,18 @@ pub trait ProgressSink: Send + Sync {
     fn set_total(&self, total: u64);
     /// One item processed in the current phase.
     fn inc(&self);
+    /// Where the current *item* has got to, within one counted phase.
+    ///
+    /// `stage()` cannot express this: it resets the counter, so a phase that
+    /// announced a sub-phase per item would wipe its own "N of M" every time.
+    /// A phase like `finish`'s — one photo taking minutes, four internal steps
+    /// each worth showing — needs a channel that does not disturb the count.
+    /// `item` is a display label for what is being worked on (a filename), not
+    /// an identifier.
+    ///
+    /// Defaulted to a no-op: phases that finish an item in milliseconds have
+    /// nothing useful to report here, and neither do sinks that only draw a bar.
+    fn step(&self, _step: &str, _item: &str) {}
 }
 
 /// Summary of a full analyze run.
@@ -101,24 +112,12 @@ pub fn analyze_folder(
 /// Count files under `folder` (by ingest extension) that the catalog reports as
 /// new or changed — i.e. how much a re-analyze would process. Walk only; no decode.
 ///
-/// Mirrors the ingest walk exactly, sidecar-JPG exclusion included. Skipping that
-/// step counts files ingest will never process, so the count can never reach zero.
+/// Shares `collect_ingestable` with the ingest walk rather than reimplementing
+/// it, and applies the same sidecar-JPG exclusion. When the two walks disagreed
+/// the count could never reach zero, and the UI reported "N new photos" forever
+/// (BE-1); sharing the function is what stops that recurring.
 pub fn count_pending(folder: &Path, catalog: &Catalog, cfg: &IngestConfig) -> Result<u64> {
-    let mut candidates = Vec::new();
-    for entry in WalkDir::new(folder)
-        .follow_links(cfg.follow_symlinks)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if cfg.extensions.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
-            candidates.push(path.to_owned());
-        }
-    }
+    let candidates = crate::ingest::collect_ingestable(folder, cfg);
 
     let mut pending = 0u64;
     for path in crate::ingest::exclude_sidecar_jpgs(candidates) {

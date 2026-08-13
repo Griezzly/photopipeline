@@ -138,16 +138,26 @@ impl Catalog {
         optional_row(row)
     }
 
-    /// EXIF plus global sharpness for one file — the two non-raw inputs to
+    /// EXIF plus subject sharpness for one file — the non-raw inputs to
     /// `decide()`. Missing rows are not an error: `decide()` has a defined
     /// answer for absent ISO and absent sharpness.
-    pub fn develop_inputs(&self, file_id: i64) -> Result<(ExifData, f32), CatalogError> {
+    ///
+    /// Returns `s_subject` rather than `s_global` because the sharpening
+    /// decision places it against `sharpness_baseline`, whose percentiles are
+    /// computed over `s_subject`. `None` means "no comparison possible", which
+    /// the caller turns into `NEUTRAL_RELATIVE_SHARPNESS`; it is not the same as
+    /// zero, which would mean "measured, and as soft as this lens ever gets".
+    ///
+    /// `focal_length_mm` and `aperture` are selected because they key the
+    /// baseline bucket, alongside camera and lens.
+    pub fn develop_inputs(&self, file_id: i64) -> Result<(ExifData, Option<f32>), CatalogError> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         let row = conn.query_row(
-            "SELECT e.iso, e.lens_model, e.camera_model, s.s_global
+            "SELECT e.iso, e.lens_model, e.camera_model, s.s_subject,
+                    e.focal_length_mm, e.aperture
              FROM files f
              LEFT JOIN exif e ON e.file_id = f.id
              LEFT JOIN sharpness s ON s.file_id = f.id
@@ -157,19 +167,23 @@ impl Catalog {
                 let iso: Option<i32> = r.get(0)?;
                 let lens_model: Option<String> = r.get(1)?;
                 let camera_model: Option<String> = r.get(2)?;
-                let s_global: Option<f32> = r.get(3)?;
+                let s_subject: Option<f32> = r.get(3)?;
+                let focal_length_mm: Option<f32> = r.get(4)?;
+                let aperture: Option<f32> = r.get(5)?;
                 Ok((
                     ExifData {
                         iso: iso.map(|v| v as u32),
                         lens_model,
                         camera_model,
+                        focal_length_mm,
+                        aperture,
                         ..Default::default()
                     },
-                    s_global.unwrap_or(0.5),
+                    s_subject,
                 ))
             },
         );
-        Ok(optional_row(row)?.unwrap_or((ExifData::default(), 0.5)))
+        Ok(optional_row(row)?.unwrap_or((ExifData::default(), None)))
     }
 }
 
@@ -304,5 +318,88 @@ impl Catalog {
             },
         );
         optional_row(row)
+    }
+
+    /// Every `edits` row whose photo is no longer a keeper, as
+    /// `(file_id, output_path)`.
+    ///
+    /// These are the rows `finish` orphaned by a verdict flipping away from
+    /// `keep`: the JPEG and `.pp3` stay on disk and the row keeps pointing at
+    /// them, so the finished tree only ever grows. Mirrors the `verdict = 'keep'`
+    /// test in `keepers_to_develop`, so the two can never disagree about what
+    /// belongs in the tree.
+    pub fn orphaned_edits(&self) -> Result<Vec<(i64, Option<String>)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.file_id, e.output_path
+                 FROM edits e
+                 LEFT JOIN decisions d ON d.file_id = e.file_id
+                 WHERE d.verdict IS DISTINCT FROM 'keep'",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Every non-null `edits.output_path`. Lets `finish` recognise a finished
+    /// tree it wrote during a release that predates the `.photopipe-tree`
+    /// marker, instead of refusing to prune it forever.
+    pub fn all_edit_outputs(&self) -> Result<Vec<String>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT output_path FROM edits WHERE output_path IS NOT NULL")
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Drop `edits` rows by `file_id`. Used by `finish`'s prune pass once the
+    /// corresponding outputs are off disk, so a row never outlives its JPEG.
+    pub fn delete_edits(&self, file_ids: &[i64]) -> Result<usize, CatalogError> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut removed = 0usize;
+        {
+            // One parameterised DELETE per id rather than an `IN (…)` list:
+            // binding a list is the DuckDB footgun this project has hit before,
+            // and the prune set is small by construction.
+            let mut stmt = tx
+                .prepare("DELETE FROM edits WHERE file_id = ?")
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            for id in file_ids {
+                removed += stmt
+                    .execute(duckdb::params![id])
+                    .map_err(|e| CatalogError::Db(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(removed)
     }
 }

@@ -185,6 +185,9 @@ enum Command {
         /// Destination directory. Overrides `[develop] finished_dir`.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Delete the finished tree and rebuild it from scratch.
+        #[arg(long)]
+        regenerate: bool,
     },
 }
 
@@ -226,7 +229,11 @@ fn main() -> Result<()> {
             output,
             regenerate,
         } => cmd_export_keepers(&folder, output, regenerate, &cfg, &roots),
-        Command::Finish { folder, out } => cmd_finish(&folder, out, &cfg, &roots),
+        Command::Finish {
+            folder,
+            out,
+            regenerate,
+        } => cmd_finish(&folder, out, regenerate, &cfg, &roots),
     }
 }
 
@@ -424,6 +431,7 @@ fn cmd_export_keepers(
 fn cmd_finish(
     folder: &std::path::Path,
     out: Option<PathBuf>,
+    regenerate: bool,
     cfg: &config::Config,
     roots: &LibraryRoots,
 ) -> Result<()> {
@@ -440,7 +448,23 @@ fn cmd_finish(
 
     println!("Developing keepers → {} …", out_dir.display());
 
-    let report = pipeline::finish_folder(&lib.catalog, &cfg.develop, &out_dir, &CliProgress)?;
+    // The look and its IQA guard need models. A hub that loads nothing is not
+    // an error: `finish` then produces baseline JPEGs, which is the documented
+    // behaviour when the look model is absent.
+    let hub = ModelHub::from_config(&cfg.models).map_err(|e| anyhow::anyhow!("models: {}", e))?;
+
+    let report = pipeline::finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &lib.catalog,
+            cfg: &cfg.develop,
+            defect_cfg: &cfg.defect,
+            hub: &hub,
+            cache_dir: lib.cache.root(),
+            out_dir: &out_dir,
+            regenerate,
+        },
+        &CliProgress,
+    )?;
 
     println!(
         "Finished {} photos, {} already current, {} skipped (not RAW), {} failed → {}",
@@ -450,6 +474,12 @@ fn cmd_finish(
         report.errored,
         out_dir.display()
     );
+    if report.pruned > 0 {
+        println!(
+            "  Pruned {} stale file(s) whose photos are no longer keepers",
+            report.pruned
+        );
+    }
     if report.skipped_unsupported > 0 {
         println!(
             "{} keeper(s) are not RAW files; `finish` only develops RAWs.",
@@ -457,13 +487,17 @@ fn cmd_finish(
         );
     }
     if report.errored > 0 {
-        println!("Re-run with --log-level debug to see why individual files failed.");
+        println!("The reason each one failed is in the warnings above.");
     }
     Ok(())
 }
 
-/// Terminal progress sink. A future Develop screen in `serve` passes the
-/// server's job sink to the same `finish_folder` signature instead.
+/// Terminal progress sink. The Develop screen in `serve` passes the server's
+/// job sink to the same `finish_folder` signature instead.
+///
+/// `step` is what makes a long `finish` audible: a serial run is minutes per
+/// photo, and without a line per phase the terminal sat silent between the
+/// opening "measuring" and the closing summary (KI-7).
 struct CliProgress;
 
 impl pipeline::ProgressSink for CliProgress {
@@ -472,6 +506,9 @@ impl pipeline::ProgressSink for CliProgress {
     }
     fn set_total(&self, _total: u64) {}
     fn inc(&self) {}
+    fn step(&self, step: &str, item: &str) {
+        tracing::info!(step, item, "finish");
+    }
 }
 
 fn cmd_info(file: PathBuf, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {
@@ -758,6 +795,29 @@ fn doctor_check_models(cfg: &config::ModelsConfig, hub: &ModelHub) -> Vec<Doctor
             ));
         }
     }
+
+    // The look predictor is deliberately *not* critical. Its weights are
+    // FiveK-derived and research-use only, so a checkout without them is a
+    // normal state: `finish` then produces baseline JPEGs and says so.
+    let onnx = cfg.model_dir.join("lut3d_predictor.onnx");
+    let basis = cfg.model_dir.join("lut3d_basis.npy");
+    checks.push(
+        match (onnx.exists() && basis.exists(), hub.look.is_some()) {
+            (true, true) => DoctorCheck::ok(
+                "Model look",
+                "'lut3d-fivek' loaded (lut3d_predictor.onnx + lut3d_basis.npy)",
+            ),
+            (true, false) => DoctorCheck::warn(
+                "Model look",
+                "look model files present but failed to load; `finish` will produce baseline JPEGs",
+            ),
+            (false, _) => DoctorCheck::warn(
+                "Model look",
+                "not installed (run tools/export_lut3d.py); `finish` produces baseline JPEGs",
+            ),
+        },
+    );
+
     checks
 }
 

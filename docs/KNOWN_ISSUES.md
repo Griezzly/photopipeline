@@ -3,7 +3,7 @@
 Findings that are real, reproduced, and deliberately **not** fixed in the change
 that surfaced them. Each says why it was left, and what fixing it involves.
 
-Last updated: 2026-08-10. The **Open** section below was filled by the automatic
+Last updated: 2026-08-13. The **Open** section below was filled by the automatic
 RAW development work (`docs/superpowers/specs/2026-07-29-auto-develop-design.md`,
 Phase 1). Everything the review-UI redesign left behind was fixed on
 `fix/known-issues` and is recorded further down.
@@ -14,47 +14,38 @@ Phase 1). Everything the review-UI redesign left behind was fixed on
 
 From Phase 1 of automatic RAW development (`feat/auto-develop`). All were
 reproduced, none is a regression of existing behaviour, and each was left because
-it sits outside that phase's scope.
+it sits outside that phase's scope. KI-11 and KI-12 were found later, during the
+CHECKPOINT review on 2026-08-13.
 
 ### Affects photos, not just internals
 
-**KI-1 — `rawler` cannot extract previews from Sony A6300 (ILCE-6300) ARW files.**
+**KI-11 — `photopipe scan --reprocess` is accepted and ignored.** The flag is
+declared in the CLI, documented as "force re-analysis of already-processed
+files", bound to `_reprocess` in `cmd_scan`, and then never read; nothing named
+`reprocess` exists anywhere in the pipeline crate. A user asking for a forced
+re-analysis silently gets an ordinary incremental scan. This is how the CHECKPOINT
+review nearly drew the wrong conclusion: the sample library only picked up fresh
+`sharpness` rows because a differently-spelled path created new `files` rows (see
+KI-12), not because `--reprocess` did anything.
 
-`rawler` 0.7.2 returns `None` from **both** `preview_image()` and
-`thumbnail_image()` for these files, so ingest logs "no preview or thumbnail
-available", writes nothing to the preview cache, and still reports the file as
-`Processed`, `Errored: 0`. The previews exist: a byte scan of `DSC03073.ARW`
-finds two embedded JPEGs, ~9 KB at offset 38842 and ~674 KB at offset 144546.
+Fixing it is design work, not plumbing: "re-analysis" has to define what it
+invalidates — preview cache, `sharpness`, `iqa`, `embeddings`, defect flags, or
+all of them — and each choice has a different cost. Until then the flag should
+arguably fail loudly rather than lie.
 
-Everything downstream of the preview silently does nothing for these files:
-review-UI thumbnails, blur and back-focus detection, exposure flags, CLIP-IQA
-scoring, DINOv2 embeddings, and therefore duplicate detection. EXIF extraction
-works, so the catalog looks populated at a glance — `sharpness`, `exposure` and
-`iqa` are simply null.
+**KI-12 — the same photo is catalogued twice when the path is spelled
+differently.** `library_key` is an xxh3 of the *canonicalised* folder path, so
+`./example-pictures` and `/Users/…/example-pictures` open the same catalog, but
+`files.path` stores the path as given. Scanning a library once by relative path
+and once by absolute path therefore inserts every photo a second time, with an
+identical `content_hash`, and the second copy carries none of the first's
+decisions. Observed live: 6 rows for 3 files, keeper verdicts on 3 of them.
 
-`finish` is unaffected for correctness, because `measure_raw` reads the raw
-sensor plane rather than the embedded preview. But with `sharpness` empty,
-`decide()` falls back to `s_global = 0.5` and `sharpen_amount` is constant across
-the set, which is why the Phase 1 CHECKPOINT could not judge sharpening.
-
-Fixing it means a fallback that scans for the embedded JPEG when `rawler`
-declines — the data is right there — or an upstream fix. Worth doing: it would
-restore the entire ML path for this camera.
-
-**KI-2 — the finished tree is never pruned.** Flipping a verdict from keep to
-reject leaves the JPEG, its `.pp3` and the `edits` row in place, with no way to
-clean up. `review-tree` and `export-keepers` both prune stale entries; `finish`
-has no `--regenerate` and no prune pass, so `_finished/` accumulates orphans. A
-related consequence: because the dedupe set is per-run and not seeded from what
-is already on disk, a shrinking keeper set can let a re-rendered photo overwrite
-a previous run's orphaned JPEG whose `edits` row still points at it.
-
-**KI-3 — the next `scan` re-ingests finished JPEGs as new photos.** `_finished`
-defaults to living inside the library and `jpg` is an ingest extension, and
-`ingest_directory` has no exclusion for managed trees. `_review` has had this
-problem all along, so it is not new, but `finish` makes it far easier to hit. The
-`.photopipe-tree` marker that `output/mod.rs` already writes would give the
-walker something cheap to skip on.
+This breaks the "re-running `scan` does zero work" constraint whenever the
+spelling changes, and it feeds dedupe a set of guaranteed-identical pairs.
+Canonicalising the path at ingest is the obvious fix; a migration would need to
+merge the duplicate rows rather than just delete them, since decisions can sit on
+either copy.
 
 **KI-4 — output JPEGs carry no metadata.** `encode_jpeg` uses `JpegEncoder`
 without `set_exif`/`set_icc_profile`, so finished files have no capture date,
@@ -64,29 +55,12 @@ noticed on the first real run.
 
 ### Internals
 
-**KI-5 — a "zero work" second run still decodes every RAW.** `finish_one`
-measures and upserts `raw_stats` *before* consulting `edit_identity`, because
-`recipe_hash` is needed to build the identity. Functionally correct and verified
-idempotent, but on 500 frames the second run costs a full raw decode each, where
-§8's language implies zero. `get_raw_stats` already exists and is currently used
-only by tests: when a stored `edits` row's `content_hash` matches and a
-`raw_stats` row exists, `decide()` could run from the persisted stats.
-
 **KI-6 — `[develop] renderer` and the whole `[develop.look]` section are read by
 nobody.** Only `finished_dir`, `jpeg_quality`, `output_subdirs` and
 `rawtherapee_path` are consumed. `renderer = "vkdt"` silently renders through
 RawTherapee; `look.enable = true` silently does nothing, because the look is
 Phase 2. One validation line rejecting an unknown renderer, plus a `debug!` noting
 the look is unimplemented, removes the trap.
-
-**KI-7 — a long run is nearly silent, and the failure hint is wrong.**
-`CliProgress` makes `set_total` and `inc` no-ops and nothing logs per rendered
-photo, so a multi-hour serial run prints two lines. (`cmd_scan` passes `None`, so
-this is convention rather than regression.) Separately, per-file failures are
-logged at `warn!` while the default log level is `info`, so the summary's "re-run
-with --log-level debug to see why individual files failed" is misleading — the
-reasons already printed. `stage("rendering")` is also never emitted, so a future
-UI wired to `ProgressSink` would show "measuring" for the whole render.
 
 **KI-8 — unchecked indexing in the CFA path, and a panic escapes failure
 isolation.** `measure.rs`'s 2×2 CFA cell walk indexes `data[(y + dy) * w + (x +
@@ -111,6 +85,206 @@ it and holding the lock. Integration tests live in a separate crate, so
 `#[cfg(test)]` cannot work; a `test-support` cargo feature would.
 
 ---
+
+## Fixed on 2026-08-13 (third pass)
+
+**KI-13 — nothing was leaking. The test was measuring its own scratch
+directory.** `end_to_end_finish_is_idempotent` failed its final assertion with
+one empty `.tmpXXXXXX` inside the redirected `TMPDIR`, which read as a render
+scratch directory `finish_folder` had failed to clean up. It was not one.
+
+`test_cache()` is a `OnceLock<TempDir>` shared by every test in the file,
+initialised **lazily** and — being `&'static` — deliberately never removed. This
+test's first call to it sits inside the `FinishRequest` literal for its first
+run, which is *after* it redirects `TMPDIR` to observe its own cleanup. So the
+shared cache was created inside the observed root and counted as a leftover.
+
+The signature is worth remembering, because it is the opposite of the usual one:
+the test **passed** as part of `cargo test --all` and **failed** when run alone.
+Running the whole file, some earlier test always initialised the `OnceLock`
+first, outside the redirect. A filtered run had nobody to do that. A test that
+only fails in isolation is as much a defect as one that only fails in company —
+and the ordinary reading, "it passes in CI, so it's a flake in my shell", points
+exactly the wrong way.
+
+Fixed by giving the test its own cache directory, created before the redirect,
+rather than by ordering it after a warm-up: the dependency disappears instead of
+being satisfied by luck. `test_cache()` now documents the trap for the next
+test that wants to redirect `TMPDIR`.
+
+Verified in both directions. The test now passes alone and in the full file, and
+the assertion is not vacuous: a deliberate `std::mem::forget(TempDir::new())`
+inside `finish_folder` still fails it, with one leftover per run.
+
+Three prior investigation notes were wrong and are recorded so the trail is
+honest: the leftover was assumed to be a *render* scratch directory (it was not
+— those live inside the run directory, never beside it), then the run-level
+directory itself (instrumentation showed all three created and removed), then
+`rawtherapee-cli` inheriting `TMPDIR` (the `.tmpXXXXXX` name is `tempfile`'s,
+not glib's). Only snapshotting the directory at each step found it.
+
+**KI-7 — a long `finish` run is no longer silent, and the failure hint is
+fixed.** Closed as a dependency of the Develop screen: a screen built on the old
+reporting would have shown one stage for an hour and looked hung.
+
+The interesting part was that `stage()` could not carry it. `stage()` resets the
+per-phase counter by contract — `calibrating` and `grouping duplicates` rely on
+that, since neither calls `set_total` — so a stage transition per photo would
+have wiped the run's own "N of M photos" four times per photo. The counter and
+the per-photo detail are two different things travelling at two different rates.
+
+So `ProgressSink` gained `step(&self, step: &str, item: &str)`, defaulted to a
+no-op, and `finish_folder` now runs as *one* counted phase: `stage("developing")`
+and `set_total(n)` once, `inc()` once per photo, and a `step` per phase of each
+photo — `measuring` → `rendering` → `applying look` → `encoding` — naming the
+file being worked on. `pruning` and `done` follow as phases once the loop ends.
+`applying look` is emitted even with no predictor loaded: the phase exists either
+way, and a step list whose shape depends on which models are installed is a
+much worse contract for the UI than one that is fixed.
+
+The sequence is asserted in `end_to_end_finish_is_idempotent` rather than against
+the stub renderer, because the stub never reaches the look or the encoder. The
+same test pins that `step` does not disturb `set_total`, which is the whole
+reason it exists, and that an already-current photo stops at `measuring` — the
+screen must not claim a render that did not happen.
+
+Separately, the summary's "re-run with `--log-level debug` to see why individual
+files failed" was wrong: per-file failures log at `warn!`, which the default
+`info` level already shows. It now says the reasons are in the warnings above.
+
+## Fixed on 2026-08-13 (second pass)
+
+**KI-3 — `scan` no longer re-ingests photopipe's own output.** `_finished`
+defaults to living inside the library and `jpg` is an ingest extension, so the
+next `scan` catalogued the finished JPEGs as new photos — which would then become
+keepers to develop, and so on. `_review` and the keepers export have always had
+the same shape, so all three are closed at once now that `finish` writes the
+`.photopipe-tree` marker the walker can test for.
+
+The exclusion lives in a new `collect_ingestable`, shared by `ingest_directory`
+and `count_pending` rather than written twice. Those two walks disagreeing over
+sidecar JPGs *is* BE-1, further down this file, and it left the UI reporting
+"N new photos" forever; sharing one function is what stops that recurring. A root
+that is itself a managed tree is still walked, and an unmarked directory is
+ordinary content — people do keep photos in a folder called `_finished`.
+
+Verified live: `finish --out <library>/_finished` writes 3 JPEGs inside the
+library, and the next scan finds 3 files rather than 6 and processes none.
+
+**KI-2 — the finished tree is now pruned.** Flipping a verdict from keep to
+reject left the JPEG, its `.pp3` and the `edits` row in place with no way to
+clean up, so `_finished/` only ever grew.
+
+The row was the more dangerous half. With it still naming a path no longer
+claimed by any keeper, `dedupe_name` — which only knows about names handed out
+during the *current* run — could give that same path to a different photo, whose
+render would overwrite the file while the old row went on describing it. Deleting
+the file and the row together is what makes that unreachable, so the prune does
+both in one pass rather than sweeping disk and tidying the catalog separately.
+
+`finish_folder` now collects every path the run vouches for (including skipped
+photos, or the first no-op run would delete the whole tree), removes orphaned
+outputs and their rows, then sweeps anything else left behind. `finish
+--regenerate` rebuilds from scratch, matching `review-tree`.
+
+The safety rule is deliberately narrow: pruning only touches a directory
+photopipe can *show* it wrote — one carrying the `.photopipe-tree` marker, an
+empty one, or one holding outputs the catalog already claims (which adopts a tree
+written before `finish` set the marker). Anything else is left alone and logged.
+`--out` accepts any path, and deleting files photopipe did not create would be
+unforgivable; `an_unmarked_directory_full_of_strangers_is_never_pruned` pins it.
+
+**KI-5 — a "zero work" second run no longer decodes every RAW.** `finish_one`
+measured and upserted `raw_stats` *before* consulting `edit_identity`, because
+`recipe_hash` is needed to build the identity and the recipe needs the stats.
+
+The persisted `raw_stats` row closes that circle. It carries no `content_hash` of
+its own so it cannot be trusted alone, but an `edits` row whose `content_hash`
+still matches the file proves those stats were measured from exactly these bytes,
+because `finish_one` writes both in the same pass. Every other case — no `edits`
+row, a file that changed, a missing `raw_stats` row — still measures.
+
+Measured on the three sample ARWs: a no-op run went from 1.94s to 0.10s. The
+test asserts the absence of a decode rather than a duration, by pointing the
+catalog at a RAW that does not exist: reusing the stats skips cleanly, while any
+decode attempt fails and is counted.
+
+**A third bug, surfaced while verifying the other two: `finish --out
+somewhere-new` wrote nothing and called it success.** It reported every photo as
+"already current" and left the new directory empty, because `is_up_to_date`
+checks the path the *previous* run recorded rather than the one being asked for.
+An output that is not where we were told to write it is not current; the check
+now compares the two.
+
+## Fixed on 2026-08-13
+
+**Sharpening was pinned to the cap for every photo.** Found during the CHECKPOINT
+review, which is exactly the review question it was blocking.
+
+`decide()` documented its input as "roughly 0..1" and clamped it there, but
+`defect::blur` computes `s_global` as the variance of the Laplacian — unbounded,
+and 128 / 357 / 1491 on the three sample ARWs. Every real frame saturated the
+clamp to 1.0, so `sharpen_amount` was always exactly `SHARPEN_MAX`. The safety
+property the comment claimed — "a genuinely soft frame is never sharpened into
+crunch" — was not in force, and a visibly out-of-focus frame was getting maximum
+sharpening. All 23 `decide` tests passed throughout, because every one of them
+feeds `sharp(0.5)`, `sharp(0.05)` or `sharp(0.95)`: fabricated values in a range
+no photograph produces.
+
+This is the second instance of the defect class recorded at the bottom of this
+file, and the sharper lesson is the one about **units crossing a module
+boundary**. Both sides were individually reasonable — an unbounded variance is
+the right blur metric, and a 0..1 knob is the right recipe field — and the bug
+lived entirely in the undocumented assumption between them, held in place by a
+doc comment that asserted the contract instead of checking it.
+
+Fixed by renaming the field to `s_relative` and computing it with
+`relative_sharpness()` against the `sharpness_baseline` percentiles the blur
+flagger already uses, falling back per-bucket → global sentinel → neutral. Note
+the fix only bites once `photopipe calibrate` has run: `scan` deliberately does
+not build baselines (spec §7 wants calibration run over a few hundred photos per
+lens), so an uncalibrated library gets neutral sharpening by design. Verified on
+the sample set: 0.800 → 0.000 for the out-of-focus frame, 0.407 for the mid one,
+0.800 held for the sharpest, and `finish` still reports 0 rendered on a re-run.
+
+## Fixed on 2026-08-11
+
+**KI-1 — no preview could be extracted from Sony A6300 (ILCE-6300) ARW files.**
+
+`extract_preview_raw` asked `rawler` for `preview_image()` then
+`thumbnail_image()`; both answer `None` for these files, so ingest logged "no
+preview or thumbnail available", wrote nothing to the preview cache, and still
+reported the file as `Processed`, `Errored: 0`. Everything downstream silently
+did nothing for this camera — review-UI thumbnails, blur and back-focus
+detection, exposure flags, CLIP-IQA, DINOv2 embeddings and therefore duplicate
+detection. EXIF worked, so the catalog looked populated at a glance while
+`sharpness`, `exposure` and `iqa` were null. It also left `decide()` falling back
+to `s_global = 0.5`, which is why the Phase 1 CHECKPOINT could not judge
+sharpening.
+
+The cause turned out to be narrower than the original note assumed, and no
+byte-scanner was needed. `rawler` 0.7.2 wires each decoder's embedded JPEG to
+whichever of three trait methods its author picked, inconsistently between
+formats: the ARW decoder implements only `full_image`, whose own doc comment
+reads "return the embedded JPEG preview". Despite the name, no decoder's
+`full_image` develops the sensor plane — each reads an already-encoded image out
+of a tag (embedded JPEG, or an uncompressed RGB strip for CR2), and the trait
+default returns `None`. So `full_image` is now the third step of the fallback
+chain, after `preview_image` and `thumbnail_image`; ordering it last keeps every
+format that already had a preview on exactly the path it was on, and the sources
+stay lazily evaluated so nothing decodes a second image it will not use. The
+chain also no longer aborts on the first erroring step — a decoder that fails one
+entry point can still return a usable image from another — and the final error
+message names all three.
+
+Covered by `arw_preview_falls_back_to_the_embedded_jpeg` in
+`crates/pipeline/src/ingest/preview.rs`, which pins the aspect ratio so the
+1616×1080 preview cannot be confused with the 160×120 thumbnail, and skips
+cleanly where `example-pictures/` is absent. Verified live on the three sample
+ARWs: `photopipe scan` cached 3 previews where it previously cached none, defect
+analysis went from silently no-op to `Analyzed: 3` with one overexposure flag,
+and `sharpness.s_global` holds three distinct real values (357, 128, 1491) where
+the column was empty.
 
 ## Fixed on 2026-08-01
 

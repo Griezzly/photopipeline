@@ -92,6 +92,49 @@ pub struct IngestReport {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+/// Every file under `root` with an ingestable extension, skipping photopipe's
+/// own managed trees.
+///
+/// Shared by `ingest_directory` and `count_pending` so the two can never
+/// disagree about what counts as a candidate — they did once before, over
+/// sidecar JPGs, and the UI reported "N new photos" forever (see BE-1 in
+/// `docs/KNOWN_ISSUES.md`).
+///
+/// The managed-tree exclusion is what stops `finish`'s output from being
+/// re-ingested as new photos on the next `scan`. `_finished` defaults to living
+/// *inside* the library and `jpg` is an ingest extension, so without this the
+/// tool would catalog its own output, then develop those JPEGs' keepers, and so
+/// on. The `.photopipe-tree` marker that `output` and `finish` write is the
+/// cheap thing to test. `_review` and the keepers export have always had the
+/// same shape, so this closes all three at once.
+///
+/// A root that is *itself* a managed tree is still walked: pointing `scan`
+/// straight at one is an explicit act, and refusing it silently would be its own
+/// kind of surprise.
+pub fn collect_ingestable(root: &Path, cfg: &IngestConfig) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in WalkDir::new(root)
+        .follow_links(cfg.follow_symlinks)
+        .into_iter()
+        .filter_entry(|e| {
+            !(e.file_type().is_dir()
+                && e.path() != root
+                && crate::output::is_managed_tree(e.path()))
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if cfg.extensions.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+            paths.push(path.to_owned());
+        }
+    }
+    paths
+}
+
 /// Walk `roots`, ingest every supported file into `catalog`, and write WebP
 /// previews into `cache`.  Returns a summary of what happened.
 pub fn ingest_directory(
@@ -110,20 +153,7 @@ pub fn ingest_directory(
     // ── collect candidate paths ──────────────────────────────────────────────
     let mut paths: Vec<PathBuf> = Vec::new();
     for root in roots {
-        for entry in WalkDir::new(root)
-            .follow_links(cfg.follow_symlinks)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if cfg.extensions.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
-                paths.push(path.to_owned());
-            }
-        }
+        paths.extend(collect_ingestable(root, cfg));
     }
 
     tracing::info!(total = paths.len(), "ingest: files found");
@@ -484,5 +514,63 @@ mod tests {
         assert!(result.contains(&PathBuf::from("/photos/IMG_5000.CR3")));
         assert!(result.contains(&PathBuf::from("/photos/IMG_5001.NEF")));
         assert!(!result.contains(&PathBuf::from("/photos/IMG_5000.jpg")));
+    }
+
+    /// KI-3: `finish` writes JPEGs into a tree that defaults to living *inside*
+    /// the library, and `jpg` is an ingest extension — so the next `scan` used to
+    /// catalog photopipe's own output as new photos. The `.photopipe-tree` marker
+    /// is what the walker skips on.
+    #[test]
+    fn managed_trees_inside_a_library_are_not_ingested() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("DSC1.arw"), b"raw").unwrap();
+
+        // A finished tree, as `finish --out <library>/_finished` leaves it.
+        let finished = root.join("_finished/2024-05");
+        std::fs::create_dir_all(&finished).unwrap();
+        std::fs::write(root.join("_finished/.photopipe-tree"), b"x").unwrap();
+        std::fs::write(finished.join("DSC1.jpg"), b"jpeg").unwrap();
+        std::fs::write(finished.join("DSC1.pp3"), b"pp3").unwrap();
+
+        // And a review tree, which has always had the same shape.
+        let review = root.join("_review/blurry");
+        std::fs::create_dir_all(&review).unwrap();
+        std::fs::write(root.join("_review/.photopipe-tree"), b"x").unwrap();
+        std::fs::write(review.join("DSC9.arw"), b"copy").unwrap();
+
+        let found = collect_ingestable(root, &IngestConfig::default());
+        assert_eq!(
+            found,
+            vec![root.join("DSC1.arw")],
+            "only the original should be ingested"
+        );
+    }
+
+    /// An unmarked directory is ordinary content and must still be walked —
+    /// people do keep photos in a folder called `_finished`.
+    #[test]
+    fn an_unmarked_subdirectory_is_still_ingested() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let sub = root.join("_finished");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("holiday.jpg"), b"jpeg").unwrap();
+
+        let found = collect_ingestable(root, &IngestConfig::default());
+        assert_eq!(found, vec![sub.join("holiday.jpg")]);
+    }
+
+    /// Pointing `scan` straight at a managed tree is an explicit act and still
+    /// works; only *descendant* trees are pruned.
+    #[test]
+    fn a_root_that_is_itself_a_managed_tree_is_still_walked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".photopipe-tree"), b"x").unwrap();
+        std::fs::write(root.join("DSC1.jpg"), b"jpeg").unwrap();
+
+        let found = collect_ingestable(root, &IngestConfig::default());
+        assert_eq!(found, vec![root.join("DSC1.jpg")]);
     }
 }

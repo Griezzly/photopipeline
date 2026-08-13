@@ -2010,6 +2010,42 @@ impl Catalog {
         }
     }
 
+    /// The `(p10, p90)` sharpness span for a bucket, subject to the same
+    /// `min_samples` rule as [`Catalog::bucket_baseline_p10`]. Used to place a
+    /// frame's `s_subject` on a 0..1 scale for the sharpening decision, where
+    /// p10 alone cannot say how much headroom sits above the threshold.
+    pub fn bucket_baseline_span(
+        &self,
+        camera_model: &str,
+        lens_model: &str,
+        focal_bucket: i32,
+        aperture_bucket: f32,
+        min_samples: usize,
+    ) -> Result<Option<(f32, f32)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let result = conn.query_row(
+            "SELECT s_subject_p10, s_subject_p90, n_samples FROM sharpness_baseline
+             WHERE camera_model = ? AND lens_model = ?
+               AND focal_bucket = ? AND aperture_bucket = ?",
+            duckdb::params![camera_model, lens_model, focal_bucket, aperture_bucket],
+            |r| {
+                let p10: f32 = r.get(0)?;
+                let p90: f32 = r.get(1)?;
+                let n: i64 = r.get(2)?;
+                Ok((p10, p90, n))
+            },
+        );
+        match result {
+            Ok((p10, p90, n)) if (n as usize) >= min_samples => Ok(Some((p10, p90))),
+            Ok(_) => Ok(None),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(CatalogError::Db(e.to_string())),
+        }
+    }
+
     /// Bulk-write blur-related flags in one transaction. Uses prepared
     /// `INSERT … ON CONFLICT (file_id, flag_type)` (NOT the Appender): the
     /// `defect_flags` table has a `DEFAULT nextval()` id and a UNIQUE
