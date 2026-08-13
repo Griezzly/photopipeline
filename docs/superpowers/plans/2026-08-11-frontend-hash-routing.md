@@ -526,6 +526,7 @@ git commit -m "feat(ui): hash router for the four top-level screens"
 - Modify: `crates/cli/assets/analyze.js:33,118,120,147`
 - Modify: `crates/cli/assets/picker.js:87`
 - Modify: `crates/cli/assets/review.js:509-512`
+- Modify: `crates/cli/assets/libraries.js:117` (deferred out of Task 2 — see below)
 
 **Interfaces:**
 - Consumes: `go`, `replace`, `back`, `routerEnsureLibrary` from Task 2.
@@ -611,6 +612,16 @@ And `review.js` line 915, the "new photos in this folder" banner action:
 ```js
       actions: [{ label: 'Re-analyze', onClick: () => window.pp.go('/analyze', { folder }) }],
 ```
+
+- [ ] **Step 3b: Take over the 409 path deferred out of Task 2**
+
+Task 2 originally converted this line, but the `/analyze` route did not exist yet, so a library that was mid-analysis bounced the user onto a different library's grid. It was reverted to the direct call and belongs here. `crates/cli/assets/libraries.js` line 117:
+
+```js
+    if (e.status === 409) { window.pp.go('/analyze', { folder, resume: true }); return; }
+```
+
+Note what makes this correct only now: the 409 means the `POST /api/open` failed, so `state.activeFolder` still names the *previous* library. The `/analyze` applier does not consult `state.activeFolder` at all when it has a payload — it uses `payload.folder` — so the right folder reaches `startAnalyze`. Verify that by reading the applier before you trust it.
 
 - [ ] **Step 4: Verify in the browser**
 
@@ -1041,6 +1052,7 @@ git commit -m "feat(ui): route compare under whichever screen opened it"
 - Modify: `crates/cli/assets/router.js` (add the `export` applier)
 - Modify: `crates/cli/assets/export.js:4-90`
 - Modify: `crates/cli/assets/review.js:563,872`
+- Modify: `crates/cli/assets/rail.js:8` (deferred out of Task 2 — see Step 6b)
 
 **Interfaces:**
 - Consumes: `go`, `back`, `routerPath`, `parentPath` from Task 2.
@@ -1163,6 +1175,14 @@ and line 872:
 
 ```js
   el('rv-export').onclick = () => window.pp.go('/export');
+```
+
+- [ ] **Step 6b: Take over the rail's Export button, deferred out of Task 2**
+
+Task 2 originally converted this, but with no `/export` applier the rail's Export button bounced to the review grid and left a junk history entry. It was reverted to the direct call and belongs here. `crates/cli/assets/rail.js` line 8:
+
+```js
+  { id: 'export',     label: 'Export',     ico: 'download', needsLib: true, go: () => window.pp.go('/export') },
 ```
 
 - [ ] **Step 7: Verify in the browser**
