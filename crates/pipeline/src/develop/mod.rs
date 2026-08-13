@@ -93,6 +93,37 @@ pub struct FinishReport {
     pub pruned: u64,
 }
 
+/// True when the look should be kept.
+///
+/// Fails open: when either score is missing the guard cannot judge, and
+/// rejecting every look because the IQA model is absent would be a far more
+/// confusing failure than keeping one.
+pub fn guard_verdict(before: Option<f32>, after: Option<f32>, margin: f32) -> bool {
+    match (before, after) {
+        (Some(b), Some(a)) => a >= b - margin,
+        _ => true,
+    }
+}
+
+/// Everything one `finish` run needs. A struct rather than eight positional
+/// parameters, which is both unreadable at the call site and past the limit
+/// clippy enforces.
+pub struct FinishRequest<'a> {
+    pub catalog: &'a Catalog,
+    pub cfg: &'a DevelopConfig,
+    /// Supplies `min_samples_for_bucket` for the sharpening baseline lookup.
+    pub defect_cfg: &'a DefectConfig,
+    /// Supplies the look predictor and the IQA model backing its guard. An
+    /// empty hub means baseline-only, which is a supported mode, not an error.
+    pub hub: &'a crate::models::ModelHub,
+    /// The library's cache root. Content-addressed `.cube` files go under
+    /// `luts/` here, so a burst of similar frames shares one file.
+    pub cache_dir: &'a Path,
+    pub out_dir: &'a Path,
+    /// Delete the finished tree and rebuild it rather than updating in place.
+    pub regenerate: bool,
+}
+
 /// Develop every kept photo into `out_dir`.
 ///
 /// Deliberately serial. Unlike `scan`, this stage must not fan out with rayon:
@@ -100,13 +131,18 @@ pub struct FinishReport {
 /// and a 16-bit TIFF of a 24MP raw is roughly 145 MB, so several in flight at
 /// once would thrash memory for no throughput gain (spec §8).
 pub fn finish_folder(
-    catalog: &Catalog,
-    cfg: &DevelopConfig,
-    defect_cfg: &DefectConfig,
-    out_dir: &Path,
-    regenerate: bool,
+    req: FinishRequest<'_>,
     progress: &dyn ProgressSink,
 ) -> anyhow::Result<FinishReport> {
+    let FinishRequest {
+        catalog,
+        cfg,
+        defect_cfg,
+        hub,
+        cache_dir,
+        out_dir,
+        regenerate,
+    } = req;
     if regenerate {
         crate::output::remove_managed_tree(out_dir)?;
         tracing::info!(root = %out_dir.display(), "regenerate: removed existing finished tree");
@@ -147,7 +183,9 @@ pub fn finish_folder(
         catalog,
         cfg,
         defect_cfg,
+        hub,
         renderer: &renderer,
+        cache_dir,
         out_dir,
         tmp_dir: tmp.path(),
     };
@@ -405,7 +443,9 @@ struct FinishCtx<'a> {
     catalog: &'a Catalog,
     cfg: &'a DevelopConfig,
     defect_cfg: &'a DefectConfig,
+    hub: &'a crate::models::ModelHub,
     renderer: &'a Pp3Renderer,
+    cache_dir: &'a Path,
     out_dir: &'a Path,
     tmp_dir: &'a Path,
 }
@@ -415,13 +455,17 @@ fn finish_one(
     item: &crate::catalog::KeeperToDevelop,
     taken_by_dir: &mut HashMap<std::path::PathBuf, HashSet<String>>,
 ) -> anyhow::Result<Outcome> {
+    // `cache_dir` is read through `ctx` by the look stage rather than unpacked
+    // here.
     let FinishCtx {
         catalog,
         cfg,
         defect_cfg,
+        hub,
         renderer,
         out_dir,
         tmp_dir,
+        ..
     } = *ctx;
 
     // ① measure — but only when the answer cannot already be known.
@@ -468,9 +512,12 @@ fn finish_one(
         recipe_hash: recipe_hash.clone(),
         decider_version: DECIDER_VERSION.into(),
         renderer: RENDERER_NAME.into(),
-        // Phase 2 fills these in; baseline-only renders carry no look.
-        look_model: None,
-        look_version: None,
+        // Taken from the hub and the config, deliberately *not* from the
+        // prediction result further down: the identity has to describe what
+        // this run intends to produce, or turning the look off would leave
+        // every existing looked JPEG looking current.
+        look_model: look_identity(cfg, hub).map(|(name, _)| name),
+        look_version: look_identity(cfg, hub).map(|(_, version)| version),
     };
 
     let dest = output_path_for(cfg, out_dir, item, taken_by_dir);
@@ -497,14 +544,23 @@ fn finish_one(
     // ③ baseline render
     let rendered = renderer.render(&item.path, &recipe, tmp_dir)?;
 
-    // ④ encode. Phase 2 inserts the look between these two steps.
+    // ④ look
+    let baseline = image::open(&rendered.tiff)
+        .with_context(|| format!("cannot read rendered TIFF {}", rendered.tiff.display()))?;
+
+    let mut look = LookOutcome::default();
+    let final_image = apply_look(ctx, item, &baseline, &mut look);
+
+    // ⑥ encode
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    let img = image::open(&rendered.tiff)
-        .with_context(|| format!("cannot read rendered TIFF {}", rendered.tiff.display()))?;
-    encode_jpeg(&img, &dest, cfg.jpeg_quality)?;
+    encode_jpeg(
+        final_image.as_ref().unwrap_or(&baseline),
+        &dest,
+        cfg.jpeg_quality,
+    )?;
 
     // The .pp3 sits beside the JPEG as an escape hatch for reopening the photo
     // in RawTherapee. Never beside the original raw. Copy it before `rendered`
@@ -528,18 +584,112 @@ fn finish_one(
         recipe_hash,
         decider_version: DECIDER_VERSION.into(),
         renderer: RENDERER_NAME.into(),
-        look_model: None,
-        look_version: None,
-        lut_hash: None,
-        look_applied: false,
-        iqa_before: None,
-        iqa_after: None,
+        // The identity fields must match `wanted` exactly, or the next run
+        // reads this row back as stale and re-renders forever.
+        look_model: wanted.look_model.clone(),
+        look_version: wanted.look_version.clone(),
+        lut_hash: look.lut_hash,
+        look_applied: look.applied,
+        iqa_before: look.iqa_before,
+        iqa_after: look.iqa_after,
         output_path: Some(dest.display().to_string()),
         output_size_bytes: size,
         rendered_at: now_secs(),
     })?;
 
     Ok(Outcome::Rendered(dest))
+}
+
+/// What the look stage did, for the audit record in `edits`.
+#[derive(Debug, Default)]
+struct LookOutcome {
+    lut_hash: Option<String>,
+    applied: bool,
+    iqa_before: Option<f32>,
+    iqa_after: Option<f32>,
+}
+
+/// The look this run *intends* to apply, as `(model, version)`.
+///
+/// Depends only on config and which models loaded — never on whether a given
+/// prediction succeeded — because it feeds the idempotency identity. A photo
+/// whose look failed must still compare equal on the next run, or it re-renders
+/// forever; the `edits.look_applied` flag is where "we tried and shipped the
+/// baseline" is recorded.
+fn look_identity(cfg: &DevelopConfig, hub: &crate::models::ModelHub) -> Option<(String, String)> {
+    if !cfg.look.enable {
+        return None;
+    }
+    hub.look
+        .as_ref()
+        .map(|p| (p.name().to_string(), p.version().to_string()))
+}
+
+/// Predict and apply the look, subject to the quality guard.
+///
+/// Returns `None` when the baseline should ship unchanged — the look is
+/// disabled, no predictor loaded, prediction failed, or the guard rejected the
+/// result. A look failure is never a render failure: the photo still gets its
+/// technically-corrected JPEG.
+fn apply_look(
+    ctx: &FinishCtx<'_>,
+    item: &crate::catalog::KeeperToDevelop,
+    baseline: &image::DynamicImage,
+    out: &mut LookOutcome,
+) -> Option<image::DynamicImage> {
+    if !ctx.cfg.look.enable {
+        return None;
+    }
+    let predictor = ctx.hub.look.as_ref()?;
+
+    let lut = match predictor.predict(baseline) {
+        Ok(lut) => lut,
+        Err(e) => {
+            tracing::warn!(path = %item.path.display(), error = %e, "look prediction failed; baseline only");
+            return None;
+        }
+    };
+
+    // Content-addressed in the cache, so a burst of near-identical frames
+    // shares one file instead of each writing its own. Kept as `.cube` rather
+    // than in memory alone so a look stays inspectable and reproducible by hand
+    // in RawTherapee or darktable.
+    let hash = lut.content_hash();
+    let lut_dir = ctx.cache_dir.join("luts");
+    if let Err(e) = std::fs::create_dir_all(&lut_dir) {
+        tracing::warn!(dir = %lut_dir.display(), error = %e, "cannot create LUT cache directory");
+    } else {
+        let cube = lut_dir.join(format!("{hash}.cube"));
+        if !cube.exists() {
+            if let Err(e) = std::fs::write(&cube, lut.to_cube()) {
+                tracing::warn!(path = %cube.display(), error = %e, "cannot write .cube");
+            }
+        }
+    }
+    out.lut_hash = Some(hash);
+
+    let looked = crate::develop::lut_apply::apply_lut(baseline, &lut);
+
+    // ⑤ guard
+    if ctx.cfg.look.guard_iqa {
+        if let Some(iqa) = ctx.hub.iqa.as_ref() {
+            out.iqa_before = iqa.score(baseline).ok();
+            out.iqa_after = iqa.score(&looked).ok();
+        }
+    }
+
+    if guard_verdict(out.iqa_before, out.iqa_after, ctx.cfg.look.guard_margin) {
+        out.applied = true;
+        Some(looked)
+    } else {
+        tracing::info!(
+            path = %item.path.display(),
+            before = ?out.iqa_before,
+            after = ?out.iqa_after,
+            "look lowered quality past the margin; keeping baseline"
+        );
+        None
+    }
 }
 
 /// Where one photo's JPEG lands.

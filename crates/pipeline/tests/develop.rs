@@ -5,7 +5,20 @@ use pipeline::develop::is_up_to_date;
 use pipeline::develop::measure::RawStats;
 use pipeline::develop::render::Pp3Renderer;
 use pipeline::develop::{finish_folder, FinishReport};
+use pipeline::models::ModelHub;
 use pipeline::ProgressSink;
+
+/// A scratch cache root shared by the tests in this file.
+///
+/// Only the look stage writes here, and every test below runs with an empty
+/// `ModelHub`, so nothing is actually written — but `finish_folder` still needs
+/// a real path. Held in a `OnceLock` so the directory outlives every test.
+fn test_cache() -> &'static std::path::Path {
+    static TEST_CACHE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    TEST_CACHE
+        .get_or_init(|| tempfile::TempDir::new().unwrap())
+        .path()
+}
 
 fn temp_catalog() -> (tempfile::TempDir, Catalog) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -732,11 +745,15 @@ fn empty_work_list_renders_nothing_and_still_reports_done() {
     let out = tempfile::TempDir::new().unwrap();
     let sink = RecordingSink::default();
     let report: FinishReport = finish_folder(
-        &cat,
-        &DevelopConfig::default(),
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &DevelopConfig::default(),
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &sink,
     )
     .unwrap();
@@ -758,11 +775,15 @@ fn missing_renderer_fails_before_any_work() {
         ..Default::default()
     };
     let err = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .expect_err("a missing renderer should abort the run");
@@ -850,11 +871,15 @@ fn unreadable_raw_is_skipped_without_an_edits_row() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -882,11 +907,15 @@ fn jpg_keeper_is_counted_as_skipped_unsupported_not_errored() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -933,11 +962,15 @@ fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
     };
 
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1059,11 +1092,15 @@ fn end_to_end_finish_is_idempotent() {
 
     // ── first run: a real render ──
     let first = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1117,11 +1154,15 @@ fn end_to_end_finish_is_idempotent() {
 
     // ── second run: idempotency is a correctness requirement, not a perf goal ──
     let second = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1135,11 +1176,15 @@ fn end_to_end_finish_is_idempotent() {
     // skips regardless of whether the output still matches. ──
     std::fs::File::create(&jpeg).unwrap(); // truncate to 0 bytes
     let third = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1235,11 +1280,15 @@ fn rejecting_a_keeper_prunes_its_output_and_its_edits_row() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1282,11 +1331,15 @@ fn a_still_kept_photos_output_is_not_pruned() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1319,11 +1372,15 @@ fn an_unmarked_directory_full_of_strangers_is_never_pruned() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1402,11 +1459,15 @@ fn an_up_to_date_photo_is_skipped_without_decoding_its_raw() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1446,11 +1507,15 @@ fn changed_content_forces_a_fresh_measurement() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1484,15 +1549,277 @@ fn changing_the_output_directory_forces_a_rerender() {
         ..Default::default()
     };
     let report = finish_folder(
-        &cat,
-        &cfg,
-        &DefectConfig::default(),
-        new_out.path(),
-        false,
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &ModelHub::empty(),
+            cache_dir: test_cache(),
+            out_dir: new_out.path(),
+            regenerate: false,
+        },
         &RecordingSink::default(),
     )
     .unwrap();
 
     assert_eq!(report.skipped, 0, "must not claim to be already current");
     assert_eq!(report.errored, 1, "it should have tried to render again");
+}
+
+// ── Task 17: the IQA quality guard ───────────────────────────────────────────
+
+use pipeline::develop::guard_verdict;
+
+/// The look is kept when it improves or holds quality.
+#[test]
+fn guard_keeps_an_improving_look() {
+    assert!(guard_verdict(Some(0.60), Some(0.70), 0.02));
+    assert!(guard_verdict(Some(0.60), Some(0.60), 0.02));
+}
+
+/// A drop inside the margin is tolerated — a look is a stylistic change and
+/// a tiny IQA dip is not evidence it made the photo worse.
+#[test]
+fn guard_tolerates_a_drop_inside_the_margin() {
+    assert!(guard_verdict(Some(0.60), Some(0.59), 0.02));
+}
+
+/// A drop past the margin rejects the look.
+#[test]
+fn guard_rejects_a_drop_past_the_margin() {
+    assert!(!guard_verdict(Some(0.60), Some(0.50), 0.02));
+}
+
+/// With no scores available the guard cannot judge, so it must not reject —
+/// silently dropping the look on every photo because the IQA model is absent
+/// would be a confusing failure mode.
+#[test]
+fn guard_passes_when_scores_are_unavailable() {
+    assert!(guard_verdict(None, None, 0.02));
+    assert!(guard_verdict(Some(0.6), None, 0.02));
+    assert!(guard_verdict(None, Some(0.6), 0.02));
+}
+
+// ── the look stage ────────────────────────────────────────────────────────────
+
+/// The look-related audit columns for one file. `edit_identity` exposes only
+/// the idempotency fields, and these are what the look stage records.
+struct LookAudit {
+    model: Option<String>,
+    version: Option<String>,
+    lut_hash: Option<String>,
+    applied: bool,
+    iqa_before: Option<f32>,
+    iqa_after: Option<f32>,
+}
+
+fn look_audit(cat: &Catalog, file_id: i64) -> LookAudit {
+    let conn = cat.raw_conn_for_test();
+    conn.query_row(
+        "SELECT look_model, look_version, lut_hash, look_applied, iqa_before, iqa_after
+         FROM edits WHERE file_id = ?",
+        duckdb::params![file_id],
+        |r| {
+            Ok(LookAudit {
+                model: r.get(0)?,
+                version: r.get(1)?,
+                lut_hash: r.get(2)?,
+                applied: r.get(3)?,
+                iqa_before: r.get(4)?,
+                iqa_after: r.get(5)?,
+            })
+        },
+    )
+    .unwrap()
+}
+
+/// A predictor that always returns the same LUT, so a test can assert on the
+/// exact pixels the look must produce.
+struct StubLook {
+    lut: pipeline::develop::lut::Lut33,
+}
+
+impl pipeline::models::LookPredictor for StubLook {
+    fn predict(&self, _img: &image::DynamicImage) -> anyhow::Result<pipeline::develop::lut::Lut33> {
+        Ok(self.lut.clone())
+    }
+    fn name(&self) -> &str {
+        "stub-look"
+    }
+    fn version(&self) -> &str {
+        "7"
+    }
+}
+
+/// An IQA model returning fixed scores, to drive the guard from a test.
+struct StubIqa {
+    scores: std::sync::Mutex<Vec<f32>>,
+}
+
+impl pipeline::models::Iqa for StubIqa {
+    fn score(&self, _img: &image::DynamicImage) -> anyhow::Result<f32> {
+        let mut s = self.scores.lock().unwrap();
+        Ok(if s.is_empty() { 0.5 } else { s.remove(0) })
+    }
+    fn name(&self) -> &str {
+        "stub-iqa"
+    }
+}
+
+fn hub_with(look: Option<StubLook>, iqa: Option<StubIqa>) -> ModelHub {
+    let mut hub = ModelHub::empty();
+    hub.look =
+        look.map(|l| std::sync::Arc::new(l) as std::sync::Arc<dyn pipeline::models::LookPredictor>);
+    hub.iqa = iqa.map(|i| std::sync::Arc::new(i) as std::sync::Arc<dyn pipeline::models::Iqa>);
+    hub
+}
+
+/// Every other test in this file runs with an empty hub, so the look stage is
+/// never entered. This drives the whole path with a real render and a stub
+/// predictor whose LUT maps everything to black: if the look reaches the
+/// encoder, the JPEG is black, and no amount of correct-looking wiring can fake
+/// that. It also pins the audit record and the `.cube` cache write.
+///
+/// Gated the same way as `end_to_end_finish_is_idempotent`.
+#[test]
+fn the_look_reaches_the_encoder_and_is_recorded() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
+    let Some(raw) = std::env::var_os("PHOTOPIPE_TEST_RAW") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAW to a real RAW file");
+        return;
+    };
+    let _guard = REAL_RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(
+        &cat,
+        &std::path::PathBuf::from(&raw).to_string_lossy(),
+        "keep",
+    );
+    let out = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    let mut black = pipeline::develop::lut::Lut33::identity();
+    black.data.iter_mut().for_each(|v| *v = 0.0);
+    let hub = hub_with(Some(StubLook { lut: black }), None);
+
+    let report = finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &hub,
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+    assert_eq!(report.rendered, 1, "the render must succeed");
+
+    let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
+    let jpeg = std::path::PathBuf::from(path.unwrap());
+    let decoded = image::open(&jpeg).unwrap().to_rgb8();
+    let brightest = decoded.pixels().flat_map(|p| p.0).max().unwrap();
+    assert!(
+        brightest <= 2,
+        "the all-black LUT did not reach the encoder; brightest channel was {brightest}"
+    );
+
+    // The audit record names the look and the exact table used.
+    let audit = look_audit(&cat, id);
+    assert_eq!(audit.model.as_deref(), Some("stub-look"));
+    assert_eq!(audit.version.as_deref(), Some("7"));
+    assert!(audit.applied, "look_applied should be true");
+    let hash = audit.lut_hash.expect("a lut hash");
+
+    // …and the .cube is cached under the library's cache root, content-addressed.
+    let cube = cache.path().join("luts").join(format!("{hash}.cube"));
+    assert!(
+        cube.exists(),
+        "expected a cached .cube at {}",
+        cube.display()
+    );
+    let text = std::fs::read_to_string(&cube).unwrap();
+    assert!(text.contains("LUT_3D_SIZE 33"), "not a usable .cube");
+}
+
+/// The guard's rejection path, end to end: the same black LUT, but an IQA model
+/// that reports a large drop. The baseline must ship instead — and the row must
+/// still record that a look was attempted, or the next run cannot tell the
+/// difference between "guard rejected it" and "never tried".
+#[test]
+fn a_look_rejected_by_the_guard_ships_the_baseline() {
+    let Some(rt) = std::env::var_os("PHOTOPIPE_TEST_RAWTHERAPEE") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAWTHERAPEE to the rawtherapee-cli path");
+        return;
+    };
+    let Some(raw) = std::env::var_os("PHOTOPIPE_TEST_RAW") else {
+        eprintln!("skipping: set PHOTOPIPE_TEST_RAW to a real RAW file");
+        return;
+    };
+    let _guard = REAL_RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(
+        &cat,
+        &std::path::PathBuf::from(&raw).to_string_lossy(),
+        "keep",
+    );
+    let out = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    let mut black = pipeline::develop::lut::Lut33::identity();
+    black.data.iter_mut().for_each(|v| *v = 0.0);
+    // before = 0.9, after = 0.1 — far past the default margin.
+    let hub = hub_with(
+        Some(StubLook { lut: black }),
+        Some(StubIqa {
+            scores: std::sync::Mutex::new(vec![0.9, 0.1]),
+        }),
+    );
+
+    finish_folder(
+        pipeline::develop::FinishRequest {
+            catalog: &cat,
+            cfg: &cfg,
+            defect_cfg: &DefectConfig::default(),
+            hub: &hub,
+            cache_dir: cache.path(),
+            out_dir: out.path(),
+            regenerate: false,
+        },
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
+    let jpeg = std::path::PathBuf::from(path.unwrap());
+    let decoded = image::open(&jpeg).unwrap().to_rgb8();
+    let brightest = decoded.pixels().flat_map(|p| p.0).max().unwrap();
+    assert!(
+        brightest > 2,
+        "the guard should have rejected the black LUT, but the JPEG is black"
+    );
+
+    let audit = look_audit(&cat, id);
+    assert!(!audit.applied, "look_applied must be false when rejected");
+    assert_eq!(audit.iqa_before, Some(0.9));
+    assert_eq!(audit.iqa_after, Some(0.1));
+    assert!(
+        audit.model.is_some(),
+        "the attempt must still be recorded, or the identity flips between runs"
+    );
 }

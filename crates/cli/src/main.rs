@@ -448,12 +448,21 @@ fn cmd_finish(
 
     println!("Developing keepers → {} …", out_dir.display());
 
+    // The look and its IQA guard need models. A hub that loads nothing is not
+    // an error: `finish` then produces baseline JPEGs, which is the documented
+    // behaviour when the look model is absent.
+    let hub = ModelHub::from_config(&cfg.models).map_err(|e| anyhow::anyhow!("models: {}", e))?;
+
     let report = pipeline::finish_folder(
-        &lib.catalog,
-        &cfg.develop,
-        &cfg.defect,
-        &out_dir,
-        regenerate,
+        pipeline::develop::FinishRequest {
+            catalog: &lib.catalog,
+            cfg: &cfg.develop,
+            defect_cfg: &cfg.defect,
+            hub: &hub,
+            cache_dir: lib.cache.root(),
+            out_dir: &out_dir,
+            regenerate,
+        },
         &CliProgress,
     )?;
 

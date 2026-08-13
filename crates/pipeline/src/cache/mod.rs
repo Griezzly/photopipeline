@@ -10,6 +10,12 @@ impl Cache {
         Ok(Self { root })
     }
 
+    /// The cache root. `finish` writes content-addressed `.cube` LUTs under
+    /// `luts/` here, alongside the preview and thumbnail trees.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// Absolute path where the WebP preview for `hash` is stored.
     pub fn path(&self, hash: u128) -> PathBuf {
         let hex = format!("{:032x}", hash);
