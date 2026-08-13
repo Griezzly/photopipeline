@@ -5111,9 +5111,12 @@ git commit -m "docs: close out the automatic develop spec"
 
 Named here so they are not mistaken for gaps:
 
-- **A Develop screen in `serve`.** `finish_folder` already reports through
-  `ProgressSink`, so the remaining work is a `POST /api/finish` +
-  `/api/finish/status` pair and a nav-rail screen reusing the analyze checklist.
+- ~~**A Develop screen in `serve`.**~~ **Shipped 2026-08-13.** It was the wiring
+  job this predicted, plus two things it did not: `ProgressSink` needed a
+  `step()` channel (see spec A2) and the screen needed a
+  `GET /api/finish/estimate` preflight so a missing renderer is refused rather
+  than started. KI-7 was fixed first, as its own commit — a screen built on the
+  old two-stage reporting would have looked hung for an hour.
 - **Crop, rotation, straightening, and local adjustments.** Spec §12.
 - **Learning the user's own look** from paired RAW/export files. Spec §12 and A7 —
   blocked on having such a corpus, not on the technique.

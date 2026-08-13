@@ -100,7 +100,7 @@ rewrites.
 | Crop / rotation / local edits | **Out of scope for v1.** |
 | darktable backend | **Rejected.** XMP history params are encoded blobs; not authorable. |
 | vkdt backend | Deferred, not rejected. No Windows support — see §9. |
-| Interface (v1) | **CLI only** — `photopipe finish`. No HTTP endpoint, no nav-rail screen. A Develop screen is a later spec. |
+| Interface (v1) | **CLI only** — `photopipe finish`. No HTTP endpoint, no nav-rail screen. A Develop screen is a later spec. **Shipped 2026-08-13** — see A2. |
 | Relation to `export-keepers` | **Independent.** Two commands, two trees, no ordering dependency. |
 
 ## 3. Why RawTherapee, and why not the alternatives
@@ -373,6 +373,17 @@ terminal sink. When a Develop screen is specified later, it passes the server's
 existing job sink to a `POST /api/finish` + `/api/finish/status` pair and the
 frontend reuses the analyze checklist component unchanged. This costs nothing now
 and prevents the UI iteration from being a rewrite.
+
+**Shipped 2026-08-13**, and the bet mostly paid: the endpoints, the job slot and
+the checklist markup were all reused as predicted. One correction to the sketch
+above. `stage()` alone could not carry a develop run's progress — it resets the
+per-phase counter by contract, so a stage transition per photo would wipe the
+run's own "N of M photos" four times per photo. The run is therefore *one*
+counted phase (`developing`), with a new defaulted `ProgressSink::step(step,
+item)` carrying the per-photo detail and the filename beside it. The screen also
+needed a preflight the sketch did not anticipate — `GET /api/finish/estimate`,
+so a missing `rawtherapee-cli` is refused as the setup problem it is rather than
+surfacing as a job that dies three seconds in.
 
 **Idempotency.** A file is skipped when an `edits` row matches on
 `(content_hash, recipe_hash, decider_version, renderer, look_model,

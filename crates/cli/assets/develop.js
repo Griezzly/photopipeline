@@ -329,18 +329,21 @@ function poll() {
       stopPolling();
       const sum = s.summary;
       if (sum) {
+        // The output path is deliberately not in the body: it is an absolute
+        // path, it is already on the card behind this toast, and a long
+        // unbroken one overflows the toast rather than wrapping.
         window.pp.toast(isPartial(sum)
           ? {
               kind: 'warn',
               title: `${sum.rendered.toLocaleString()} developed, ${sum.errored.toLocaleString()} skipped`,
-              body: `JPEGs are in ${sum.out_dir}.`,
+              body: 'The finished JPEGs are in the folder shown on the screen behind this.',
             }
           : {
               kind: 'success',
               title: sum.rendered
                 ? `${sum.rendered.toLocaleString()} photo${sum.rendered === 1 ? '' : 's'} developed`
                 : 'Everything was already up to date',
-              body: `JPEGs are in ${sum.out_dir}.`,
+              body: 'The finished JPEGs are in the folder shown on the screen behind this.',
             });
       }
       return;

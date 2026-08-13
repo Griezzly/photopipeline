@@ -462,10 +462,15 @@ pub struct FinishEstimate {
 /// Where `finish` would write for the active library, resolved exactly as
 /// `cmd_finish` does. There is no `--out` equivalent in the UI by design.
 fn resolve_finish_out_dir(state: &AppState, lib: &ActiveLibrary) -> PathBuf {
-    expand_tilde(&pipeline::substitute_library(
+    let out = expand_tilde(&pipeline::substitute_library(
         &state.cfg.develop.finished_dir,
         &lib.folder,
-    ))
+    ));
+    // A library opened by a relative path yields a relative output path, which
+    // means nothing to someone reading it in a browser — the server's working
+    // directory is not something the screen can show. Absolute, not
+    // canonicalised: the directory need not exist yet.
+    std::path::absolute(&out).unwrap_or(out)
 }
 
 pub async fn get_finish_estimate(
