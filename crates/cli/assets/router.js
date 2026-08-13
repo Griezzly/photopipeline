@@ -119,8 +119,8 @@ function entryState(path, ppDepth) {
 /** Browsers rate-limit history writes — Safari throws SecurityError past
  *  roughly 100 pushState calls per 30 seconds, and a held key can reach that.
  *  Losing the navigation entirely is worse than losing the history entry, so
- *  degrade to rewriting the current entry, and if even that is refused, still
- *  let the route apply against a URL that is momentarily stale. */
+ *  degrade to rewriting the current entry — the cost is a missing history
+ *  entry; Back will skip the frame that was never recorded. */
 function writeEntry(push, path, st) {
   try {
     if (push) history.pushState(st, '', `#${path}`);
@@ -129,7 +129,13 @@ function writeEntry(push, path, st) {
   } catch (e) {
     if (!push) return;
   }
-  try { history.replaceState(st, '', `#${path}`); } catch (e) { /* refused too */ }
+  // The push was refused, so no entry was added — rewrite the current one
+  // instead. It must NOT inherit the push's ppDepth: that would inflate
+  // depth() by one per refusal, and exitOverlay's jump (ppBase - depth())
+  // would then overshoot the run's base, potentially right out of the app.
+  try {
+    history.replaceState({ ...st, ppDepth: depth() }, '', `#${path}`);
+  } catch (e) { /* refused too — apply() below still renders the route */ }
 }
 
 export function go(path, payload) {
@@ -329,7 +335,7 @@ export function startRouter() {
   // still unknown — and throw away the overlay run this entry belongs to.
   // Only stamp an entry that has none, which is the cold deep-link case.
   if (!history.state || history.state.ppDepth == null) {
-    history.replaceState({ ppDepth: 0 }, '', `#${path}`);
+    writeEntry(false, path, { ppDepth: 0 });
   }
   apply(path, null);
 }
