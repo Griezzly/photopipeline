@@ -15,8 +15,7 @@ Phase 1). Everything the review-UI redesign left behind was fixed on
 From Phase 1 of automatic RAW development (`feat/auto-develop`). All were
 reproduced, none is a regression of existing behaviour, and each was left because
 it sits outside that phase's scope. KI-11 and KI-12 were found later, during the
-CHECKPOINT review on 2026-08-13; KI-13 during the Develop-screen work the same
-day.
+CHECKPOINT review on 2026-08-13.
 
 ### Affects photos, not just internals
 
@@ -63,16 +62,6 @@ RawTherapee; `look.enable = true` silently does nothing, because the look is
 Phase 2. One validation line rejecting an unknown renderer, plus a `debug!` noting
 the look is unimplemented, removes the trap.
 
-**KI-13 — the gated end-to-end finish test leaks one render scratch directory.**
-`end_to_end_finish_is_idempotent` fails its final assertion with one
-`.tmpXXXX` left inside the redirected `TMPDIR` after its three runs. Reproduced
-at `3f0bb85`, before the Develop-screen work, so it is not a regression of it —
-and it is the only assertion in that test that fails, so the render, the
-idempotency and the non-destruction guarantees all still hold. Every `TempDir`
-in `finish_one` is dropped on both the success and the `?` paths, so the leak is
-most likely inside `Pp3Renderer::render` or a child process outliving it; closing
-it needs that traced rather than guessed at.
-
 **KI-8 — unchecked indexing in the CFA path, and a panic escapes failure
 isolation.** `measure.rs`'s 2×2 CFA cell walk indexes `data[(y + dy) * w + (x +
 dx)]` with no bounds guard, while both sibling paths check `row_end > data.len()`
@@ -98,6 +87,41 @@ it and holding the lock. Integration tests live in a separate crate, so
 ---
 
 ## Fixed on 2026-08-13 (third pass)
+
+**KI-13 — nothing was leaking. The test was measuring its own scratch
+directory.** `end_to_end_finish_is_idempotent` failed its final assertion with
+one empty `.tmpXXXXXX` inside the redirected `TMPDIR`, which read as a render
+scratch directory `finish_folder` had failed to clean up. It was not one.
+
+`test_cache()` is a `OnceLock<TempDir>` shared by every test in the file,
+initialised **lazily** and — being `&'static` — deliberately never removed. This
+test's first call to it sits inside the `FinishRequest` literal for its first
+run, which is *after* it redirects `TMPDIR` to observe its own cleanup. So the
+shared cache was created inside the observed root and counted as a leftover.
+
+The signature is worth remembering, because it is the opposite of the usual one:
+the test **passed** as part of `cargo test --all` and **failed** when run alone.
+Running the whole file, some earlier test always initialised the `OnceLock`
+first, outside the redirect. A filtered run had nobody to do that. A test that
+only fails in isolation is as much a defect as one that only fails in company —
+and the ordinary reading, "it passes in CI, so it's a flake in my shell", points
+exactly the wrong way.
+
+Fixed by giving the test its own cache directory, created before the redirect,
+rather than by ordering it after a warm-up: the dependency disappears instead of
+being satisfied by luck. `test_cache()` now documents the trap for the next
+test that wants to redirect `TMPDIR`.
+
+Verified in both directions. The test now passes alone and in the full file, and
+the assertion is not vacuous: a deliberate `std::mem::forget(TempDir::new())`
+inside `finish_folder` still fails it, with one leftover per run.
+
+Three prior investigation notes were wrong and are recorded so the trail is
+honest: the leftover was assumed to be a *render* scratch directory (it was not
+— those live inside the run directory, never beside it), then the run-level
+directory itself (instrumentation showed all three created and removed), then
+`rawtherapee-cli` inheriting `TMPDIR` (the `.tmpXXXXXX` name is `tempfile`'s,
+not glib's). Only snapshotting the directory at each step found it.
 
 **KI-7 — a long `finish` run is no longer silent, and the failure hint is
 fixed.** Closed as a dependency of the Develop screen: a screen built on the old

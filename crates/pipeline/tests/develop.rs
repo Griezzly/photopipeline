@@ -13,6 +13,12 @@ use pipeline::ProgressSink;
 /// Only the look stage writes here, and every test below runs with an empty
 /// `ModelHub`, so nothing is actually written — but `finish_folder` still needs
 /// a real path. Held in a `OnceLock` so the directory outlives every test.
+///
+/// **Initialised lazily, and deliberately never removed.** Any test that
+/// redirects `TMPDIR` to observe what was cleaned up must therefore not be the
+/// first caller, or this directory is created inside the redirected root and
+/// reads as a leftover. `end_to_end_finish_is_idempotent` avoids the trap by
+/// owning its cache directory outright rather than by ordering — see there.
 fn test_cache() -> &'static std::path::Path {
     static TEST_CACHE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     TEST_CACHE
@@ -1094,6 +1100,15 @@ fn end_to_end_finish_is_idempotent() {
         id
     };
     let out = tempfile::TempDir::new().unwrap();
+    // This test owns its cache root rather than sharing `test_cache()`. That
+    // one is a lazily-initialised `OnceLock` that is never removed, so if this
+    // test were its first caller it would be created *inside* the redirected
+    // root below and the final assertion would read it as a leftover — which is
+    // exactly what happened (KI-13). Running the whole file hid it, because
+    // some earlier test always initialised the OnceLock first; running this
+    // test alone failed every time. Owning the directory fixes it by
+    // construction instead of by test ordering.
+    let cache = tempfile::TempDir::new().unwrap();
     let cfg = DevelopConfig {
         rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
@@ -1118,7 +1133,7 @@ fn end_to_end_finish_is_idempotent() {
             cfg: &cfg,
             defect_cfg: &DefectConfig::default(),
             hub: &ModelHub::empty(),
-            cache_dir: test_cache(),
+            cache_dir: cache.path(),
             out_dir: out.path(),
             regenerate: false,
         },
@@ -1215,7 +1230,7 @@ fn end_to_end_finish_is_idempotent() {
             cfg: &cfg,
             defect_cfg: &DefectConfig::default(),
             hub: &ModelHub::empty(),
-            cache_dir: test_cache(),
+            cache_dir: cache.path(),
             out_dir: out.path(),
             regenerate: false,
         },
@@ -1244,7 +1259,7 @@ fn end_to_end_finish_is_idempotent() {
             cfg: &cfg,
             defect_cfg: &DefectConfig::default(),
             hub: &ModelHub::empty(),
-            cache_dir: test_cache(),
+            cache_dir: cache.path(),
             out_dir: out.path(),
             regenerate: false,
         },
