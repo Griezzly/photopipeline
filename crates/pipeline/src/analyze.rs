@@ -26,6 +26,18 @@ pub trait ProgressSink: Send + Sync {
     fn set_total(&self, total: u64);
     /// One item processed in the current phase.
     fn inc(&self);
+    /// Where the current *item* has got to, within one counted phase.
+    ///
+    /// `stage()` cannot express this: it resets the counter, so a phase that
+    /// announced a sub-phase per item would wipe its own "N of M" every time.
+    /// A phase like `finish`'s — one photo taking minutes, four internal steps
+    /// each worth showing — needs a channel that does not disturb the count.
+    /// `item` is a display label for what is being worked on (a filename), not
+    /// an identifier.
+    ///
+    /// Defaulted to a no-op: phases that finish an item in milliseconds have
+    /// nothing useful to report here, and neither do sinks that only draw a bar.
+    fn step(&self, _step: &str, _item: &str) {}
 }
 
 /// Summary of a full analyze run.

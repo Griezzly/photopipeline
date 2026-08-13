@@ -487,13 +487,17 @@ fn cmd_finish(
         );
     }
     if report.errored > 0 {
-        println!("Re-run with --log-level debug to see why individual files failed.");
+        println!("The reason each one failed is in the warnings above.");
     }
     Ok(())
 }
 
-/// Terminal progress sink. A future Develop screen in `serve` passes the
-/// server's job sink to the same `finish_folder` signature instead.
+/// Terminal progress sink. The Develop screen in `serve` passes the server's
+/// job sink to the same `finish_folder` signature instead.
+///
+/// `step` is what makes a long `finish` audible: a serial run is minutes per
+/// photo, and without a line per phase the terminal sat silent between the
+/// opening "measuring" and the closing summary (KI-7).
 struct CliProgress;
 
 impl pipeline::ProgressSink for CliProgress {
@@ -502,6 +506,9 @@ impl pipeline::ProgressSink for CliProgress {
     }
     fn set_total(&self, _total: u64) {}
     fn inc(&self) {}
+    fn step(&self, step: &str, item: &str) {
+        tracing::info!(step, item, "finish");
+    }
 }
 
 fn cmd_info(file: PathBuf, cfg: &config::Config, roots: &LibraryRoots) -> Result<()> {

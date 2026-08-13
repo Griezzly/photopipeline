@@ -729,14 +729,34 @@ fn missing_or_resized_output_forces_a_rerender() {
 #[derive(Default)]
 struct RecordingSink {
     stages: std::sync::Mutex<Vec<String>>,
+    /// `(step, item)` pairs, in the order `finish_folder` emitted them.
+    steps: std::sync::Mutex<Vec<(String, String)>>,
+    /// Every `(files_done, files_total)` a UI would have been able to draw at a
+    /// step boundary. `set_total` must survive the per-photo steps, or the
+    /// screen loses its "N of M" — the reason `step` exists at all.
+    counts: std::sync::Mutex<Vec<(u64, u64)>>,
+    total: std::sync::Mutex<u64>,
+    done: std::sync::Mutex<u64>,
 }
 
 impl ProgressSink for RecordingSink {
     fn stage(&self, stage: &str) {
         self.stages.lock().unwrap().push(stage.to_string());
     }
-    fn set_total(&self, _total: u64) {}
-    fn inc(&self) {}
+    fn set_total(&self, total: u64) {
+        *self.total.lock().unwrap() = total;
+    }
+    fn inc(&self) {
+        *self.done.lock().unwrap() += 1;
+    }
+    fn step(&self, step: &str, item: &str) {
+        self.steps
+            .lock()
+            .unwrap()
+            .push((step.to_string(), item.to_string()));
+        let counts = (*self.done.lock().unwrap(), *self.total.lock().unwrap());
+        self.counts.lock().unwrap().push(counts);
+    }
 }
 
 #[test]
@@ -1091,6 +1111,7 @@ fn end_to_end_finish_is_idempotent() {
     let _temp_guard = EnvGuard::set("TEMP", tmp_root.path());
 
     // ── first run: a real render ──
+    let sink = RecordingSink::default();
     let first = finish_folder(
         pipeline::develop::FinishRequest {
             catalog: &cat,
@@ -1101,12 +1122,46 @@ fn end_to_end_finish_is_idempotent() {
             out_dir: out.path(),
             regenerate: false,
         },
-        &RecordingSink::default(),
+        &sink,
     )
     .unwrap();
     assert_eq!(first.rendered, 1, "first run should render");
     assert_eq!(first.skipped, 0);
     assert_eq!(first.errored, 0, "first run should not error");
+
+    // KI-7: the run must be audible. These assertions are here, in the only
+    // test that performs a real render, rather than against the stub — the
+    // point is that a real photo walks the whole sequence, and a stub render
+    // never reaches the look or the encoder.
+    //
+    // This sequence is the contract crates/cli/assets/develop.js draws.
+    let file_name = raw.file_name().unwrap().to_str().unwrap().to_string();
+    assert_eq!(
+        sink.steps.lock().unwrap().clone(),
+        vec![
+            ("measuring".to_string(), file_name.clone()),
+            ("rendering".to_string(), file_name.clone()),
+            ("applying look".to_string(), file_name.clone()),
+            ("encoding".to_string(), file_name.clone()),
+        ],
+        "every phase of a real render must be reported, naming the photo"
+    );
+    assert_eq!(
+        sink.stages.lock().unwrap().clone(),
+        vec![
+            "developing".to_string(),
+            "pruning".to_string(),
+            "done".to_string()
+        ]
+    );
+    // One counted phase across the whole run: `step` must not reset what
+    // `set_total` established, or the screen loses its "N of M photos".
+    assert_eq!(
+        sink.counts.lock().unwrap().clone(),
+        vec![(0, 1), (0, 1), (0, 1), (0, 1)],
+        "the run-level total must survive every per-photo step"
+    );
+    assert_eq!(*sink.done.lock().unwrap(), 1, "one inc() per photo");
 
     let (_, path, _) = cat.edit_identity(id).unwrap().unwrap();
     let jpeg = std::path::PathBuf::from(path.unwrap());
@@ -1153,6 +1208,7 @@ fn end_to_end_finish_is_idempotent() {
     );
 
     // ── second run: idempotency is a correctness requirement, not a perf goal ──
+    let second_sink = RecordingSink::default();
     let second = finish_folder(
         pipeline::develop::FinishRequest {
             catalog: &cat,
@@ -1163,12 +1219,19 @@ fn end_to_end_finish_is_idempotent() {
             out_dir: out.path(),
             regenerate: false,
         },
-        &RecordingSink::default(),
+        &second_sink,
     )
     .unwrap();
     assert_eq!(second.rendered, 0, "second run must render nothing");
     assert_eq!(second.skipped, 1);
     assert_eq!(second.errored, 0);
+    // A photo found to be already current stops at `measuring` — the screen
+    // must not claim a render that never happened.
+    assert_eq!(
+        second_sink.steps.lock().unwrap().clone(),
+        vec![("measuring".to_string(), file_name.clone())],
+        "an up-to-date photo must not report rendering, look or encoding"
+    );
 
     // ── third run: corrupt the recorded state the way a real change would,
     // and confirm the idempotency check actually notices. Without this, the

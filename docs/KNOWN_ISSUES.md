@@ -15,7 +15,8 @@ Phase 1). Everything the review-UI redesign left behind was fixed on
 From Phase 1 of automatic RAW development (`feat/auto-develop`). All were
 reproduced, none is a regression of existing behaviour, and each was left because
 it sits outside that phase's scope. KI-11 and KI-12 were found later, during the
-CHECKPOINT review on 2026-08-13.
+CHECKPOINT review on 2026-08-13; KI-13 during the Develop-screen work the same
+day.
 
 ### Affects photos, not just internals
 
@@ -62,14 +63,15 @@ RawTherapee; `look.enable = true` silently does nothing, because the look is
 Phase 2. One validation line rejecting an unknown renderer, plus a `debug!` noting
 the look is unimplemented, removes the trap.
 
-**KI-7 — a long run is nearly silent, and the failure hint is wrong.**
-`CliProgress` makes `set_total` and `inc` no-ops and nothing logs per rendered
-photo, so a multi-hour serial run prints two lines. (`cmd_scan` passes `None`, so
-this is convention rather than regression.) Separately, per-file failures are
-logged at `warn!` while the default log level is `info`, so the summary's "re-run
-with --log-level debug to see why individual files failed" is misleading — the
-reasons already printed. `stage("rendering")` is also never emitted, so a future
-UI wired to `ProgressSink` would show "measuring" for the whole render.
+**KI-13 — the gated end-to-end finish test leaks one render scratch directory.**
+`end_to_end_finish_is_idempotent` fails its final assertion with one
+`.tmpXXXX` left inside the redirected `TMPDIR` after its three runs. Reproduced
+at `3f0bb85`, before the Develop-screen work, so it is not a regression of it —
+and it is the only assertion in that test that fails, so the render, the
+idempotency and the non-destruction guarantees all still hold. Every `TempDir`
+in `finish_one` is dropped on both the success and the `?` paths, so the leak is
+most likely inside `Pp3Renderer::render` or a child process outliving it; closing
+it needs that traced rather than guessed at.
 
 **KI-8 — unchecked indexing in the CFA path, and a panic escapes failure
 isolation.** `measure.rs`'s 2×2 CFA cell walk indexes `data[(y + dy) * w + (x +
@@ -94,6 +96,37 @@ it and holding the lock. Integration tests live in a separate crate, so
 `#[cfg(test)]` cannot work; a `test-support` cargo feature would.
 
 ---
+
+## Fixed on 2026-08-13 (third pass)
+
+**KI-7 — a long `finish` run is no longer silent, and the failure hint is
+fixed.** Closed as a dependency of the Develop screen: a screen built on the old
+reporting would have shown one stage for an hour and looked hung.
+
+The interesting part was that `stage()` could not carry it. `stage()` resets the
+per-phase counter by contract — `calibrating` and `grouping duplicates` rely on
+that, since neither calls `set_total` — so a stage transition per photo would
+have wiped the run's own "N of M photos" four times per photo. The counter and
+the per-photo detail are two different things travelling at two different rates.
+
+So `ProgressSink` gained `step(&self, step: &str, item: &str)`, defaulted to a
+no-op, and `finish_folder` now runs as *one* counted phase: `stage("developing")`
+and `set_total(n)` once, `inc()` once per photo, and a `step` per phase of each
+photo — `measuring` → `rendering` → `applying look` → `encoding` — naming the
+file being worked on. `pruning` and `done` follow as phases once the loop ends.
+`applying look` is emitted even with no predictor loaded: the phase exists either
+way, and a step list whose shape depends on which models are installed is a
+much worse contract for the UI than one that is fixed.
+
+The sequence is asserted in `end_to_end_finish_is_idempotent` rather than against
+the stub renderer, because the stub never reaches the look or the encoder. The
+same test pins that `step` does not disturb `set_total`, which is the whole
+reason it exists, and that an already-current photo stops at `measuring` — the
+screen must not claim a render that did not happen.
+
+Separately, the summary's "re-run with `--log-level debug` to see why individual
+files failed" was wrong: per-file failures log at `warn!`, which the default
+`info` level already shows. It now says the reasons are in the warnings above.
 
 ## Fixed on 2026-08-13 (second pass)
 

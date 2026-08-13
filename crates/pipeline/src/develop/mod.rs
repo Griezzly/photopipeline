@@ -164,7 +164,21 @@ pub fn finish_folder(
 
     let mut report = FinishReport::default();
 
-    progress.stage("measuring");
+    // Progress contract with the Develop screen (crates/cli/assets/develop.js).
+    //
+    // One counted phase for the whole run — `developing`, `set_total(n)`, one
+    // `inc()` per photo — with the per-photo detail carried by `step()`, which
+    // deliberately does not disturb that count. The steps are, in order:
+    //
+    //   measuring · rendering · applying look · encoding
+    //
+    // then `pruning` and `done` as phases once the loop is over. `applying look`
+    // is emitted even when no predictor is loaded: the phase exists either way,
+    // it simply completes instantly, and a fixed step list is a far easier
+    // contract for the UI than one whose shape depends on which models happen to
+    // be installed. A photo that is already current, or is not a RAW, never gets
+    // past `measuring` — both are fast, so neither leaves the screen looking hung.
+    progress.stage("developing");
     progress.set_total(work.len() as u64);
 
     // One temp dir for the whole run; each intermediate is deleted as soon as
@@ -188,6 +202,7 @@ pub fn finish_folder(
         cache_dir,
         out_dir,
         tmp_dir: tmp.path(),
+        progress,
     };
 
     // Every path this run vouches for. Anything else under a managed tree is an
@@ -195,6 +210,13 @@ pub fn finish_folder(
     let mut expected: HashSet<std::path::PathBuf> = HashSet::new();
 
     for item in &work {
+        let label = item
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("photo")
+            .to_string();
+        progress.step("measuring", &label);
         if !is_raw_format(&item.file_format) {
             tracing::info!(
                 path = %item.path.display(),
@@ -205,7 +227,7 @@ pub fn finish_folder(
             progress.inc();
             continue;
         }
-        match finish_one(&ctx, item, &mut taken_by_dir) {
+        match finish_one(&ctx, item, &label, &mut taken_by_dir) {
             Ok(Outcome::Rendered(dest)) => {
                 report.rendered += 1;
                 expected.insert(dest.with_extension("pp3"));
@@ -225,6 +247,7 @@ pub fn finish_folder(
         progress.inc();
     }
 
+    progress.stage("pruning");
     report.pruned = prune_finished_tree(catalog, out_dir, &expected)?;
 
     progress.stage("done");
@@ -448,11 +471,17 @@ struct FinishCtx<'a> {
     cache_dir: &'a Path,
     out_dir: &'a Path,
     tmp_dir: &'a Path,
+    /// Where the per-photo `step()` transitions go. A photo takes minutes, so
+    /// the screen needs to hear from inside this function, not only between
+    /// calls to it.
+    progress: &'a dyn ProgressSink,
 }
 
 fn finish_one(
     ctx: &FinishCtx<'_>,
     item: &crate::catalog::KeeperToDevelop,
+    // Display label for `step()` — the photo's filename.
+    label: &str,
     taken_by_dir: &mut HashMap<std::path::PathBuf, HashSet<String>>,
 ) -> anyhow::Result<Outcome> {
     // `cache_dir` is read through `ctx` by the look stage rather than unpacked
@@ -542,16 +571,19 @@ fn finish_one(
     }
 
     // ③ baseline render
+    ctx.progress.step("rendering", label);
     let rendered = renderer.render(&item.path, &recipe, tmp_dir)?;
 
     // ④ look
     let baseline = image::open(&rendered.tiff)
         .with_context(|| format!("cannot read rendered TIFF {}", rendered.tiff.display()))?;
 
+    ctx.progress.step("applying look", label);
     let mut look = LookOutcome::default();
     let final_image = apply_look(ctx, item, &baseline, &mut look);
 
     // ⑥ encode
+    ctx.progress.step("encoding", label);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
