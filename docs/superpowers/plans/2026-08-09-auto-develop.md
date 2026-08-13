@@ -3804,7 +3804,7 @@ predictor CNN is exported; the basis LUTs come out as plain tensors.
   - `models/lut3d_basis.npy` — float32 `[N,3,33,33,33]`, the basis LUTs
   - Both gitignored, following the existing `models/*.onnx` rule.
 
-- [ ] **Step 1: Write the exporter**
+- [x] **Step 1: Write the exporter**
 
 Create `tools/export_lut3d.py`, following the structure of the three existing
 exporters:
@@ -3947,7 +3947,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run it and verify the outputs**
+- [x] **Step 2: Run it and verify the outputs**
 
 ```bash
 cd tools
@@ -3962,7 +3962,7 @@ custom operator, and the basis shape prints as `(3, 3, 33, 33, 33)`.
 If the checkpoint key names do not match any of the three patterns tried, the
 error prints the keys that *are* present — add the right pattern to the loop.
 
-- [ ] **Step 3: Confirm the weights are gitignored**
+- [x] **Step 3: Confirm the weights are gitignored**
 
 ```bash
 git status --short models/
@@ -3975,7 +3975,7 @@ Expected: `lut3d_predictor.onnx` does not appear (covered by `models/*.onnx`).
 models/*.npy
 ```
 
-- [ ] **Step 4: Document the model**
+- [x] **Step 4: Document the model**
 
 Add a section to `models/README.md` matching the existing entries: what the file
 is, which script produces it, and the FiveK licence constraint — that photopipe
@@ -3985,12 +3985,30 @@ this would need revisiting before any commercial distribution.
 Add the corresponding lines to `models/download.sh` following its existing
 pattern, and `onnx` to `tools/requirements.txt` if it is not already listed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/export_lut3d.py tools/requirements.txt models/README.md models/download.sh .gitignore
 git commit -m "feat(tools): export the Image-Adaptive-3DLUT predictor and basis LUTs"
 ```
+
+---
+
+> **As built (2026-08-13).** The script above assumed one combined checkpoint;
+> upstream ships two (`LUTs.pth` and `classifier.pth`), so the exporter takes
+> `--luts` and `--classifier` and fetches both when omitted, matching how the
+> other exporters self-serve from HuggingFace. Two details of the architecture
+> came from the checkpoint rather than the sketch: the head is a
+> `Conv2d(128, 3, 8)` over the final 8x8 feature map, not global-pool +
+> `Linear`, and index 0 is an `Upsample` — so the `nn.Sequential` indices are
+> reproduced exactly and `load_state_dict` runs with `strict=True`, because
+> silently loading nothing would have exported random weights. The basis tensors
+> live at `state[str(i)]["LUT"]`, not any of the three key patterns tried.
+>
+> Added beyond the plan: a parity check against PyTorch on a random input, since
+> the op-name assertion cannot catch weights that failed to load. Result:
+> basis `(3, 3, 33, 33, 33)`, no custom ops, max |Δ| 1.85e-06, and the graph
+> loads under the pinned `ort` 2.0.0-rc.12 returning `weights` `[1, 3]`.
 
 ---
 
