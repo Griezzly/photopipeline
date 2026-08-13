@@ -115,7 +115,7 @@ function render(folder, s) {
       </div>
     </div>`;
 
-  el.querySelector('#an-back').onclick = () => { stopPolling(); window.pp.back('/libraries'); };
+  el.querySelector('#an-back').onclick = () => { stopPolling(); window.pp.replace('/libraries'); };
   const rv = el.querySelector('#an-review');
   if (rv) rv.onclick = () => { stopPolling(); window.pp.replace('/review'); };
 }
