@@ -185,6 +185,9 @@ enum Command {
         /// Destination directory. Overrides `[develop] finished_dir`.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Delete the finished tree and rebuild it from scratch.
+        #[arg(long)]
+        regenerate: bool,
     },
 }
 
@@ -226,7 +229,11 @@ fn main() -> Result<()> {
             output,
             regenerate,
         } => cmd_export_keepers(&folder, output, regenerate, &cfg, &roots),
-        Command::Finish { folder, out } => cmd_finish(&folder, out, &cfg, &roots),
+        Command::Finish {
+            folder,
+            out,
+            regenerate,
+        } => cmd_finish(&folder, out, regenerate, &cfg, &roots),
     }
 }
 
@@ -424,6 +431,7 @@ fn cmd_export_keepers(
 fn cmd_finish(
     folder: &std::path::Path,
     out: Option<PathBuf>,
+    regenerate: bool,
     cfg: &config::Config,
     roots: &LibraryRoots,
 ) -> Result<()> {
@@ -445,6 +453,7 @@ fn cmd_finish(
         &cfg.develop,
         &cfg.defect,
         &out_dir,
+        regenerate,
         &CliProgress,
     )?;
 
@@ -456,6 +465,12 @@ fn cmd_finish(
         report.errored,
         out_dir.display()
     );
+    if report.pruned > 0 {
+        println!(
+            "  Pruned {} stale file(s) whose photos are no longer keepers",
+            report.pruned
+        );
+    }
     if report.skipped_unsupported > 0 {
         println!(
             "{} keeper(s) are not RAW files; `finish` only develops RAWs.",

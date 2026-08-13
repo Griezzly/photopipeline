@@ -736,6 +736,7 @@ fn empty_work_list_renders_nothing_and_still_reports_done() {
         &DevelopConfig::default(),
         &DefectConfig::default(),
         out.path(),
+        false,
         &sink,
     )
     .unwrap();
@@ -761,6 +762,7 @@ fn missing_renderer_fails_before_any_work() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .expect_err("a missing renderer should abort the run");
@@ -852,6 +854,7 @@ fn unreadable_raw_is_skipped_without_an_edits_row() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .unwrap();
@@ -883,6 +886,7 @@ fn jpg_keeper_is_counted_as_skipped_unsupported_not_errored() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .unwrap();
@@ -933,6 +937,7 @@ fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1058,6 +1063,7 @@ fn end_to_end_finish_is_idempotent() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1115,6 +1121,7 @@ fn end_to_end_finish_is_idempotent() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1132,6 +1139,7 @@ fn end_to_end_finish_is_idempotent() {
         &cfg,
         &DefectConfig::default(),
         out.path(),
+        false,
         &RecordingSink::default(),
     )
     .unwrap();
@@ -1168,4 +1176,323 @@ fn end_to_end_finish_is_idempotent() {
         leftovers.is_empty(),
         "temp scratch directories were left behind: {leftovers:?}"
     );
+}
+
+// ── KI-2: the finished tree is pruned ─────────────────────────────────────────
+
+/// Write an `edits` row that claims `dest`, plus the JPEG and `.pp3` on disk,
+/// as an earlier successful run would have left them.
+fn seed_rendered_output(cat: &Catalog, file_id: i64, dest: &std::path::Path) {
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(dest, b"pretend jpeg").unwrap();
+    std::fs::write(dest.with_extension("pp3"), b"pretend pp3").unwrap();
+    let size = std::fs::metadata(dest).unwrap().len() as i64;
+    cat.upsert_edit(&EditRow {
+        file_id,
+        content_hash: "hash-a".into(),
+        recipe: EditRecipe {
+            exposure_ev: 0.0,
+            highlight_recovery: 0.0,
+            shadow_lift: 0.0,
+            denoise_luma: 0.0,
+            denoise_chroma: 0.0,
+            sharpen_amount: 0.4,
+            lens_correct: false,
+        },
+        recipe_hash: "recipe-1".into(),
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+        lut_hash: None,
+        look_applied: false,
+        iqa_before: None,
+        iqa_after: None,
+        output_path: Some(dest.display().to_string()),
+        output_size_bytes: Some(size),
+        rendered_at: 0,
+    })
+    .unwrap();
+}
+
+/// KI-2: flipping a verdict from keep to reject used to leave the JPEG, the
+/// `.pp3` and the `edits` row in place forever, so `_finished/` only grew.
+///
+/// The renderer is never reached — with no keepers left there is nothing to
+/// render — so this needs no RawTherapee.
+#[cfg(unix)]
+#[test]
+fn rejecting_a_keeper_prunes_its_output_and_its_edits_row() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/rejected.arw", "reject");
+    let out = tempfile::TempDir::new().unwrap();
+    let dest = out.path().join("2024-05/DSC1.jpg");
+    seed_rendered_output(&cat, id, &dest);
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        false,
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.rendered, 0, "nothing to render");
+    assert_eq!(report.pruned, 2, "the JPEG and its .pp3 should both go");
+    assert!(!dest.exists(), "stale JPEG survived the prune");
+    assert!(!dest.with_extension("pp3").exists(), "stale .pp3 survived");
+    assert!(
+        cat.edit_identity(id).unwrap().is_none(),
+        "the edits row must not outlive the file it names"
+    );
+    // The now-empty capture-month directory goes too.
+    assert!(
+        !out.path().join("2024-05").exists(),
+        "empty dir left behind"
+    );
+}
+
+/// A keeper's output must survive the prune pass — the obvious way to get the
+/// test above passing is to delete everything, and this is what stops that.
+#[cfg(unix)]
+#[test]
+fn a_still_kept_photos_output_is_not_pruned() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let keep_id = seed_file(&cat, "/tmp/kept.arw", "keep");
+    let reject_id = seed_file(&cat, "/tmp/gone.arw", "reject");
+    let out = tempfile::TempDir::new().unwrap();
+
+    // The kept photo's recorded output must match where `finish` would put it,
+    // or it is pruned as unexpected and re-rendered instead.
+    let kept_dest = out.path().join("unknown-date/kept.jpg");
+    seed_rendered_output(&cat, keep_id, &kept_dest);
+    let gone_dest = out.path().join("2024-05/gone.jpg");
+    seed_rendered_output(&cat, reject_id, &gone_dest);
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        false,
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert!(!gone_dest.exists(), "the rejected photo's JPEG should go");
+    assert!(
+        cat.edit_identity(reject_id).unwrap().is_none(),
+        "the rejected photo's row should go"
+    );
+    assert!(
+        cat.edit_identity(keep_id).unwrap().is_some(),
+        "the kept photo's row must survive, report was {report:?}"
+    );
+}
+
+/// Refuse to prune a directory photopipe cannot show it wrote. `--out` can be
+/// pointed anywhere, and deleting a stranger's files would be unforgivable.
+#[cfg(unix)]
+#[test]
+fn an_unmarked_directory_full_of_strangers_is_never_pruned() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    seed_file(&cat, "/tmp/whatever.arw", "reject");
+    let out = tempfile::TempDir::new().unwrap();
+    let precious = out.path().join("holiday.jpg");
+    std::fs::write(&precious, b"someone's actual photo").unwrap();
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        false,
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.pruned, 0);
+    assert!(
+        precious.exists(),
+        "a file photopipe never wrote was deleted"
+    );
+    assert!(
+        !out.path().join(".photopipe-tree").exists(),
+        "an unowned directory must not be claimed as managed"
+    );
+}
+
+// ── KI-5: a zero-work run does not decode ─────────────────────────────────────
+
+/// KI-5: `finish_one` used to measure — a full raw decode — before consulting
+/// the idempotency check, so an unchanged library paid a decode per photo only
+/// to skip it.
+///
+/// The RAW here does not exist. Under the old order that is an immediate
+/// `measure_raw` failure and `errored == 1`; if the persisted `raw_stats` are
+/// reused, the file is never opened and the photo skips cleanly. So this asserts
+/// the absence of a decode by making a decode impossible.
+#[cfg(unix)]
+#[test]
+fn an_up_to_date_photo_is_skipped_without_decoding_its_raw() {
+    use pipeline::develop::decide::{decide, Sharpness, NEUTRAL_RELATIVE_SHARPNESS};
+    use pipeline::ingest::exif::ExifData;
+
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/definitely-not-here.arw", "keep");
+    let out = tempfile::TempDir::new().unwrap();
+
+    // Persist stats as a previous successful run would have.
+    let stats = sample_stats();
+    cat.upsert_raw_stats(id, &stats).unwrap();
+
+    // The recorded identity has to be the one this run will ask for, or the
+    // photo is stale and re-renders. With no `sharpness` row and no baseline,
+    // `resolve_relative_sharpness` yields the neutral value.
+    let recipe = decide(
+        &stats,
+        &ExifData::default(),
+        &Sharpness {
+            s_relative: NEUTRAL_RELATIVE_SHARPNESS,
+        },
+    );
+    let dest = out.path().join("unknown-date/definitely-not-here.jpg");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(&dest, b"pretend jpeg").unwrap();
+    let size = std::fs::metadata(&dest).unwrap().len() as i64;
+    cat.upsert_edit(&EditRow {
+        file_id: id,
+        content_hash: "hash-a".into(),
+        recipe_hash: recipe.recipe_hash(),
+        recipe,
+        decider_version: DECIDER_VERSION.into(),
+        renderer: "rawtherapee".into(),
+        look_model: None,
+        look_version: None,
+        lut_hash: None,
+        look_applied: false,
+        iqa_before: None,
+        iqa_after: None,
+        output_path: Some(dest.display().to_string()),
+        output_size_bytes: Some(size),
+        rendered_at: 0,
+    })
+    .unwrap();
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        false,
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.errored, 0,
+        "the raw was opened: only a decode attempt can fail on a missing file"
+    );
+    assert_eq!(report.skipped, 1, "should skip on the recorded identity");
+    assert_eq!(report.rendered, 0);
+    assert!(dest.exists(), "the output must survive its own prune pass");
+}
+
+/// The complement: when the file's content hash has moved on, the cached stats
+/// must NOT be trusted, because they describe the old bytes.
+#[cfg(unix)]
+#[test]
+fn changed_content_forces_a_fresh_measurement() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/also-not-here.arw", "keep");
+    let out = tempfile::TempDir::new().unwrap();
+    cat.upsert_raw_stats(id, &sample_stats()).unwrap();
+    // An edits row recorded against *different* bytes than files.content_hash.
+    seed_rendered_output(&cat, id, &out.path().join("unknown-date/x.jpg"));
+    {
+        let conn = cat.raw_conn_for_test();
+        conn.execute(
+            "UPDATE edits SET content_hash = 'stale-hash' WHERE file_id = ?",
+            duckdb::params![id],
+        )
+        .unwrap();
+    }
+
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        false,
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.errored, 1,
+        "stale stats must not be reused; the missing raw should be measured and fail"
+    );
+    assert_eq!(report.skipped, 0);
+}
+
+/// A photo recorded as finished *somewhere else* is not current here. Without
+/// this, `finish --out somewhere-new` reported every photo as already current
+/// and left the new directory empty, because the idempotency check only ever
+/// looked at the path the previous run recorded.
+#[cfg(unix)]
+#[test]
+fn changing_the_output_directory_forces_a_rerender() {
+    let (_rt_dir, rt) = fake_rawtherapee();
+    let (_dir, cat) = temp_catalog();
+    let id = seed_file(&cat, "/tmp/missing-on-purpose.arw", "keep");
+    let old_out = tempfile::TempDir::new().unwrap();
+    seed_rendered_output(&cat, id, &old_out.path().join("unknown-date/x.jpg"));
+
+    // A different destination. The raw does not exist, so a re-render attempt
+    // fails at `measure_raw` — which is precisely the observable proving the
+    // photo was *not* treated as already current.
+    let new_out = tempfile::TempDir::new().unwrap();
+    let cfg = DevelopConfig {
+        rawtherapee_path: rt.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        new_out.path(),
+        false,
+        &RecordingSink::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.skipped, 0, "must not claim to be already current");
+    assert_eq!(report.errored, 1, "it should have tried to render again");
 }

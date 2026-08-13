@@ -319,4 +319,87 @@ impl Catalog {
         );
         optional_row(row)
     }
+
+    /// Every `edits` row whose photo is no longer a keeper, as
+    /// `(file_id, output_path)`.
+    ///
+    /// These are the rows `finish` orphaned by a verdict flipping away from
+    /// `keep`: the JPEG and `.pp3` stay on disk and the row keeps pointing at
+    /// them, so the finished tree only ever grows. Mirrors the `verdict = 'keep'`
+    /// test in `keepers_to_develop`, so the two can never disagree about what
+    /// belongs in the tree.
+    pub fn orphaned_edits(&self) -> Result<Vec<(i64, Option<String>)>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.file_id, e.output_path
+                 FROM edits e
+                 LEFT JOIN decisions d ON d.file_id = e.file_id
+                 WHERE d.verdict IS DISTINCT FROM 'keep'",
+            )
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Every non-null `edits.output_path`. Lets `finish` recognise a finished
+    /// tree it wrote during a release that predates the `.photopipe-tree`
+    /// marker, instead of refusing to prune it forever.
+    pub fn all_edit_outputs(&self) -> Result<Vec<String>, CatalogError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT output_path FROM edits WHERE output_path IS NOT NULL")
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CatalogError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Drop `edits` rows by `file_id`. Used by `finish`'s prune pass once the
+    /// corresponding outputs are off disk, so a row never outlives its JPEG.
+    pub fn delete_edits(&self, file_ids: &[i64]) -> Result<usize, CatalogError> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CatalogError::Db(e.to_string()))?;
+        let mut removed = 0usize;
+        {
+            // One parameterised DELETE per id rather than an `IN (…)` list:
+            // binding a list is the DuckDB footgun this project has hit before,
+            // and the prune set is small by construction.
+            let mut stmt = tx
+                .prepare("DELETE FROM edits WHERE file_id = ?")
+                .map_err(|e| CatalogError::Db(e.to_string()))?;
+            for id in file_ids {
+                removed += stmt
+                    .execute(duckdb::params![id])
+                    .map_err(|e| CatalogError::Db(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| CatalogError::Db(e.to_string()))?;
+        Ok(removed)
+    }
 }

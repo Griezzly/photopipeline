@@ -86,6 +86,9 @@ pub struct FinishReport {
     /// library does not produce a wall of decode-failure noise for files that
     /// were never going to decode as a raw in the first place.
     pub skipped_unsupported: u64,
+    /// Files deleted by the prune pass — outputs whose photo is no longer a
+    /// keeper, plus anything else left in the managed tree.
+    pub pruned: u64,
 }
 
 /// Develop every kept photo into `out_dir`.
@@ -99,8 +102,14 @@ pub fn finish_folder(
     cfg: &DevelopConfig,
     defect_cfg: &DefectConfig,
     out_dir: &Path,
+    regenerate: bool,
     progress: &dyn ProgressSink,
 ) -> anyhow::Result<FinishReport> {
+    if regenerate {
+        crate::output::remove_managed_tree(out_dir)?;
+        tracing::info!(root = %out_dir.display(), "regenerate: removed existing finished tree");
+    }
+
     let renderer = Pp3Renderer::new(cfg);
     // Probe once, before any work. A missing dependency should fail the run
     // immediately rather than produce one identical warning per photo.
@@ -141,6 +150,10 @@ pub fn finish_folder(
         tmp_dir: tmp.path(),
     };
 
+    // Every path this run vouches for. Anything else under a managed tree is an
+    // orphan from an earlier run and gets pruned below.
+    let mut expected: HashSet<std::path::PathBuf> = HashSet::new();
+
     for item in &work {
         if !is_raw_format(&item.file_format) {
             tracing::info!(
@@ -153,8 +166,16 @@ pub fn finish_folder(
             continue;
         }
         match finish_one(&ctx, item, &mut taken_by_dir) {
-            Ok(Outcome::Rendered) => report.rendered += 1,
-            Ok(Outcome::Skipped) => report.skipped += 1,
+            Ok(Outcome::Rendered(dest)) => {
+                report.rendered += 1;
+                expected.insert(dest.with_extension("pp3"));
+                expected.insert(dest);
+            }
+            Ok(Outcome::Skipped(dest)) => {
+                report.skipped += 1;
+                expected.insert(dest.with_extension("pp3"));
+                expected.insert(dest);
+            }
             Err(e) => {
                 // One corrupt file must never abort a full run.
                 tracing::warn!(path = %item.path.display(), error = %e, "develop failed; skipping");
@@ -164,15 +185,146 @@ pub fn finish_folder(
         progress.inc();
     }
 
+    report.pruned = prune_finished_tree(catalog, out_dir, &expected)?;
+
     progress.stage("done");
     tracing::info!(
         rendered = report.rendered,
         skipped = report.skipped,
         skipped_unsupported = report.skipped_unsupported,
         errored = report.errored,
+        pruned = report.pruned,
         "finish complete"
     );
     Ok(report)
+}
+
+/// Delete outputs the catalog no longer vouches for, and the `edits` rows that
+/// pointed at them.
+///
+/// Two things go stale when a verdict flips away from `keep`: the JPEG and its
+/// `.pp3` on disk, and the `edits` row still naming them. Leaving the row is the
+/// more dangerous half — with the row in place but the photo no longer in the
+/// keeper set, a *different* photo can later be handed that same output path by
+/// `dedupe_name` (which only knows about names taken during the current run) and
+/// overwrite the file, leaving the old row pointing at another photo's pixels.
+/// Removing both together is what makes that unreachable.
+///
+/// Only ever touches a directory carrying the `.photopipe-tree` marker. A tree
+/// this run created is marked here; a pre-existing unmarked directory is left
+/// strictly alone, because `--out` may point at somewhere with real photos in it.
+fn prune_finished_tree(
+    catalog: &Catalog,
+    out_dir: &Path,
+    expected: &HashSet<std::path::PathBuf>,
+) -> anyhow::Result<u64> {
+    use crate::output::{dir_is_empty, is_managed_tree, TREE_MARKER};
+
+    if !out_dir.exists() {
+        return Ok(0);
+    }
+    // Adopt a tree that is demonstrably ours: one we just wrote into, an empty
+    // directory, or one holding outputs the catalog already claims (a finished
+    // tree from a release that predates the marker). Anything else is left
+    // untouched — `--out` can point anywhere, including at real photos.
+    if !is_managed_tree(out_dir) {
+        let ours = dir_is_empty(out_dir)
+            || !expected.is_empty()
+            || catalog
+                .all_edit_outputs()?
+                .iter()
+                .any(|p| Path::new(p).starts_with(out_dir));
+        if !ours {
+            tracing::warn!(
+                root = %out_dir.display(),
+                marker = TREE_MARKER,
+                "not a photopipe tree and nothing here is recorded as ours; \
+                 skipping the prune pass rather than deleting files we did not write"
+            );
+            return Ok(0);
+        }
+        std::fs::write(out_dir.join(TREE_MARKER), b"photopipe managed tree\n")
+            .map_err(|e| anyhow::anyhow!("write marker: {e}"))?;
+    }
+
+    // ① drop rows whose photo is no longer a keeper, deleting their files first
+    // so a row never outlives the JPEG it names.
+    let orphans = catalog.orphaned_edits()?;
+    let mut pruned = 0u64;
+    let mut to_forget = Vec::with_capacity(orphans.len());
+    for (file_id, output_path) in orphans {
+        if let Some(p) = output_path.as_deref().map(Path::new) {
+            // Guard against deleting something this run just wrote: a photo can
+            // legitimately reuse a path an orphan used to hold.
+            if !expected.contains(p) {
+                for victim in [p.to_path_buf(), p.with_extension("pp3")] {
+                    match std::fs::remove_file(&victim) {
+                        Ok(()) => pruned += 1,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            tracing::warn!(file = %victim.display(), error = %e, "prune remove failed")
+                        }
+                    }
+                }
+            }
+        }
+        to_forget.push(file_id);
+    }
+    let rows = catalog.delete_edits(&to_forget)?;
+    if rows > 0 {
+        tracing::info!(
+            rows,
+            "pruned edits rows for photos that are no longer keepers"
+        );
+    }
+
+    // ② sweep anything else left in the tree — outputs from a run whose `edits`
+    // rows were since deleted, or files renamed by a change in `output_subdirs`.
+    sweep_unexpected(out_dir, out_dir, expected, &mut pruned);
+    Ok(pruned)
+}
+
+/// Recursively remove files under `dir` that are not in `expected`, then any
+/// directory left empty. The root marker is preserved.
+fn sweep_unexpected(
+    root: &Path,
+    dir: &Path,
+    expected: &HashSet<std::path::PathBuf>,
+    pruned: &mut u64,
+) {
+    use crate::output::{dir_is_empty, TREE_MARKER};
+
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "prune read_dir failed");
+            return;
+        }
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.parent() == Some(root)
+            && path.file_name().and_then(|n| n.to_str()) == Some(TREE_MARKER)
+        {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_dir() {
+            sweep_unexpected(root, &path, expected, pruned);
+            if dir_is_empty(&path) {
+                let _ = std::fs::remove_dir(&path);
+            }
+        } else if !expected.contains(&path) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => *pruned += 1,
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), error = %e, "prune remove failed")
+                }
+            }
+        }
+    }
 }
 
 /// True when `file_format` (the lowercase extension recorded at ingest) is a
@@ -185,8 +337,12 @@ fn is_raw_format(file_format: &str) -> bool {
 }
 
 enum Outcome {
-    Rendered,
-    Skipped,
+    /// Rendered afresh; carries the JPEG's path so the caller can vouch for
+    /// it (and its `.pp3`) against the prune pass.
+    Rendered(std::path::PathBuf),
+    /// Already up to date; still vouched for, or the prune pass would delete
+    /// every output the moment nothing needed re-rendering.
+    Skipped(std::path::PathBuf),
 }
 
 /// Place this frame's `s_subject` on the 0..1 scale `decide()` expects, using
@@ -266,9 +422,38 @@ fn finish_one(
         tmp_dir,
     } = *ctx;
 
-    // ① measure
-    let stats = crate::develop::measure::measure_raw(&item.path)?;
-    catalog.upsert_raw_stats(item.file_id, &stats)?;
+    // ① measure — but only when the answer cannot already be known.
+    //
+    // Decoding the raw sensor plane is by far the most expensive step here, so
+    // on an unchanged library every photo used to pay a full decode purely to be
+    // skipped moments later. The old order had a reason: `recipe_hash` is needed
+    // to build the identity, and the recipe needs the stats.
+    //
+    // The persisted `raw_stats` row closes that circle. It carries no
+    // `content_hash` of its own, so it cannot be trusted alone — but an `edits`
+    // row whose `content_hash` still matches the file proves those stats were
+    // measured from exactly these bytes, since `finish_one` writes both in the
+    // same pass. Every other case (no `edits` row, a file that changed, a
+    // missing `raw_stats` row) falls through to a real measurement.
+    let existing_edit = catalog.edit_identity(item.file_id)?;
+    let content_unchanged = existing_edit
+        .as_ref()
+        .is_some_and(|(e, _, _)| e.content_hash == item.content_hash);
+    let stats = match if content_unchanged {
+        catalog.get_raw_stats(item.file_id)?
+    } else {
+        None
+    } {
+        Some(cached) => {
+            tracing::debug!(path = %item.path.display(), "reusing persisted raw_stats");
+            cached
+        }
+        None => {
+            let measured = crate::develop::measure::measure_raw(&item.path)?;
+            catalog.upsert_raw_stats(item.file_id, &measured)?;
+            measured
+        }
+    };
 
     // ② decide
     let (exif, s_subject) = catalog.develop_inputs(item.file_id)?;
@@ -289,10 +474,21 @@ fn finish_one(
     let dest = output_path_for(cfg, out_dir, item, taken_by_dir);
 
     // Idempotency: skip when the recorded render still satisfies what we want.
-    if let Some((existing, path, size)) = catalog.edit_identity(item.file_id)? {
-        if is_up_to_date(&existing, &wanted, path.as_deref().map(Path::new), size) {
+    //
+    // "Where we were asked to write" is part of that. `is_up_to_date` checks the
+    // *recorded* path, so on its own it would call a photo current because an
+    // earlier run's JPEG still sits in a different directory — and `finish --out
+    // somewhere-new` would report "already current" while leaving the new
+    // directory empty.
+    let recorded_here = existing_edit
+        .as_ref()
+        .and_then(|(_, p, _)| p.as_deref())
+        .is_some_and(|p| Path::new(p) == dest);
+    if let Some((existing, path, size)) = existing_edit {
+        if recorded_here && is_up_to_date(&existing, &wanted, path.as_deref().map(Path::new), size)
+        {
             tracing::debug!(path = %item.path.display(), "already finished; skipping");
-            return Ok(Outcome::Skipped);
+            return Ok(Outcome::Skipped(dest));
         }
     }
 
@@ -341,7 +537,7 @@ fn finish_one(
         rendered_at: now_secs(),
     })?;
 
-    Ok(Outcome::Rendered)
+    Ok(Outcome::Rendered(dest))
 }
 
 /// Where one photo's JPEG lands.
