@@ -5,7 +5,7 @@ const ITEMS = [
   { id: 'libraries',  label: 'Libraries',  ico: 'folder',   go: () => window.pp.go('/libraries') },
   { id: 'review',     label: 'Review',     ico: 'grid',     needsLib: true, go: () => window.pp.go('/review') },
   { id: 'duplicates', label: 'Duplicates', ico: 'layers',   needsLib: true, go: () => window.pp.go('/duplicates') },
-  { id: 'export',     label: 'Export',     ico: 'download', needsLib: true, go: () => window.pp.openExport() },
+  { id: 'export',     label: 'Export',     ico: 'download', needsLib: true, go: () => window.pp.go('/export') },
   { id: 'develop',    label: 'Develop — not yet available', ico: 'develop', soon: true },
 ];
 

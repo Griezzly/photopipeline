@@ -560,7 +560,7 @@ function renderGrid() {
 
   if (complete) {
     el('rv-keepers').onclick = () => { ui.keepersOnly = true; refresh(); };
-    el('rv-export-2').onclick = () => window.pp.openExport();
+    el('rv-export-2').onclick = () => window.pp.go('/export');
   }
   el('rv-tiles').onclick = (e) => {
     const t = e.target.closest('.tile');
@@ -869,7 +869,7 @@ function paintChrome(folder) {
   };
   paintTheme();
   themeBtn.onclick = () => { window.pp.theme.toggle(); paintTheme(); };
-  el('rv-export').onclick = () => window.pp.openExport();
+  el('rv-export').onclick = () => window.pp.go('/export');
 }
 
 export async function openReview(folder, opts = {}) {

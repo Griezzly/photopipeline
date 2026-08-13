@@ -1,13 +1,26 @@
 import { api, humanBytes } from '/app.js';
 import { icon } from '/icons.js';
 
+// The live modal's close function, or null. The router needs to be able to
+// tear this down when it applies a different route.
+let closeFn = null;
+
+/** Pure unmount, for the router's overlay teardown. Never navigates — the
+ *  onClose hook below checks the current route precisely so that a teardown
+ *  initiated by the router does not bounce it somewhere else. */
+export function closeExport() {
+  const c = closeFn;
+  closeFn = null;
+  if (c) c();
+}
+
 export async function openExport() {
   let est;
   try {
     est = await api('GET', '/api/export/estimate');
   } catch (e) {
     window.pp.toast({ kind: 'error', title: 'Could not size the export', body: e.message });
-    return;
+    return false;
   }
 
   if (!est.files) {
@@ -16,13 +29,20 @@ export async function openExport() {
       title: 'Nothing new to export',
       body: 'No kept or keeper photos are waiting — any you already exported are in _keepers.',
     });
-    return;
+    return false;
   }
 
   const m = window.pp.modal({
     title: `Export ${est.files.toLocaleString()} photo${est.files === 1 ? '' : 's'}`,
     subtitle: 'RAW files are copied. Originals stay where they are.',
     width: 520,
+    onClose: () => {
+      closeFn = null;
+      // Only navigate when this close came from the user. When the router
+      // tore the modal down on its way somewhere else, it had already moved
+      // the current route off /export, and this is a no-op.
+      if (window.pp.routerPath() === '/export') window.pp.back('/review');
+    },
     body: `
       <div class="exp-body">
         <div>
@@ -52,6 +72,8 @@ export async function openExport() {
       </div>`,
   });
 
+  closeFn = m.close;
+
   m.el.querySelector('#exp-cancel').onclick = () => m.close();
 
   const go = m.el.querySelector('#exp-go');
@@ -68,7 +90,7 @@ export async function openExport() {
         kind: 'error',
         title: 'Export failed',
         body: `${e.message}. Nothing was overwritten.`,
-        actions: [{ label: 'Retry', onClick: () => { openExport(); } }],
+        actions: [{ label: 'Retry', onClick: () => { window.pp.go('/export'); } }],
       });
       return;
     }
@@ -85,6 +107,7 @@ export async function openExport() {
   m.el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !go.disabled) { e.preventDefault(); run(); }
   });
+  return true;
 }
 
-Object.assign(window.pp, { openExport });
+Object.assign(window.pp, { openExport, closeExport });

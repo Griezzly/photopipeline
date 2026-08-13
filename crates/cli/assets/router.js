@@ -329,6 +329,21 @@ const ROUTES = {
     const ok = await window.pp.openCompare(r.groupId, payload && payload.fileIds);
     if (!ok) return parentPath(r);
   },
+
+  async export(r) {
+    closeOverlays('export');
+    const folder = await ensureLibrary();
+    if (!folder) return '/libraries';
+    // Export is reachable from the review topbar and from the rail, so the
+    // screen underneath is review or duplicates — whichever is already up.
+    // A cold reload of #/export has neither, and gets review.
+    if (window.pp.state.view !== 'review' && window.pp.state.view !== 'duplicates') {
+      await window.pp.openReview(folder);
+    }
+    const ok = await window.pp.openExport();
+    // parentPath reads state.view, so it must run after the screen is up.
+    if (!ok) return parentPath(r);
+  },
 };
 
 /**
