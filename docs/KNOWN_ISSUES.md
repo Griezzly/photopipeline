@@ -47,14 +47,6 @@ Canonicalising the path at ingest is the obvious fix; a migration would need to
 merge the duplicate rows rather than just delete them, since decisions can sit on
 either copy.
 
-**KI-2 — the finished tree is never pruned.** Flipping a verdict from keep to
-reject leaves the JPEG, its `.pp3` and the `edits` row in place, with no way to
-clean up. `review-tree` and `export-keepers` both prune stale entries; `finish`
-has no `--regenerate` and no prune pass, so `_finished/` accumulates orphans. A
-related consequence: because the dedupe set is per-run and not seeded from what
-is already on disk, a shrinking keeper set can let a re-rendered photo overwrite
-a previous run's orphaned JPEG whose `edits` row still points at it.
-
 **KI-3 — the next `scan` re-ingests finished JPEGs as new photos.** `_finished`
 defaults to living inside the library and `jpg` is an ingest extension, and
 `ingest_directory` has no exclusion for managed trees. `_review` has had this
@@ -69,14 +61,6 @@ metadata, so this is a gap rather than a regression — but it is the kind of th
 noticed on the first real run.
 
 ### Internals
-
-**KI-5 — a "zero work" second run still decodes every RAW.** `finish_one`
-measures and upserts `raw_stats` *before* consulting `edit_identity`, because
-`recipe_hash` is needed to build the identity. Functionally correct and verified
-idempotent, but on 500 frames the second run costs a full raw decode each, where
-§8's language implies zero. `get_raw_stats` already exists and is currently used
-only by tests: when a stored `edits` row's `content_hash` matches and a
-`raw_stats` row exists, `decide()` could run from the persisted stats.
 
 **KI-6 — `[develop] renderer` and the whole `[develop.look]` section are read by
 nobody.** Only `finished_dir`, `jpeg_quality`, `output_subdirs` and
@@ -117,6 +101,53 @@ it and holding the lock. Integration tests live in a separate crate, so
 `#[cfg(test)]` cannot work; a `test-support` cargo feature would.
 
 ---
+
+## Fixed on 2026-08-13 (second pass)
+
+**KI-2 — the finished tree is now pruned.** Flipping a verdict from keep to
+reject left the JPEG, its `.pp3` and the `edits` row in place with no way to
+clean up, so `_finished/` only ever grew.
+
+The row was the more dangerous half. With it still naming a path no longer
+claimed by any keeper, `dedupe_name` — which only knows about names handed out
+during the *current* run — could give that same path to a different photo, whose
+render would overwrite the file while the old row went on describing it. Deleting
+the file and the row together is what makes that unreachable, so the prune does
+both in one pass rather than sweeping disk and tidying the catalog separately.
+
+`finish_folder` now collects every path the run vouches for (including skipped
+photos, or the first no-op run would delete the whole tree), removes orphaned
+outputs and their rows, then sweeps anything else left behind. `finish
+--regenerate` rebuilds from scratch, matching `review-tree`.
+
+The safety rule is deliberately narrow: pruning only touches a directory
+photopipe can *show* it wrote — one carrying the `.photopipe-tree` marker, an
+empty one, or one holding outputs the catalog already claims (which adopts a tree
+written before `finish` set the marker). Anything else is left alone and logged.
+`--out` accepts any path, and deleting files photopipe did not create would be
+unforgivable; `an_unmarked_directory_full_of_strangers_is_never_pruned` pins it.
+
+**KI-5 — a "zero work" second run no longer decodes every RAW.** `finish_one`
+measured and upserted `raw_stats` *before* consulting `edit_identity`, because
+`recipe_hash` is needed to build the identity and the recipe needs the stats.
+
+The persisted `raw_stats` row closes that circle. It carries no `content_hash` of
+its own so it cannot be trusted alone, but an `edits` row whose `content_hash`
+still matches the file proves those stats were measured from exactly these bytes,
+because `finish_one` writes both in the same pass. Every other case — no `edits`
+row, a file that changed, a missing `raw_stats` row — still measures.
+
+Measured on the three sample ARWs: a no-op run went from 1.94s to 0.10s. The
+test asserts the absence of a decode rather than a duration, by pointing the
+catalog at a RAW that does not exist: reusing the stats skips cleanly, while any
+decode attempt fails and is counted.
+
+**A third bug, surfaced while verifying the other two: `finish --out
+somewhere-new` wrote nothing and called it success.** It reported every photo as
+"already current" and left the new directory empty, because `is_up_to_date`
+checks the path the *previous* run recorded rather than the one being asked for.
+An output that is not where we were told to write it is not current; the check
+now compares the two.
 
 ## Fixed on 2026-08-13
 

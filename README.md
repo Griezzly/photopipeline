@@ -90,6 +90,13 @@ photopipe export-keepers ~/Photos/2024 ~/Photos/_keepers
 photopipe finish ~/Photos/2024 --out ~/Photos/_finished
 ```
 
+`finish` keeps the finished tree in step with your decisions: re-running it
+prunes the JPEG, the `.pp3` and the catalog row for any photo you have since
+stopped keeping, and re-renders anything whose recipe changed. Add
+`--regenerate` to delete the tree and rebuild it from scratch. Pruning only ever
+touches a directory photopipe wrote — point `--out` at a folder of your own
+photos and it will refuse rather than delete anything.
+
 You can run `scan` without the ML models for a quick pass (classical defect
 checks only): `photopipe scan ~/Photos/2024 --no-models`.
 
