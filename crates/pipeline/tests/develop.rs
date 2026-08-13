@@ -1,5 +1,5 @@
 use pipeline::catalog::{Catalog, EditIdentity, EditRow};
-use pipeline::config::DevelopConfig;
+use pipeline::config::{DefectConfig, DevelopConfig};
 use pipeline::develop::decide::{EditRecipe, DECIDER_VERSION};
 use pipeline::develop::is_up_to_date;
 use pipeline::develop::measure::RawStats;
@@ -731,8 +731,14 @@ fn empty_work_list_renders_nothing_and_still_reports_done() {
     let (_dir, cat) = temp_catalog();
     let out = tempfile::TempDir::new().unwrap();
     let sink = RecordingSink::default();
-    let report: FinishReport =
-        finish_folder(&cat, &DevelopConfig::default(), out.path(), &sink).unwrap();
+    let report: FinishReport = finish_folder(
+        &cat,
+        &DevelopConfig::default(),
+        &DefectConfig::default(),
+        out.path(),
+        &sink,
+    )
+    .unwrap();
     assert_eq!(report.rendered, 0);
     assert_eq!(report.errored, 0);
     let stages = sink.stages.lock().unwrap().clone();
@@ -750,8 +756,14 @@ fn missing_renderer_fails_before_any_work() {
         rawtherapee_path: "/nonexistent/rawtherapee-cli".into(),
         ..Default::default()
     };
-    let err = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default())
-        .expect_err("a missing renderer should abort the run");
+    let err = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .expect_err("a missing renderer should abort the run");
     assert!(
         err.to_string().contains("rawtherapee"),
         "error should name the missing dependency: {err}"
@@ -835,7 +847,14 @@ fn unreadable_raw_is_skipped_without_an_edits_row() {
         rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(report.errored, 1);
     assert_eq!(report.rendered, 0);
     assert!(
@@ -859,7 +878,14 @@ fn jpg_keeper_is_counted_as_skipped_unsupported_not_errored() {
         rawtherapee_path: rt.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(report.skipped_unsupported, 1);
     assert_eq!(report.errored, 0);
     assert_eq!(report.rendered, 0);
@@ -902,7 +928,14 @@ fn fake_renderer_runs_but_stub_output_cannot_complete_the_happy_path() {
         ..Default::default()
     };
 
-    let report = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let report = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(
         report.errored, 1,
         "the stub .tif is not a decodable image, so encode must fail"
@@ -1020,7 +1053,14 @@ fn end_to_end_finish_is_idempotent() {
     let _temp_guard = EnvGuard::set("TEMP", tmp_root.path());
 
     // ── first run: a real render ──
-    let first = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let first = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(first.rendered, 1, "first run should render");
     assert_eq!(first.skipped, 0);
     assert_eq!(first.errored, 0, "first run should not error");
@@ -1070,7 +1110,14 @@ fn end_to_end_finish_is_idempotent() {
     );
 
     // ── second run: idempotency is a correctness requirement, not a perf goal ──
-    let second = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let second = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(second.rendered, 0, "second run must render nothing");
     assert_eq!(second.skipped, 1);
     assert_eq!(second.errored, 0);
@@ -1080,7 +1127,14 @@ fn end_to_end_finish_is_idempotent() {
     // second-run assertion above could pass simply because the code always
     // skips regardless of whether the output still matches. ──
     std::fs::File::create(&jpeg).unwrap(); // truncate to 0 bytes
-    let third = finish_folder(&cat, &cfg, out.path(), &RecordingSink::default()).unwrap();
+    let third = finish_folder(
+        &cat,
+        &cfg,
+        &DefectConfig::default(),
+        out.path(),
+        &RecordingSink::default(),
+    )
+    .unwrap();
     assert_eq!(
         third.rendered, 1,
         "a truncated output must be detected as stale and re-rendered"

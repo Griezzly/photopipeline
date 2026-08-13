@@ -440,7 +440,13 @@ fn cmd_finish(
 
     println!("Developing keepers → {} …", out_dir.display());
 
-    let report = pipeline::finish_folder(&lib.catalog, &cfg.develop, &out_dir, &CliProgress)?;
+    let report = pipeline::finish_folder(
+        &lib.catalog,
+        &cfg.develop,
+        &cfg.defect,
+        &out_dir,
+        &CliProgress,
+    )?;
 
     println!(
         "Finished {} photos, {} already current, {} skipped (not RAW), {} failed → {}",

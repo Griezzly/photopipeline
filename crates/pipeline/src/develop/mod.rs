@@ -68,8 +68,10 @@ use anyhow::Context;
 
 use crate::analyze::ProgressSink;
 use crate::catalog::{Catalog, EditRow};
-use crate::config::{DevelopConfig, OutputSubdirs};
-use crate::develop::decide::{decide, Sharpness, DECIDER_VERSION};
+use crate::config::{DefectConfig, DevelopConfig, OutputSubdirs};
+use crate::develop::decide::{
+    decide, relative_sharpness, Sharpness, DECIDER_VERSION, NEUTRAL_RELATIVE_SHARPNESS,
+};
 use crate::develop::render::{Pp3Renderer, RENDERER_NAME};
 use crate::output::dedupe_name;
 
@@ -95,6 +97,7 @@ pub struct FinishReport {
 pub fn finish_folder(
     catalog: &Catalog,
     cfg: &DevelopConfig,
+    defect_cfg: &DefectConfig,
     out_dir: &Path,
     progress: &dyn ProgressSink,
 ) -> anyhow::Result<FinishReport> {
@@ -129,6 +132,15 @@ pub fn finish_folder(
     // serial, so the same input assigns the same names on every run.
     let mut taken_by_dir: HashMap<std::path::PathBuf, HashSet<String>> = HashMap::new();
 
+    let ctx = FinishCtx {
+        catalog,
+        cfg,
+        defect_cfg,
+        renderer: &renderer,
+        out_dir,
+        tmp_dir: tmp.path(),
+    };
+
     for item in &work {
         if !is_raw_format(&item.file_format) {
             tracing::info!(
@@ -140,15 +152,7 @@ pub fn finish_folder(
             progress.inc();
             continue;
         }
-        match finish_one(
-            catalog,
-            cfg,
-            &renderer,
-            out_dir,
-            tmp.path(),
-            item,
-            &mut taken_by_dir,
-        ) {
+        match finish_one(&ctx, item, &mut taken_by_dir) {
             Ok(Outcome::Rendered) => report.rendered += 1,
             Ok(Outcome::Skipped) => report.skipped += 1,
             Err(e) => {
@@ -185,22 +189,91 @@ enum Outcome {
     Skipped,
 }
 
-fn finish_one(
+/// Place this frame's `s_subject` on the 0..1 scale `decide()` expects, using
+/// the calibrated `sharpness_baseline`.
+///
+/// Falls back in the same order the blur flagger does — the per-bucket row for
+/// this camera/lens/focal/aperture, then the global sentinel `('*','*',0,0.0)`
+/// that `rebuild_sharpness_baselines` writes whenever there is any sample at
+/// all — and finally to [`NEUTRAL_RELATIVE_SHARPNESS`] when neither exists or
+/// the frame has no `s_subject`. A library that has never been calibrated
+/// therefore gets even-handed sharpening rather than a value derived from an
+/// absent comparison.
+///
+/// The sentinel is queried with `min_samples = 0` on purpose: it is a whole-
+/// library aggregate, so the per-bucket sample floor does not apply to it.
+fn resolve_relative_sharpness(
     catalog: &Catalog,
-    cfg: &DevelopConfig,
-    renderer: &Pp3Renderer,
-    out_dir: &Path,
-    tmp_dir: &Path,
+    defect_cfg: &DefectConfig,
+    exif: &crate::ingest::ExifData,
+    s_subject: Option<f32>,
+) -> anyhow::Result<f32> {
+    let Some(s) = s_subject else {
+        return Ok(NEUTRAL_RELATIVE_SHARPNESS);
+    };
+    let min_samples = defect_cfg.blur.min_samples_for_bucket;
+
+    let bucket_span = match (
+        exif.camera_model.as_deref(),
+        exif.lens_model.as_deref(),
+        exif.focal_length_mm,
+        exif.aperture,
+    ) {
+        (Some(cam), Some(lens), Some(focal), Some(ap)) => catalog.bucket_baseline_span(
+            cam,
+            lens,
+            crate::calibration::buckets::focal_bucket(focal),
+            crate::calibration::buckets::aperture_bucket(ap),
+            min_samples,
+        )?,
+        _ => None,
+    };
+
+    let span = match bucket_span {
+        Some(s) => Some(s),
+        None => catalog.bucket_baseline_span("*", "*", 0, 0.0, 0)?,
+    };
+
+    Ok(match span {
+        Some((p10, p90)) => relative_sharpness(s, p10, p90),
+        None => NEUTRAL_RELATIVE_SHARPNESS,
+    })
+}
+
+/// Everything `finish_one` needs that does not change between photos. Grouped
+/// so the per-photo call takes the run context, the item, and the name ledger
+/// rather than eight positional arguments.
+struct FinishCtx<'a> {
+    catalog: &'a Catalog,
+    cfg: &'a DevelopConfig,
+    defect_cfg: &'a DefectConfig,
+    renderer: &'a Pp3Renderer,
+    out_dir: &'a Path,
+    tmp_dir: &'a Path,
+}
+
+fn finish_one(
+    ctx: &FinishCtx<'_>,
     item: &crate::catalog::KeeperToDevelop,
     taken_by_dir: &mut HashMap<std::path::PathBuf, HashSet<String>>,
 ) -> anyhow::Result<Outcome> {
+    let FinishCtx {
+        catalog,
+        cfg,
+        defect_cfg,
+        renderer,
+        out_dir,
+        tmp_dir,
+    } = *ctx;
+
     // ① measure
     let stats = crate::develop::measure::measure_raw(&item.path)?;
     catalog.upsert_raw_stats(item.file_id, &stats)?;
 
     // ② decide
-    let (exif, s_global) = catalog.develop_inputs(item.file_id)?;
-    let recipe = decide(&stats, &exif, &Sharpness { s_global });
+    let (exif, s_subject) = catalog.develop_inputs(item.file_id)?;
+    let s_relative = resolve_relative_sharpness(catalog, defect_cfg, &exif, s_subject)?;
+    let recipe = decide(&stats, &exif, &Sharpness { s_relative });
     let recipe_hash = recipe.recipe_hash();
 
     let wanted = EditIdentity {

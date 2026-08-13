@@ -138,16 +138,26 @@ impl Catalog {
         optional_row(row)
     }
 
-    /// EXIF plus global sharpness for one file — the two non-raw inputs to
+    /// EXIF plus subject sharpness for one file — the non-raw inputs to
     /// `decide()`. Missing rows are not an error: `decide()` has a defined
     /// answer for absent ISO and absent sharpness.
-    pub fn develop_inputs(&self, file_id: i64) -> Result<(ExifData, f32), CatalogError> {
+    ///
+    /// Returns `s_subject` rather than `s_global` because the sharpening
+    /// decision places it against `sharpness_baseline`, whose percentiles are
+    /// computed over `s_subject`. `None` means "no comparison possible", which
+    /// the caller turns into `NEUTRAL_RELATIVE_SHARPNESS`; it is not the same as
+    /// zero, which would mean "measured, and as soft as this lens ever gets".
+    ///
+    /// `focal_length_mm` and `aperture` are selected because they key the
+    /// baseline bucket, alongside camera and lens.
+    pub fn develop_inputs(&self, file_id: i64) -> Result<(ExifData, Option<f32>), CatalogError> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| CatalogError::Db("mutex poisoned".into()))?;
         let row = conn.query_row(
-            "SELECT e.iso, e.lens_model, e.camera_model, s.s_global
+            "SELECT e.iso, e.lens_model, e.camera_model, s.s_subject,
+                    e.focal_length_mm, e.aperture
              FROM files f
              LEFT JOIN exif e ON e.file_id = f.id
              LEFT JOIN sharpness s ON s.file_id = f.id
@@ -157,19 +167,23 @@ impl Catalog {
                 let iso: Option<i32> = r.get(0)?;
                 let lens_model: Option<String> = r.get(1)?;
                 let camera_model: Option<String> = r.get(2)?;
-                let s_global: Option<f32> = r.get(3)?;
+                let s_subject: Option<f32> = r.get(3)?;
+                let focal_length_mm: Option<f32> = r.get(4)?;
+                let aperture: Option<f32> = r.get(5)?;
                 Ok((
                     ExifData {
                         iso: iso.map(|v| v as u32),
                         lens_model,
                         camera_model,
+                        focal_length_mm,
+                        aperture,
                         ..Default::default()
                     },
-                    s_global.unwrap_or(0.5),
+                    s_subject,
                 ))
             },
         );
-        Ok(optional_row(row)?.unwrap_or((ExifData::default(), 0.5)))
+        Ok(optional_row(row)?.unwrap_or((ExifData::default(), None)))
     }
 }
 

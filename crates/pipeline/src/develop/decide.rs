@@ -9,14 +9,54 @@ use crate::ingest::exif::ExifData;
 
 /// Bumped whenever any formula below changes. Stored in `edits.decider_version`
 /// and part of the idempotency key, so a tuning change re-renders everything.
-pub const DECIDER_VERSION: &str = "decide-2";
+pub const DECIDER_VERSION: &str = "decide-3";
 
 /// The sharpness measurement `decide` consumes. A struct rather than a bare f32
 /// so adding subject/background terms later does not churn the signature.
 #[derive(Debug, Clone, Copy)]
 pub struct Sharpness {
-    /// Global sharpness score from the `sharpness` table, roughly 0..1.
-    pub s_global: f32,
+    /// Where this frame's sharpness sits among comparable frames, 0..1.
+    ///
+    /// This is a *relative position*, not a raw score, and the distinction is
+    /// load-bearing. The previous field was `s_global` and was documented as
+    /// "roughly 0..1", but `defect::blur` computes it as the variance of the
+    /// Laplacian, which is unbounded — real frames measure in the hundreds or
+    /// thousands (128, 357 and 1491 on the three sample ARWs). Clamping that to
+    /// 0..1 saturated every real photo to 1.0, so `sharpen_amount` was always
+    /// exactly `SHARPEN_MAX` and the modulation below was dead in production
+    /// while every unit test passed, because the tests fed fabricated 0..1
+    /// values no photo produces.
+    ///
+    /// Computed by [`relative_sharpness`] against the calibrated
+    /// `sharpness_baseline` percentiles, which is the same comparison the blur
+    /// flagger already makes. `decide` stays pure: the caller does the lookup.
+    pub s_relative: f32,
+}
+
+/// The relative sharpness to assume when no baseline comparison is possible —
+/// a fresh library, a bucket below `min_samples_for_bucket` with no global
+/// sentinel yet, or a frame whose `s_subject` is missing. Deliberately neutral:
+/// half sharpening rather than either extreme, since an unknown frame is as
+/// likely to be crisp as soft.
+pub const NEUTRAL_RELATIVE_SHARPNESS: f32 = 0.5;
+
+/// Map a raw sharpness score to its 0..1 position within a calibrated range.
+///
+/// `p10`/`p90` come from `sharpness_baseline` for this camera/lens/focal/
+/// aperture bucket, or from the global sentinel row. A frame at or below the
+/// 10th percentile scores 0 (soft for this lens — sharpen gently), one at or
+/// above the 90th scores 1 (as crisp as this lens gets — sharpen fully).
+///
+/// Returns [`NEUTRAL_RELATIVE_SHARPNESS`] when the range is degenerate, which
+/// happens when every sample in a bucket measured the same. Comparing against
+/// percentiles of `s_subject` means the caller must pass `s_subject`, not
+/// `s_global`: mixing the two would repeat the unit error this replaced.
+pub fn relative_sharpness(s_subject: f32, p10: f32, p90: f32) -> f32 {
+    let span = p90 - p10;
+    if span <= f32::EPSILON {
+        return NEUTRAL_RELATIVE_SHARPNESS;
+    }
+    ((s_subject - p10) / span).clamp(0.0, 1.0)
 }
 
 /// A complete, renderer-agnostic development recipe. Every field is normalised
@@ -140,7 +180,12 @@ pub fn decide(raw: &RawStats, exif: &ExifData, sharp: &Sharpness) -> EditRecipe 
     // clamped to 0..1 and then scaled, so the product cannot exceed SHARPEN_MAX.
     // An outer `.clamp(0.0, SHARPEN_MAX)` here would be a no-op and would make
     // the cap untestable, since removing it could not change any result.
-    let sharpen_amount = sharp.s_global.clamp(0.0, 1.0) * SHARPEN_MAX;
+    //
+    // The clamp is a guard, not the normalisation: `s_relative` arrives already
+    // 0..1 from `relative_sharpness`. It used to be handed a raw variance of
+    // the Laplacian, which the clamp silently saturated to 1.0 on every real
+    // photo — see `Sharpness::s_relative`.
+    let sharpen_amount = sharp.s_relative.clamp(0.0, 1.0) * SHARPEN_MAX;
 
     EditRecipe {
         exposure_ev,
@@ -232,7 +277,7 @@ mod tests {
     }
 
     fn sharp(s: f32) -> Sharpness {
-        Sharpness { s_global: s }
+        Sharpness { s_relative: s }
     }
 
     /// A correctly exposed frame needs no correction: p50 already sits at
@@ -540,6 +585,61 @@ mod tests {
             "hard cap breached: {}",
             crisp.sharpen_amount
         );
+    }
+
+    /// The regression the `s_relative` rename exists to prevent. `s_global` is
+    /// a variance of the Laplacian, so real frames arrive in the hundreds or
+    /// thousands; feeding those straight to `decide` saturated the clamp and
+    /// pinned `sharpen_amount` to `SHARPEN_MAX` for every photo. These are the
+    /// measured values from the three sample ARWs, mapped through the same
+    /// baseline span, and they must stay distinct.
+    #[test]
+    fn real_scale_sharpness_does_not_saturate_to_the_cap() {
+        // Baseline span standing in for a calibrated bucket.
+        let (p10, p90) = (128.0, 1491.0);
+        let amounts: Vec<f32> = [128.32298f32, 356.9223, 1490.7881]
+            .into_iter()
+            .map(|s| {
+                decide(
+                    &neutral_stats(),
+                    &exif_at_iso(100),
+                    &sharp(relative_sharpness(s, p10, p90)),
+                )
+                .sharpen_amount
+            })
+            .collect();
+
+        assert!(
+            amounts[0] < amounts[1] && amounts[1] < amounts[2],
+            "sharpen_amount must track measured sharpness, got {amounts:?}"
+        );
+        assert!(
+            amounts.iter().filter(|a| **a >= SHARPEN_MAX).count() <= 1,
+            "only the frame at/above p90 may reach the cap, got {amounts:?}"
+        );
+        // The softest frame sits essentially at p10, so it gets the gentlest
+        // treatment — near zero, not the 0.8 the old code gave it.
+        assert!(amounts[0] < 0.01, "p10 frame got {}", amounts[0]);
+    }
+
+    /// A degenerate baseline — every sample in the bucket measured the same —
+    /// must not divide by zero or land at an extreme.
+    #[test]
+    fn a_degenerate_baseline_span_is_neutral() {
+        assert_eq!(
+            relative_sharpness(500.0, 300.0, 300.0),
+            NEUTRAL_RELATIVE_SHARPNESS
+        );
+    }
+
+    /// Frames outside the calibrated range clamp rather than extrapolating past
+    /// the 0..1 contract `decide` relies on.
+    #[test]
+    fn relative_sharpness_clamps_outside_the_baseline_span() {
+        assert_eq!(relative_sharpness(10.0, 128.0, 1491.0), 0.0);
+        assert_eq!(relative_sharpness(9000.0, 128.0, 1491.0), 1.0);
+        // Midpoint maps to the middle of the range.
+        assert!((relative_sharpness(600.0, 100.0, 1100.0) - 0.5).abs() < 1e-6);
     }
 
     /// Lens correction is on only when EXIF names a lens; RawTherapee no-ops
