@@ -257,10 +257,12 @@ photopipe serve ~/Photos/2024       # open that library's Review grid directly
 photopipe serve --port 8808         # same, on a different port
 ```
 
-Screens are addressable: `#/libraries`, `#/review`, `#/review/photo/<file_id>`,
-`#/duplicates`, `#/duplicates/compare/<group_id>`, and `#/export`. The browser's
-Back button steps back through screens and closes overlays rather than leaving
-the app, and reloading returns you to the screen you were on.
+Screens and overlays are addressable, e.g. `#/libraries`, `#/analyze`,
+`#/review`, `#/review/photo/<file_id>`, `#/duplicates`,
+`#/duplicates/compare/<group_id>`, `#/review/photo/<file_id>/compare/<group_id>`,
+and `#/export`. The browser's Back button steps back through screens and
+closes overlays rather than leaving the app, and reloading returns you to the
+screen you were on.
 
 The app is a single-page UI with a navigation rail down the left edge:
 **Libraries → Review → Duplicates → Export → Develop**. Review, Duplicates, and

@@ -142,6 +142,11 @@ amendment A2 — an earlier draft of this section claimed the opposite split.
 - A malformed `:id` / `:groupId` (non-integer) is treated as an unknown route.
 - Switching libraries from the libraries screen keeps its existing per-screen
   data reset; the router only adds the `#/review` push.
+- An overlay entry's `ppFolder` naming a library other than the one now
+  active (a stale link, or a Back/forward landing after a library switch):
+  toast plus a redirect to the route's parent screen. See amendment A3 —
+  `file_id`/`group_id` restart at 1 in every catalog, so a stale id is not
+  merely missing, it can land on a real, unrelated row.
 
 ## Testing
 
@@ -172,6 +177,8 @@ decision.
 - `crates/cli/assets/libraries.js`, `analyze.js`, `review.js`,
   `duplicates.js`, `detail.js`, `compare.js`, `export.js` — navigation call
   sites go through `go()`/`replace()`; overlay closers delegate to history
+- `crates/cli/assets/picker.js` — its one `startAnalyze` call site becomes a
+  `window.pp.go('/analyze', { folder })`
 - `crates/cli/tests/serve.rs` — asset delivery assertion
 
 No Rust changes beyond the test. The hash never reaches the server.
@@ -201,3 +208,52 @@ requires the opposite split: **entering** analyze pushes a history entry,
 and **leaving** it (job done, "Review N so far", or a start failure)
 replaces that entry rather than stacking a third. The worked example is
 correct and is what gets implemented; the sentence before it was wrong.
+
+### A3 — Overlay close, cross-library ids, `setPath`, and history rate limits
+
+The "Overlay close" section said `closeDetail()`, `closeCompare()`, and the
+export modal's dismiss "become `history.back()`". What got built is
+materially larger, for reasons that only showed up once stepping through a
+real cull run was tried against the design.
+
+**Whole-run overlay exit.** Detail stepping (decision 4) pushes one history
+entry per photo. A single `history.back()` is an exit only for an overlay
+that is exactly one entry deep — true for compare and export, false for
+detail after any run longer than one frame, where it would take one Back
+press per frame just to leave. Every overlay entry therefore stamps
+`ppBase`: the depth of the screen entry the run started from. `exitOverlay()`
+reads `ppBase` off the current entry and leaves the whole run in a single
+`history.go(ppBase - depth())`, falling back to `replace()` when the entry
+was reached by deep link and has no run behind it. `back()` is unchanged and
+remains correct for compare and export. This was the human partner's ruling,
+taken after a review showed the original design made Escape useless — worse
+than doing nothing — after any cull run longer than one photo.
+
+**`ppFolder`, a cross-library id guard.** `file_id` and `group_id` both come
+from per-catalog `SEQUENCE`s (schema.rs), so every library numbers its files
+and groups from 1. A stale id left over from a previous library — a
+Back/forward restore, or a deep link — is not merely absent from the new
+catalog; it is very likely to name a real, unrelated row in it, which is a
+worse failure than a 404 would be. Every overlay entry therefore stamps
+`ppFolder`, the library it was created under, and the photo and compare
+appliers in `router.js` reject an entry stamped for a different library with
+a toast and a `replace()` to the route's parent screen, before restoring
+anything underneath. Added to `## Error handling` above.
+
+**`setPath`.** A navigation verb, `window.pp.setPath(path)`, that rewrites
+`location.hash` and its `history.state` without re-running the path's
+applier. Needed because some screens can already be showing the exact state
+a route names — detail.js's `detailRefresh()` re-anchors on the frame a
+decision left on screen and only wants the URL to agree with it, not to
+refetch or reopen anything `go()`/`replace()` would trigger.
+
+**History-write rate limiting.** Browsers cap how many history entries a page
+may write — Safari throws past roughly 100 `pushState` calls in 30 seconds —
+and a held arrow key or Space in the detail overlay reaches that in seconds.
+`router.js`'s `writeEntry()` catches the throw and degrades to rewriting the
+current entry instead of dropping the navigation; the cost is a missing
+history entry, not a stuck app. Separately, `move()` in detail.js coalesces
+an auto-repeating key (`event.repeat`) into a single `replace()` rather than
+one `go()` per frame, so a held key is treated as one gesture rather than as
+many deliberate visits — which also keeps ordinary browsing well under the
+limit that degradation exists to catch.
