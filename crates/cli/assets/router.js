@@ -7,7 +7,7 @@
 // window.pp inside functions — the same way the screens reach each other.
 
 let appliedPath = null; // the path currently on screen
-let pending = null;     // one-shot payload for the next apply
+let queued = null;      // the newest navigation that arrived mid-apply
 let applying = false;   // re-entrancy guard
 
 // ── Path parsing ─────────────────────────────────────────────────────────
@@ -77,16 +77,16 @@ export function parentPath(r) {
 function depth() { return (history.state && history.state.ppDepth) || 0; }
 
 export function go(path, payload) {
-  if (path === appliedPath && !payload) return;
-  history.pushState({ ppDepth: depth() + 1 }, '', `#${path}`);
-  pending = payload || null;
-  apply(path);
+  // Dedupe only the history entry, not the apply. Clicking the rail cell for
+  // the screen you are on used to re-render it, and an unrouted screen can be
+  // showing while appliedPath still names the routed one underneath.
+  if (path !== appliedPath) history.pushState({ ppDepth: depth() + 1 }, '', `#${path}`);
+  apply(path, payload || null);
 }
 
 export function replace(path, payload) {
   history.replaceState({ ppDepth: depth() }, '', `#${path}`);
-  pending = payload || null;
-  apply(path);
+  apply(path, payload || null);
 }
 
 /** Rewrite the URL without re-applying the route. For when the screen
@@ -160,20 +160,26 @@ const ROUTES = {
  * not navigate themselves, because `applying` would swallow it — the
  * redirect happens here, after the guard is cleared.
  */
-async function apply(path) {
+async function apply(path, payload) {
+  // A navigation that arrives mid-apply is queued, not dropped: dropping it
+  // left location.hash naming a screen that never rendered, and a later Back
+  // no-opped because onPop saw the hash already matching appliedPath. Only
+  // the newest is kept — intermediate screens nobody sees are not worth
+  // rendering.
+  if (applying) { queued = { path, payload }; return; }
   const r = parsePath(path);
-  if (!r || !ROUTES[r.name]) { pending = null; await resolveDefault(); return; }
-  if (applying) return;
+  if (!r || !ROUTES[r.name]) { await resolveDefault(); return; }
   applying = true;
   appliedPath = path;
-  const payload = pending;
-  pending = null;
   let fallback = null;
   try {
     fallback = await ROUTES[r.name](r, payload);
   } finally {
     applying = false;
   }
+  const next = queued;
+  queued = null;
+  if (next) { apply(next.path, next.payload); return; }
   if (fallback) replace(fallback);
 }
 
@@ -187,8 +193,7 @@ async function resolveDefault() {
 function onPop() {
   const path = location.hash.replace(/^#/, '');
   if (path === appliedPath) return;
-  pending = null;
-  apply(path);
+  apply(path, null);
 }
 
 export function startRouter() {
