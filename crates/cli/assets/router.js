@@ -116,16 +116,32 @@ function entryState(path, ppDepth) {
   return st;
 }
 
+/** Browsers rate-limit history writes — Safari throws SecurityError past
+ *  roughly 100 pushState calls per 30 seconds, and a held key can reach that.
+ *  Losing the navigation entirely is worse than losing the history entry, so
+ *  degrade to rewriting the current entry, and if even that is refused, still
+ *  let the route apply against a URL that is momentarily stale. */
+function writeEntry(push, path, st) {
+  try {
+    if (push) history.pushState(st, '', `#${path}`);
+    else history.replaceState(st, '', `#${path}`);
+    return;
+  } catch (e) {
+    if (!push) return;
+  }
+  try { history.replaceState(st, '', `#${path}`); } catch (e) { /* refused too */ }
+}
+
 export function go(path, payload) {
   // Dedupe only the history entry, not the apply. Clicking the rail cell for
   // the screen you are on used to re-render it, and an unrouted screen can be
   // showing while appliedPath still names the routed one underneath.
-  if (path !== appliedPath) history.pushState(entryState(path, depth() + 1), '', `#${path}`);
+  if (path !== appliedPath) writeEntry(true, path, entryState(path, depth() + 1));
   apply(path, payload || null);
 }
 
 export function replace(path, payload) {
-  history.replaceState(entryState(path, depth()), '', `#${path}`);
+  writeEntry(false, path, entryState(path, depth()));
   apply(path, payload || null);
 }
 
@@ -306,10 +322,16 @@ export function startRouter() {
   window.addEventListener('popstate', onPop);
   window.addEventListener('hashchange', onPop);
   const path = location.hash.replace(/^#/, '');
-  // replace() rather than a bare apply(), so the first entry carries
-  // ppDepth 0 and back() knows there is nothing of ours behind it.
-  if (parsePath(path)) replace(path);
-  else resolveDefault();
+  if (!parsePath(path)) { resolveDefault(); return; }
+  // A reload, or a Back into this page load, restores history.state along
+  // with the URL. Rewriting it here would recompute ppBase/ppFolder against
+  // an app that has not booted yet — appliedPath is null and activeFolder is
+  // still unknown — and throw away the overlay run this entry belongs to.
+  // Only stamp an entry that has none, which is the cold deep-link case.
+  if (!history.state || history.state.ppDepth == null) {
+    history.replaceState({ ppDepth: 0 }, '', `#${path}`);
+  }
+  apply(path, null);
 }
 
 // ensureLibrary, closeOverlays, parentPath and ROUTES stay module-private —

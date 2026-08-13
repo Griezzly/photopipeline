@@ -215,7 +215,7 @@ async function move(d, coalesce) {
 }
 
 /** Apply the current photo, then advance to the next frame unless `stay`. */
-async function decide(action, stay) {
+async function decide(action, stay, coalesce) {
   const p = current();
   if (!p || deciding) return;
   deciding = true;
@@ -225,7 +225,7 @@ async function decide(action, stay) {
     deciding = false;
   }
   if (stay) render();
-  else await move(1);
+  else await move(1, coalesce);
 }
 
 function compare() {
@@ -498,11 +498,13 @@ function onKey(e) {
   // stopPropagation for the same reason as the `f` branch below: without it a
   // single Escape closes this overlay *and* reaches review.js's handler, which
   // then also shuts the shortcut sheet or a filter popover the user left open
-  // behind the overlay. One Escape, one layer. This one is load-bearing on
-  // both of dismissDetail()'s paths — the deep-link fallback empties the host
-  // synchronously (see the `f` branch below for why that matters), and even
-  // on the common history.go()/back() path a bubbled Escape must not also be
-  // read by review.js as its own "close the shortcut sheet" shortcut.
+  // behind the overlay. One Escape, one layer. This is load-bearing only on
+  // dismissDetail()'s synchronous deep-link path — replace() there runs
+  // closeOverlays() in the same call stack and empties #modal-host before the
+  // event bubbles. On the common history.go() path the root is still mounted
+  // when review.js's own handler runs, and its own #modal-host.children.length
+  // guard (review.js:785-786) already stands down — this call just does not
+  // rely on that.
   if (e.key === 'Escape') { e.stopPropagation(); dismissDetail(); return; }
   // Same guard as review.js: modifier chords are browser/OS shortcuts
   // (Ctrl+X cut, Ctrl+U view-source, Cmd+F find, …), never decisions.
@@ -517,10 +519,10 @@ function onKey(e) {
     case 'ArrowLeft': case 'k': e.preventDefault(); move(-1, e.repeat); return;
     default: break;
   }
-  if (k === ' ') { e.preventDefault(); decide('keep', e.shiftKey); return; }
-  if (k === 'x' || k === 'X') { decide('reject', e.shiftKey); return; }
-  if (k === 'u' || k === 'U') { decide('undecide', e.shiftKey); return; }
-  if (k === 'K') { decide('keeper', true); return; } // Shift is inherent in 'K'
+  if (k === ' ') { e.preventDefault(); decide('keep', e.shiftKey, e.repeat); return; }
+  if (k === 'x' || k === 'X') { decide('reject', e.shiftKey, e.repeat); return; }
+  if (k === 'u' || k === 'U') { decide('undecide', e.shiftKey, e.repeat); return; }
+  if (k === 'K') { decide('keeper', true, e.repeat); return; } // Shift is inherent in 'K'
   // Stop the event here: review.js's bubble-phase handler re-checks
   // #modal-host after this capture-phase listener runs. Whether that check
   // still needs stopping depends on which of dismissDetail()'s two paths
