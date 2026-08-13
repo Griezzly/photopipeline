@@ -241,7 +241,9 @@ function compare() {
     });
     return;
   }
-  window.pp.openCompare(gid);
+  const p2 = current();
+  if (!p2) return;
+  window.pp.go(`/review/photo/${p2.file_id}/compare/${gid}`);
 }
 
 function toggleFullscreen() {

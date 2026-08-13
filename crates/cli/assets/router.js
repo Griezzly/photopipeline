@@ -280,6 +280,45 @@ const ROUTES = {
     }
     window.pp.openDetail(i);
   },
+
+  async compare(r, payload) {
+    closeOverlays('compare');
+    const folder = await ensureLibrary();
+    if (!folder) return '/libraries';
+    // group_id is only meaningful against the catalog it came from — every
+    // library restarts the sequence at 1, so a stale id from another library
+    // lands on a real, unrelated cluster rather than missing. Same guard as
+    // ROUTES.photo, but falling back to this route's own parent rather than a
+    // hardcoded path, since compare's parent varies with `over`. Checked
+    // before restoring the layer underneath, so a rejected route never
+    // flashes the wrong nested screen first.
+    const stamped = history.state && history.state.ppFolder;
+    if (stamped && stamped !== folder) {
+      window.pp.toast({
+        kind: 'info',
+        title: 'That cluster belongs to a different library',
+        body: 'Its id means nothing in the library you have open now.',
+      });
+      return parentPath(r);
+    }
+    // Restore the layer this route names as sitting underneath, so Back out
+    // of compare lands where the user opened it from (amendment A1).
+    if (r.over === 'duplicates') {
+      if (window.pp.state.view !== 'duplicates') await window.pp.openDuplicates(folder);
+    } else {
+      if (window.pp.state.view !== 'review') await window.pp.openReview(folder);
+      if (r.over === 'photo') {
+        const list = window.pp.reviewPhotos();
+        const i = list.findIndex((p) => p.file_id === r.photoId);
+        if (i < 0) return '/review';
+        window.pp.openDetail(i);
+      }
+    }
+    // fileIds is one-shot: absent on a Back/forward restore or a reload, and
+    // openCompare then falls back to the group's first two members.
+    const ok = await window.pp.openCompare(r.groupId, payload && payload.fileIds);
+    if (!ok) return parentPath(r);
+  },
 };
 
 /**

@@ -227,7 +227,7 @@ function render() {
 }
 
 function wire() {
-  el('cmp-close').onclick = closeCompare;
+  el('cmp-close').onclick = dismissCompare;
   for (const b of root.querySelectorAll('[data-zoom]')) {
     b.onclick = () => { zoom = b.dataset.zoom === 'fit' ? 'fit' : Number(b.dataset.zoom); render(); };
   }
@@ -254,7 +254,7 @@ function onResize() { applyAllZoomStyles(); }
  *  screen is behind" using the old folder's identity. */
 async function setKeeper(fileId) {
   if (deciding) return;
-  if (state.activeFolder !== openedFolder) { closeCompare(); return; }
+  if (state.activeFolder !== openedFolder) { dismissCompare(); return; }
   deciding = true;
   try {
     await window.pp.reviewApply(fileId, 'keeper');
@@ -263,9 +263,11 @@ async function setKeeper(fileId) {
   }
   const stillSameFolder = state.activeFolder === openedFolder;
   const wasOnDuplicates = state.view === 'duplicates';
-  closeCompare();
+  dismissCompare();
   if (!stillSameFolder) return; // switched libraries mid-write; nothing safe to refresh
-  if (wasOnDuplicates) { window.pp.openDuplicates(state.activeFolder); return; }
+  // Leaving a /duplicates/compare route re-applies /duplicates, and
+  // openDuplicates() reloads the clusters itself — nothing to do here.
+  if (wasOnDuplicates) return;
   // Await the reload, then repaint the detail overlay if one is still mounted
   // underneath (compare can be opened from detail with `c`). Without this the
   // panel behind keeps reading "Undecided" for a frame that is now keeper or
@@ -326,7 +328,7 @@ function onKey(e) {
       && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
   // stopPropagation so one Escape closes one layer: detail.js sits underneath
   // when compare was opened with `c`, and would otherwise close too.
-  if (e.key === 'Escape') { e.stopPropagation(); closeCompare(); return; }
+  if (e.key === 'Escape') { e.stopPropagation(); dismissCompare(); return; }
   // Modifier chords are browser/OS shortcuts, never this screen's own.
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
@@ -346,7 +348,7 @@ function mount() {
   window.addEventListener('resize', onResize);
 }
 
-function closeCompare() {
+export function closeCompare() {
   if (!root) return;
   document.removeEventListener('keydown', onKey, true);
   window.removeEventListener('resize', onResize);
@@ -358,6 +360,13 @@ function closeCompare() {
   openedFolder = null;
 }
 
+/** The user-facing close: Escape, the ✕ button, and the post-decision exit.
+ *  The unmount happens in closeCompare() when the router applies the parent
+ *  route, so Escape and Back do the same thing. */
+function dismissCompare() {
+  window.pp.back('/duplicates');
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /**
@@ -366,6 +375,10 @@ function closeCompare() {
  * resolvable members (a genuinely single-member group, or a caller-supplied
  * `fileIds` naming fewer than two) produces an info toast and no overlay —
  * never a half-rendered screen.
+ *
+ * Returns true when the overlay mounted, false on every bail-out. The router
+ * needs that answer: a false leaves the URL sitting on a compare route with
+ * nothing on screen, so it redirects to the parent instead.
  */
 export async function openCompare(targetGroupId, fileIds) {
   const targetFolder = state.activeFolder;
@@ -373,11 +386,11 @@ export async function openCompare(targetGroupId, fileIds) {
   try {
     clusters = await api('GET', '/api/clusters');
   } catch (e) {
-    if (state.activeFolder !== targetFolder) return; // switched libraries mid-fetch
+    if (state.activeFolder !== targetFolder) return false; // switched libraries mid-fetch
     window.pp.toast({ kind: 'error', title: 'Could not open compare', body: e.message });
-    return;
+    return false;
   }
-  if (state.activeFolder !== targetFolder) return; // switched libraries mid-fetch
+  if (state.activeFolder !== targetFolder) return false; // switched libraries mid-fetch
 
   const c = clusters.find((x) => x.group_id === targetGroupId);
   if (!c) {
@@ -386,7 +399,7 @@ export async function openCompare(targetGroupId, fileIds) {
       title: 'Could not open compare',
       body: `Cluster ${targetGroupId} was not found in this library.`,
     });
-    return;
+    return false;
   }
 
   let chosen;
@@ -401,7 +414,7 @@ export async function openCompare(targetGroupId, fileIds) {
       title: 'Nothing to compare',
       body: 'This group has one frame.',
     });
-    return;
+    return false;
   }
   chosen = chosen.slice(0, 2);
 
@@ -417,6 +430,7 @@ export async function openCompare(targetGroupId, fileIds) {
   mount();
   render();
   loadExif();
+  return true;
 }
 
-Object.assign(window.pp, { openCompare });
+Object.assign(window.pp, { openCompare, closeCompare });

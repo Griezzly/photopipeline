@@ -775,7 +775,7 @@ function compareCursor() {
     });
     return;
   }
-  window.pp.openCompare(p.group_id);
+  window.pp.go(`/review/compare/${p.group_id}`);
 }
 
 // ── Keyboard (spec's keyboard model) ────────────────────────────────────────
