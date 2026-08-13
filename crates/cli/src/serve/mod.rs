@@ -22,30 +22,68 @@ pub struct ActiveLibrary {
     pub cache: Arc<Cache>,
 }
 
-/// Live state of the (single) background analyze job. `idle` until one runs.
+/// Counts from a finished `finish` run, for the Develop screen's summary.
+///
+/// Lives on `JobState` rather than behind a second status endpoint: there is
+/// one job slot, so there is one place to read a job's outcome from.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct FinishSummary {
+    pub rendered: u64,
+    pub skipped: u64,
+    pub errored: u64,
+    pub skipped_unsupported: u64,
+    pub pruned: u64,
+    /// Where the JPEGs landed, so the screen can name it without re-asking.
+    pub out_dir: String,
+}
+
+/// Live state of the (single) background job — analyze *or* finish.
+///
+/// Deliberately one slot. Both saturate the machine (finish is serial precisely
+/// because `rawtherapee-cli` uses every core internally and each intermediate
+/// TIFF is ~145 MB), so letting them overlap would thrash. "One job at a time,
+/// 409 otherwise" is that policy, and it is why finish reuses this rather than
+/// adding a second slot.
 #[derive(Clone, serde::Serialize)]
 pub struct JobState {
-    // idle | scanning | detecting defects | scoring quality | calibrating |
-    // grouping duplicates | done | failed
+    /// Which command is running, so a screen polling the shared slot can tell
+    /// whether the job in flight is the one it started: analyze | finish | "".
+    pub kind: String,
+    // analyze: idle | scanning | detecting defects | scoring quality |
+    //          calibrating | grouping duplicates | done | failed
+    // finish:  idle | developing | pruning | done | failed
     pub stage: String,
+    /// Where the current photo has got to, within the `developing` phase:
+    /// measuring | rendering | applying look | encoding. Empty for analyze,
+    /// whose per-item work is too fast to be worth naming. The strings are the
+    /// contract with `assets/develop.js`; `finish_folder` documents the order.
+    pub step: String,
+    /// Filename of the photo `step` refers to. Display only.
+    pub item: String,
     pub files_done: u64,
     pub files_total: u64,
     pub ml_ran: bool,
     pub folder: String,
     pub message: String,
     pub error: Option<String>,
+    /// Present only once a finish run has completed successfully.
+    pub summary: Option<FinishSummary>,
 }
 
 impl Default for JobState {
     fn default() -> Self {
         Self {
+            kind: String::new(),
             stage: "idle".into(),
+            step: String::new(),
+            item: String::new(),
             files_done: 0,
             files_total: 0,
             ml_ran: false,
             folder: String::new(),
             message: String::new(),
             error: None,
+            summary: None,
         }
     }
 }
@@ -128,6 +166,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/export/estimate", get(handlers::get_export_estimate))
         .route("/api/analyze", post(handlers::post_analyze))
         .route("/api/analyze/status", get(handlers::get_analyze_status))
+        .route("/api/finish", post(handlers::post_finish))
+        .route("/api/finish/status", get(handlers::get_finish_status))
         .route("/api/finish/estimate", get(handlers::get_finish_estimate))
         .route("/api/fs", get(handlers::get_fs))
         .route("/api/libraries", get(handlers::get_libraries))

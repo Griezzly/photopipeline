@@ -308,12 +308,21 @@ impl pipeline::ProgressSink for JobProgress {
         // Each phase reports its own 0→100%; reset the counter at the boundary.
         j.files_done = 0;
         j.files_total = 0;
+        // …and the per-item detail, or "pruning" would go on naming the last
+        // photo `developing` was working through.
+        j.step = String::new();
+        j.item = String::new();
     }
     fn set_total(&self, total: u64) {
         self.0.lock().unwrap().files_total = total;
     }
     fn inc(&self) {
         self.0.lock().unwrap().files_done += 1;
+    }
+    fn step(&self, step: &str, item: &str) {
+        let mut j = self.0.lock().unwrap();
+        j.step = step.to_string();
+        j.item = item.to_string();
     }
 }
 
@@ -336,13 +345,11 @@ pub async fn post_analyze(
             return Err(StatusCode::CONFLICT);
         }
         *job = super::JobState {
+            kind: "analyze".into(),
             stage: "scanning".into(),
-            files_done: 0,
-            files_total: 0,
-            ml_ran: false,
             folder: folder.to_string_lossy().into_owned(),
             message: "starting…".into(),
-            error: None,
+            ..Default::default()
         };
     }
 
@@ -498,6 +505,128 @@ pub async fn get_finish_estimate(
         tracing::warn!(error = %e, "finish estimate failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FinishRequestBody {
+    /// Delete the finished tree and rebuild every photo from scratch.
+    #[serde(default)]
+    pub regenerate: bool,
+}
+
+/// Start the background finish (develop) job for the active library.
+///
+/// Modelled on [`post_analyze`], and sharing its single job slot: 409 while any
+/// job is in flight, a detached thread, and `catch_unwind` so a panic sets
+/// `stage = "failed"` rather than wedging the slot until the server restarts.
+///
+/// A missing renderer is refused here with an explanation rather than spawning
+/// a thread whose first call is guaranteed to fail.
+pub async fn post_finish(
+    State(state): State<AppState>,
+    Json(req): Json<FinishRequestBody>,
+) -> Response {
+    let lib = match state.active() {
+        Ok(l) => l,
+        Err(s) => return s.into_response(),
+    };
+    let out_dir = resolve_finish_out_dir(&state, &lib);
+
+    // Probe before the guard so a setup problem never occupies the job slot.
+    if let Err(e) = pipeline::develop::render::Pp3Renderer::new(&state.cfg.develop).probe() {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "rawtherapee-cli is required to develop photos but could not be run ({e}). \
+                 Install RawTherapee, set [develop] rawtherapee_path, then check \
+                 `photopipe doctor`."
+            ),
+        )
+            .into_response();
+    }
+
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running() {
+            return StatusCode::CONFLICT.into_response();
+        }
+        *job = super::JobState {
+            kind: "finish".into(),
+            stage: "developing".into(),
+            folder: lib.folder.to_string_lossy().into_owned(),
+            message: "starting…".into(),
+            ..Default::default()
+        };
+    }
+
+    let state2 = state.clone();
+    let out_dir2 = out_dir.clone();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // The look and its IQA guard need models. A hub that loads nothing
+            // is not an error: `finish` then produces baseline JPEGs, which is
+            // the documented behaviour when the look model is absent.
+            let hub = pipeline::models::ModelHub::from_config(&state2.cfg.models)
+                .unwrap_or_else(|_| pipeline::models::ModelHub::empty());
+            let progress = JobProgress(state2.job.clone());
+            pipeline::finish_folder(
+                pipeline::develop::FinishRequest {
+                    catalog: &lib.catalog,
+                    cfg: &state2.cfg.develop,
+                    defect_cfg: &state2.cfg.defect,
+                    hub: &hub,
+                    cache_dir: lib.cache.root(),
+                    out_dir: &out_dir2,
+                    regenerate: req.regenerate,
+                },
+                &progress,
+            )
+        }));
+        match outcome {
+            Ok(Ok(report)) => {
+                let mut j = state2.job.lock().unwrap();
+                j.stage = "done".into();
+                j.message = "complete".into();
+                j.summary = Some(super::FinishSummary {
+                    rendered: report.rendered,
+                    skipped: report.skipped,
+                    errored: report.errored,
+                    skipped_unsupported: report.skipped_unsupported,
+                    pruned: report.pruned,
+                    out_dir: out_dir2.to_string_lossy().into_owned(),
+                });
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "finish job failed");
+                let mut j = state2.job.lock().unwrap();
+                j.stage = "failed".into();
+                j.error = Some(e.to_string());
+            }
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "finish panicked".into());
+                tracing::error!(panic = %msg, "finish job panicked");
+                let mut j = state2.job.lock().unwrap();
+                j.stage = "failed".into();
+                j.error = Some(format!("internal error: {msg}"));
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(state.job.lock().unwrap().clone()),
+    )
+        .into_response()
+}
+
+/// Current finish job state (polled by the Develop screen). Reads the same
+/// single slot as [`get_analyze_status`]; `kind` says whose job it is.
+pub async fn get_finish_status(State(state): State<AppState>) -> Json<super::JobState> {
+    Json(state.job.lock().unwrap().clone())
 }
 
 // ── Folder browser, libraries, open, active ──────────────────────────────────
