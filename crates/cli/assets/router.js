@@ -10,6 +10,11 @@ let appliedPath = null; // the path currently on screen
 let queued = null;      // the newest navigation that arrived mid-apply
 let applying = false;   // re-entrancy guard
 
+// Routes that layer over a screen rather than replacing it. Dismissing one
+// must leave the whole run it belongs to — stepping pushes an entry per
+// photo, so a single back() would only reach the previous frame.
+const OVERLAY_ROUTES = new Set(['photo', 'compare', 'export']);
+
 // ── Path parsing ─────────────────────────────────────────────────────────
 
 function int(s) { return /^\d+$/.test(s) ? Number(s) : null; }
@@ -69,6 +74,26 @@ export function parentPath(r) {
   }
 }
 
+/** The screen `appliedPath` sits over: itself for a screen route, its parent
+ *  for an overlay route. Two overlay entries belong to the same run when this
+ *  agrees, which is what lets arrowing inherit the run's base. */
+function appliedParent() {
+  const r = appliedPath ? parsePath(appliedPath) : null;
+  if (!r) return appliedPath;
+  return OVERLAY_ROUTES.has(r.name) ? parentPath(r) : appliedPath;
+}
+
+/** ppBase for an entry about to be created: the depth of the screen entry
+ *  this overlay run started from. Continuing an existing run inherits it;
+ *  entering a new overlay records the entry we are leaving. Null for screen
+ *  routes, which have no run to leave. */
+function baseFor(r) {
+  if (!r || !OVERLAY_ROUTES.has(r.name)) return null;
+  const cur = history.state;
+  if (cur && cur.ppBase != null && appliedParent() === parentPath(r)) return cur.ppBase;
+  return depth();
+}
+
 // ── History mechanics ────────────────────────────────────────────────────
 
 // ppDepth counts in-app entries behind the current one. It is stamped into
@@ -76,16 +101,31 @@ export function parentPath(r) {
 // exactly right: after a reload the entries behind us are still there.
 function depth() { return (history.state && history.state.ppDepth) || 0; }
 
+/** The history.state for an entry naming `path`. ppDepth counts in-app
+ *  entries behind it; ppBase and ppFolder are only stamped on overlay
+ *  entries, which are the ones that need to know where to return to and
+ *  which library their id belongs to. */
+function entryState(path, ppDepth) {
+  const r = parsePath(path);
+  const st = { ppDepth };
+  const base = baseFor(r);
+  if (base != null) {
+    st.ppBase = base;
+    st.ppFolder = window.pp.state.activeFolder || null;
+  }
+  return st;
+}
+
 export function go(path, payload) {
   // Dedupe only the history entry, not the apply. Clicking the rail cell for
   // the screen you are on used to re-render it, and an unrouted screen can be
   // showing while appliedPath still names the routed one underneath.
-  if (path !== appliedPath) history.pushState({ ppDepth: depth() + 1 }, '', `#${path}`);
+  if (path !== appliedPath) history.pushState(entryState(path, depth() + 1), '', `#${path}`);
   apply(path, payload || null);
 }
 
 export function replace(path, payload) {
-  history.replaceState({ ppDepth: depth() }, '', `#${path}`);
+  history.replaceState(entryState(path, depth()), '', `#${path}`);
   apply(path, payload || null);
 }
 
@@ -93,7 +133,11 @@ export function replace(path, payload) {
  *  already shows the target state and re-running the applier would only
  *  refetch what is on it (detail.js's detailRefresh). */
 export function setPath(path) {
-  history.replaceState({ ppDepth: depth() }, '', `#${path}`);
+  const cur = history.state || {};
+  const st = { ppDepth: depth() };
+  if (cur.ppBase != null) st.ppBase = cur.ppBase;
+  if (cur.ppFolder != null) st.ppFolder = cur.ppFolder;
+  history.replaceState(st, '', `#${path}`);
   appliedPath = path;
 }
 
@@ -102,6 +146,16 @@ export function setPath(path) {
  *  behind it and history.back() would leave the app, so redirect instead. */
 export function back(fallback) {
   if (depth() > 0) { history.back(); return; }
+  replace(fallback);
+}
+
+/** Leave the overlay run this entry belongs to, in one hop. A plain back()
+ *  would only reach the previous frame. Falls back to replace() when the
+ *  overlay was entered by deep link and has no run behind it. */
+export function exitOverlay(fallback) {
+  const st = history.state;
+  const d = depth();
+  if (st && typeof st.ppBase === 'number' && d > st.ppBase) { history.go(st.ppBase - d); return; }
   replace(fallback);
 }
 
@@ -177,6 +231,18 @@ const ROUTES = {
     closeOverlays('detail');
     const folder = await ensureLibrary();
     if (!folder) return '/libraries';
+    // file_id is only meaningful against the catalog it came from — every
+    // library restarts the sequence at 1, so a stale id from another library
+    // lands on a real, unrelated photo rather than missing.
+    const stamped = history.state && history.state.ppFolder;
+    if (stamped && stamped !== folder) {
+      window.pp.toast({
+        kind: 'info',
+        title: 'That photo belongs to a different library',
+        body: 'Its id means nothing in the library you have open now.',
+      });
+      return '/review';
+    }
     // Only render the grid underneath when it is not already there —
     // openReview() re-runs load(), which would refetch on every arrow key.
     if (window.pp.state.view !== 'review') await window.pp.openReview(folder);
@@ -248,4 +314,4 @@ export function startRouter() {
 
 // ensureLibrary, closeOverlays, parentPath and ROUTES stay module-private —
 // Tasks 3-6 add their appliers inside this file, not from the outside.
-Object.assign(window.pp, { go, replace, back, setPath, routerPath, startRouter });
+Object.assign(window.pp, { go, replace, back, exitOverlay, setPath, routerPath, startRouter });

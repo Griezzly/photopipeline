@@ -187,21 +187,31 @@ export function closeDetail() {
 /** What every user-facing close path calls: Escape, the ✕ button, `f`, and
  *  the defensive "the list emptied under us" branches. The unmount itself
  *  happens in closeDetail(), which the router calls when it applies the
- *  parent route — so Escape and Back are literally the same operation.
+ *  parent route. Stepping pushes one history entry per frame, so leaving
+ *  goes through exitOverlay() — one hop across the whole run, not one step
+ *  back to whatever frame was visited last — which is what makes Escape and
+ *  Back interchangeable regardless of how far the run has gone.
  *  closeDetail() must stay a pure unmount or this recurses. */
 function dismissDetail() {
-  window.pp.back('/review');
+  window.pp.exitOverlay('/review');
 }
 
 /** Stepping pushes one history entry per photo, so Back retraces the frames
  *  you looked at. The router's photo applier is what actually calls
- *  openDetail() — this only names the destination. */
-async function move(d) {
+ *  openDetail() — this only names the destination. An auto-repeating arrow
+ *  (`coalesce`) is one held gesture, not N deliberate visits, and is routed
+ *  through replace() instead of go() — see the call site in onKey(). */
+async function move(d, coalesce) {
   const list = window.pp.reviewPhotos();
   if (!list.length) return;
   const n = Math.max(0, Math.min(list.length - 1, idx + d));
   if (n === idx) return;
-  window.pp.go(`/review/photo/${list[n].file_id}`);
+  const path = `/review/photo/${list[n].file_id}`;
+  // An auto-repeating arrow is one held gesture, not N deliberate visits.
+  // Collapsing it into one entry keeps Back meaningful and keeps us under
+  // the browser's pushState rate limit, which a held key crosses in seconds.
+  if (coalesce) window.pp.replace(path);
+  else window.pp.go(path);
 }
 
 /** Apply the current photo, then advance to the next frame unless `stay`. */
@@ -488,7 +498,11 @@ function onKey(e) {
   // stopPropagation for the same reason as the `f` branch below: without it a
   // single Escape closes this overlay *and* reaches review.js's handler, which
   // then also shuts the shortcut sheet or a filter popover the user left open
-  // behind the overlay. One Escape, one layer.
+  // behind the overlay. One Escape, one layer. This one is load-bearing on
+  // both of dismissDetail()'s paths — the deep-link fallback empties the host
+  // synchronously (see the `f` branch below for why that matters), and even
+  // on the common history.go()/back() path a bubbled Escape must not also be
+  // read by review.js as its own "close the shortcut sheet" shortcut.
   if (e.key === 'Escape') { e.stopPropagation(); dismissDetail(); return; }
   // Same guard as review.js: modifier chords are browser/OS shortcuts
   // (Ctrl+X cut, Ctrl+U view-source, Cmd+F find, …), never decisions.
@@ -499,8 +513,8 @@ function onKey(e) {
     // preventDefault as review.js does: at 100%/200% the stage is scrollable,
     // so an unswallowed ArrowLeft/Right both navigates to the next photo and
     // nudges the outgoing image sideways first.
-    case 'ArrowRight': case 'j': e.preventDefault(); move(1); return;
-    case 'ArrowLeft': case 'k': e.preventDefault(); move(-1); return;
+    case 'ArrowRight': case 'j': e.preventDefault(); move(1, e.repeat); return;
+    case 'ArrowLeft': case 'k': e.preventDefault(); move(-1, e.repeat); return;
     default: break;
   }
   if (k === ' ') { e.preventDefault(); decide('keep', e.shiftKey); return; }
@@ -508,9 +522,18 @@ function onKey(e) {
   if (k === 'u' || k === 'U') { decide('undecide', e.shiftKey); return; }
   if (k === 'K') { decide('keeper', true); return; } // Shift is inherent in 'K'
   // Stop the event here: review.js's bubble-phase handler re-checks
-  // #modal-host after this capture-phase listener runs, and closeDetail()
-  // below empties it — without this, review.js would see an empty host and
-  // immediately reopen detail, making 'f' a no-op.
+  // #modal-host after this capture-phase listener runs. Whether that check
+  // still needs stopping depends on which of dismissDetail()'s two paths
+  // fires: when a run is behind us, exitOverlay() calls history.go(), which
+  // is async — #modal-host is still populated when the event bubbles, and
+  // review.js's own "stand down while a layer is mounted" guard would have
+  // handled it even without this. But when there is no run behind (a deep
+  // link straight into a photo route), exitOverlay() falls back to
+  // replace(), which runs closeOverlays() — and therefore empties the host —
+  // synchronously, in this same call stack. Without stopPropagation there,
+  // review.js would see an empty host on the same event and immediately
+  // reopen detail, making 'f' a no-op on exactly the path that has no other
+  // way out.
   if (k === 'f' || k === 'F') { e.stopPropagation(); dismissDetail(); return; }
   if (k === 'c' || k === 'C') { compare(); }
 }
