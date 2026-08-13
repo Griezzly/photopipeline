@@ -47,13 +47,6 @@ Canonicalising the path at ingest is the obvious fix; a migration would need to
 merge the duplicate rows rather than just delete them, since decisions can sit on
 either copy.
 
-**KI-3 — the next `scan` re-ingests finished JPEGs as new photos.** `_finished`
-defaults to living inside the library and `jpg` is an ingest extension, and
-`ingest_directory` has no exclusion for managed trees. `_review` has had this
-problem all along, so it is not new, but `finish` makes it far easier to hit. The
-`.photopipe-tree` marker that `output/mod.rs` already writes would give the
-walker something cheap to skip on.
-
 **KI-4 — output JPEGs carry no metadata.** `encode_jpeg` uses `JpegEncoder`
 without `set_exif`/`set_icc_profile`, so finished files have no capture date,
 camera, lens or ICC tag, and viewers sort them by mtime. The spec never promised
@@ -103,6 +96,23 @@ it and holding the lock. Integration tests live in a separate crate, so
 ---
 
 ## Fixed on 2026-08-13 (second pass)
+
+**KI-3 — `scan` no longer re-ingests photopipe's own output.** `_finished`
+defaults to living inside the library and `jpg` is an ingest extension, so the
+next `scan` catalogued the finished JPEGs as new photos — which would then become
+keepers to develop, and so on. `_review` and the keepers export have always had
+the same shape, so all three are closed at once now that `finish` writes the
+`.photopipe-tree` marker the walker can test for.
+
+The exclusion lives in a new `collect_ingestable`, shared by `ingest_directory`
+and `count_pending` rather than written twice. Those two walks disagreeing over
+sidecar JPGs *is* BE-1, further down this file, and it left the UI reporting
+"N new photos" forever; sharing one function is what stops that recurring. A root
+that is itself a managed tree is still walked, and an unmarked directory is
+ordinary content — people do keep photos in a folder called `_finished`.
+
+Verified live: `finish --out <library>/_finished` writes 3 JPEGs inside the
+library, and the next scan finds 3 files rather than 6 and processes none.
 
 **KI-2 — the finished tree is now pruned.** Flipping a verdict from keep to
 reject left the JPEG, its `.pp3` and the `edits` row in place with no way to
