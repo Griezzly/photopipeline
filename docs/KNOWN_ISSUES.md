@@ -3,7 +3,7 @@
 Findings that are real, reproduced, and deliberately **not** fixed in the change
 that surfaced them. Each says why it was left, and what fixing it involves.
 
-Last updated: 2026-08-11. The **Open** section below was filled by the automatic
+Last updated: 2026-08-13. The **Open** section below was filled by the automatic
 RAW development work (`docs/superpowers/specs/2026-07-29-auto-develop-design.md`,
 Phase 1). Everything the review-UI redesign left behind was fixed on
 `fix/known-issues` and is recorded further down.
@@ -14,9 +14,38 @@ Phase 1). Everything the review-UI redesign left behind was fixed on
 
 From Phase 1 of automatic RAW development (`feat/auto-develop`). All were
 reproduced, none is a regression of existing behaviour, and each was left because
-it sits outside that phase's scope.
+it sits outside that phase's scope. KI-11 and KI-12 were found later, during the
+CHECKPOINT review on 2026-08-13.
 
 ### Affects photos, not just internals
+
+**KI-11 — `photopipe scan --reprocess` is accepted and ignored.** The flag is
+declared in the CLI, documented as "force re-analysis of already-processed
+files", bound to `_reprocess` in `cmd_scan`, and then never read; nothing named
+`reprocess` exists anywhere in the pipeline crate. A user asking for a forced
+re-analysis silently gets an ordinary incremental scan. This is how the CHECKPOINT
+review nearly drew the wrong conclusion: the sample library only picked up fresh
+`sharpness` rows because a differently-spelled path created new `files` rows (see
+KI-12), not because `--reprocess` did anything.
+
+Fixing it is design work, not plumbing: "re-analysis" has to define what it
+invalidates — preview cache, `sharpness`, `iqa`, `embeddings`, defect flags, or
+all of them — and each choice has a different cost. Until then the flag should
+arguably fail loudly rather than lie.
+
+**KI-12 — the same photo is catalogued twice when the path is spelled
+differently.** `library_key` is an xxh3 of the *canonicalised* folder path, so
+`./example-pictures` and `/Users/…/example-pictures` open the same catalog, but
+`files.path` stores the path as given. Scanning a library once by relative path
+and once by absolute path therefore inserts every photo a second time, with an
+identical `content_hash`, and the second copy carries none of the first's
+decisions. Observed live: 6 rows for 3 files, keeper verdicts on 3 of them.
+
+This breaks the "re-running `scan` does zero work" constraint whenever the
+spelling changes, and it feeds dedupe a set of guaranteed-identical pairs.
+Canonicalising the path at ingest is the obvious fix; a migration would need to
+merge the duplicate rows rather than just delete them, since decisions can sit on
+either copy.
 
 **KI-2 — the finished tree is never pruned.** Flipping a verdict from keep to
 reject leaves the JPEG, its `.pp3` and the `edits` row in place, with no way to
@@ -88,6 +117,37 @@ it and holding the lock. Integration tests live in a separate crate, so
 `#[cfg(test)]` cannot work; a `test-support` cargo feature would.
 
 ---
+
+## Fixed on 2026-08-13
+
+**Sharpening was pinned to the cap for every photo.** Found during the CHECKPOINT
+review, which is exactly the review question it was blocking.
+
+`decide()` documented its input as "roughly 0..1" and clamped it there, but
+`defect::blur` computes `s_global` as the variance of the Laplacian — unbounded,
+and 128 / 357 / 1491 on the three sample ARWs. Every real frame saturated the
+clamp to 1.0, so `sharpen_amount` was always exactly `SHARPEN_MAX`. The safety
+property the comment claimed — "a genuinely soft frame is never sharpened into
+crunch" — was not in force, and a visibly out-of-focus frame was getting maximum
+sharpening. All 23 `decide` tests passed throughout, because every one of them
+feeds `sharp(0.5)`, `sharp(0.05)` or `sharp(0.95)`: fabricated values in a range
+no photograph produces.
+
+This is the second instance of the defect class recorded at the bottom of this
+file, and the sharper lesson is the one about **units crossing a module
+boundary**. Both sides were individually reasonable — an unbounded variance is
+the right blur metric, and a 0..1 knob is the right recipe field — and the bug
+lived entirely in the undocumented assumption between them, held in place by a
+doc comment that asserted the contract instead of checking it.
+
+Fixed by renaming the field to `s_relative` and computing it with
+`relative_sharpness()` against the `sharpness_baseline` percentiles the blur
+flagger already uses, falling back per-bucket → global sentinel → neutral. Note
+the fix only bites once `photopipe calibrate` has run: `scan` deliberately does
+not build baselines (spec §7 wants calibration run over a few hundred photos per
+lens), so an uncalibrated library gets neutral sharpening by design. Verified on
+the sample set: 0.800 → 0.000 for the out-of-focus frame, 0.407 for the mid one,
+0.800 held for the sharpest, and `finish` still reports 0 rendered on a re-run.
 
 ## Fixed on 2026-08-11
 

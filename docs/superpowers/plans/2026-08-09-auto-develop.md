@@ -3719,14 +3719,14 @@ a look sits on top of the baseline, a bad `exposure_ev` and a bad LUT are
 indistinguishable in the output. The whole reason the analytic layer comes first
 is that it can be judged alone.
 
-- [ ] **Render a real shoot**
+- [x] **Render a real shoot** — 2026-08-13, on the ILCE-6300 sample set (three frames; the Grindelwald library referenced below is no longer registered).
 
 ```bash
 cargo build --release
 ./target/release/photopipe finish ~/Photos/Grindelwald --out /tmp/finished-baseline
 ```
 
-- [ ] **Review the output by eye and answer each question**
+- [x] **Review the output by eye and answer each question**
 
 Open `/tmp/finished-baseline` in a file browser and look at every image:
 
@@ -3755,7 +3755,7 @@ Open `/tmp/finished-baseline` in a file browser and look at every image:
    default-converted sRGB, so a baseline with its own contrast curve feeds it an
    input distribution it never saw.
 
-- [ ] **Record the outcome**
+- [x] **Record the outcome** — spec open item 5 closed, item 2 carried forward with reasons; see A11.
 
 Write what you changed and why into the spec's open-items section, ticking off
 items 2 and 5. If you changed any formula, bump `DECIDER_VERSION` in `decide.rs`
@@ -3766,11 +3766,19 @@ git add docs/superpowers/specs/2026-07-29-auto-develop-design.md crates/pipeline
 git commit -m "docs(spec): close open items 2 and 5 after baseline review"
 ```
 
-- [ ] **Explicit go/no-go**
+- [x] **Explicit go/no-go** — **GO, reviewed 2026-08-13.** Recorded as A11 in the
+spec. Exposure, white balance, highlight recovery and `base.pp3` neutrality pass.
+Sharpening failed and was fixed, not tuned: `decide()` clamped an unbounded
+variance-of-Laplacian to 0..1, pinning every frame to `SHARPEN_MAX`; it now
+normalises against the calibrated baseline (`DECIDER_VERSION` = `decide-3`).
+Denoise is explicitly carried forward — no high-ISO material exists to judge it,
+and the look does not depend on it.
 
-State plainly whether the baseline is good enough to build a look on. If it is
-not, iterate on Phase 1 and review again. Phase 2 does not start on a baseline
-you are not happy with.
+Two limits on this sign-off, so Phase 2 does not inherit false confidence: the
+corpus is three photographs, and the sharpness baseline they were normalised
+against was built from those same three, so its p10/p90 are the set's own min and
+max. The mechanism is verified end-to-end; its calibration is not. Re-run
+`photopipe calibrate` and re-review once a few hundred frames per lens exist.
 
 ---
 

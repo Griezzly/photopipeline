@@ -530,7 +530,17 @@ Open items:
    templates worth cross-checking (GPL-2.0; reference only, no code reuse).
    *Scheduled as Phase 0 work.*
 2. **ISO→denoise anchors** in §6 need calibration against the user's real
-   high-ISO files before they can be claimed as tuned. *Phase 1.*
+   high-ISO files before they can be claimed as tuned. *Phase 1.* **Still open
+   after the 2026-08-13 CHECKPOINT: no high-ISO material exists to calibrate
+   against.** Every available frame is ISO 100, so `denoise_luma` and
+   `denoise_chroma` came out 0.00 across the board and the anchors were never
+   exercised, let alone validated. They remain the spec's starting shape and must
+   not be described as tuned. Phase 2 does not depend on them — the look model
+   consumes a developed sRGB image, not the denoise parameters — so this is
+   carried forward rather than blocking. Closing it needs either an ISO ladder
+   shot on the ILCE-6300 (same sensor, same lens, one static scene) or a
+   licence-clean public set; a foreign camera's noise character would calibrate
+   the anchors for the wrong sensor.
 3. **`tools/export_lut3d.py`** — export the predictor CNN and dump basis LUTs,
    confirming the custom CUDA op is excluded from the traced graph. *Phase 2;
    downgraded from research risk to routine by A5.*
@@ -539,7 +549,30 @@ Open items:
    propagating an error. *Phase 1.*
 5. **`base.pp3` contents** — the neutral baseline must be validated as close to a
    default raw conversion, since the look model's input distribution depends on
-   it. *Phase 1, and part of the checkpoint's sign-off criteria.*
+   it. *Phase 1, and part of the checkpoint's sign-off criteria.* **Closed at the
+   2026-08-13 CHECKPOINT.** Verified by reading the profile against RawTherapee
+   5.13 and by eye on three rendered frames: `Brightness`, `Contrast` and
+   `Saturation` are 0, `Curve`/`Curve2` are empty, `HistogramMatching` and
+   `CurveFromHistogramMatching` are false, `[Film Simulation]` and
+   `[ColorToning]` are disabled, and `OutputProfile=RTv4_sRGB` is pinned so a
+   RawTherapee release cannot silently hand the model a Rec2020 image. The
+   renders carry no look of their own. No change was needed.
+
+**A11 — the CHECKPOINT is signed off with item 2 explicitly carried forward.**
+Reviewed 2026-08-13 on the ILCE-6300 sample set. Exposure, white balance,
+highlight recovery and `base.pp3` neutrality all pass. Sharpening failed the
+review and was fixed rather than tuned: `decide()` was clamping an unbounded
+variance-of-Laplacian to 0..1, so every frame got `SHARPEN_MAX` regardless of how
+soft it was (see `docs/KNOWN_ISSUES.md`, fixed 2026-08-13). Denoise could not be
+judged at all — see item 2.
+
+Two caveats on the strength of this sign-off, recorded so Phase 2 does not
+inherit false confidence. The corpus is **three photographs**, so "no systematic
+exposure bias" means no bias visible in three frames. And the sharpness baseline
+those three were normalised against was itself built from the same three, making
+its p10/p90 the set's own min and max; §7 asks for a few hundred photos per lens
+before the percentiles mean anything. The baseline mechanism is verified
+end-to-end, its calibration is not.
 
 ## 14. References
 
