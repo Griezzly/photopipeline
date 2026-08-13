@@ -7,6 +7,7 @@
 
 pub mod decide;
 pub mod illuminant;
+pub mod lut;
 pub mod measure;
 pub mod pp3;
 pub mod render;
