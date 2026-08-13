@@ -172,6 +172,26 @@ const ROUTES = {
     if (!folder) return '/libraries';
     await window.pp.openDuplicates(folder);
   },
+
+  async photo(r) {
+    closeOverlays('detail');
+    const folder = await ensureLibrary();
+    if (!folder) return '/libraries';
+    // Only render the grid underneath when it is not already there —
+    // openReview() re-runs load(), which would refetch on every arrow key.
+    if (window.pp.state.view !== 'review') await window.pp.openReview(folder);
+    const list = window.pp.reviewPhotos();
+    const i = list.findIndex((p) => p.file_id === r.photoId);
+    if (i < 0) {
+      window.pp.toast({
+        kind: 'info',
+        title: 'That photo is not in the current view',
+        body: 'It may be filtered out, or it belongs to a different library.',
+      });
+      return '/review';
+    }
+    window.pp.openDetail(i);
+  },
 };
 
 /**

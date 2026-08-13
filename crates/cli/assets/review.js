@@ -566,9 +566,9 @@ function renderGrid() {
     const t = e.target.closest('.tile');
     if (!t) return;
     const i = Number(t.dataset.i);
-    if (!Number.isNaN(i)) {
+    if (!Number.isNaN(i) && photos[i]) {
       cursor = i;
-      window.pp.openDetail(cursor);
+      window.pp.go(`/review/photo/${photos[i].file_id}`);
     }
   };
   scrollCursorIntoView();
@@ -827,7 +827,7 @@ function onKey(e) {
   if (k === 'u' || k === 'U') { decide(p, 'undecide', e.shiftKey); return; }
   // Shift is inherently held for Shift+K, so the keeper never advances.
   if (k === 'K') { decide(p, 'keeper', true); return; }
-  if (k === 'f' || k === 'F') { window.pp.openDetail(cursor); return; }
+  if (k === 'f' || k === 'F') { if (p) window.pp.go(`/review/photo/${p.file_id}`); return; }
   if (k === 'c' || k === 'C') { compareCursor(); }
 }
 

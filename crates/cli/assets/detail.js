@@ -184,14 +184,24 @@ export function closeDetail() {
   dumpState = 'loading';
 }
 
+/** What every user-facing close path calls: Escape, the ✕ button, `f`, and
+ *  the defensive "the list emptied under us" branches. The unmount itself
+ *  happens in closeDetail(), which the router calls when it applies the
+ *  parent route — so Escape and Back are literally the same operation.
+ *  closeDetail() must stay a pure unmount or this recurses. */
+function dismissDetail() {
+  window.pp.back('/review');
+}
+
+/** Stepping pushes one history entry per photo, so Back retraces the frames
+ *  you looked at. The router's photo applier is what actually calls
+ *  openDetail() — this only names the destination. */
 async function move(d) {
   const list = window.pp.reviewPhotos();
   if (!list.length) return;
   const n = Math.max(0, Math.min(list.length - 1, idx + d));
   if (n === idx) return;
-  idx = n;
-  window.pp.reviewSetIndex(idx);
-  await loadDump();
+  window.pp.go(`/review/photo/${list[n].file_id}`);
 }
 
 /** Apply the current photo, then advance to the next frame unless `stay`. */
@@ -402,7 +412,7 @@ function renderCameraSection() {
 function render() {
   if (!root) return;
   const p = current();
-  if (!p) { closeDetail(); return; } // defensive: list emptied under us
+  if (!p) { dismissDetail(); return; } // defensive: list emptied under us
   const list = window.pp.reviewPhotos();
   const name = basename(p.path);
 
@@ -449,7 +459,7 @@ function render() {
 }
 
 function wire() {
-  el('dt-esc').onclick = closeDetail;
+  el('dt-esc').onclick = dismissDetail;
   el('dt-full').onclick = toggleFullscreen;
   el('dt-prev').onclick = () => move(-1);
   el('dt-next').onclick = () => move(1);
@@ -479,7 +489,7 @@ function onKey(e) {
   // single Escape closes this overlay *and* reaches review.js's handler, which
   // then also shuts the shortcut sheet or a filter popover the user left open
   // behind the overlay. One Escape, one layer.
-  if (e.key === 'Escape') { e.stopPropagation(); closeDetail(); return; }
+  if (e.key === 'Escape') { e.stopPropagation(); dismissDetail(); return; }
   // Same guard as review.js: modifier chords are browser/OS shortcuts
   // (Ctrl+X cut, Ctrl+U view-source, Cmd+F find, …), never decisions.
   if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -501,7 +511,7 @@ function onKey(e) {
   // #modal-host after this capture-phase listener runs, and closeDetail()
   // below empties it — without this, review.js would see an empty host and
   // immediately reopen detail, making 'f' a no-op.
-  if (k === 'f' || k === 'F') { e.stopPropagation(); closeDetail(); return; }
+  if (k === 'f' || k === 'F') { e.stopPropagation(); dismissDetail(); return; }
   if (k === 'c' || k === 'C') { compare(); }
 }
 
@@ -520,7 +530,7 @@ function onKey(e) {
 export function detailRefresh() {
   if (!root) return;
   const list = window.pp.reviewPhotos();
-  if (!list.length) { closeDetail(); return; }
+  if (!list.length) { dismissDetail(); return; }
   // Re-anchor on the file, not the index. reviewReload() rebuilds and re-filters
   // the list, so with "undecided only" active the frames compare just decided
   // drop out of it and every later index shifts — leaving `idx` pointing at a
@@ -529,6 +539,7 @@ export function detailRefresh() {
   if (i >= 0) {
     idx = i;
     window.pp.reviewSetIndex(idx);
+    window.pp.setPath(`/review/photo/${list[idx].file_id}`);
     render(); // same photo, same dump — only the decision changed
     return;
   }
@@ -536,6 +547,7 @@ export function detailRefresh() {
   // now, but refetch the dump so the side panel is never another photo's.
   idx = Math.max(0, Math.min(list.length - 1, idx));
   window.pp.reviewSetIndex(idx);
+  window.pp.setPath(`/review/photo/${list[idx].file_id}`);
   loadDump();
 }
 
