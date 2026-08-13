@@ -428,6 +428,78 @@ pub async fn get_export_estimate(
         })
 }
 
+// ── Develop (finish) ─────────────────────────────────────────────────────────
+
+/// Everything the Develop screen needs to decide whether starting a run makes
+/// sense, and to describe the run before it starts.
+///
+/// A missing renderer is a setup problem, not a job failure: surfacing it as a
+/// run that dies three seconds in would send the user looking for a photo
+/// problem. So the probe happens here, once, and the UI refuses to start and
+/// explains instead.
+#[derive(Debug, Serialize)]
+pub struct FinishEstimate {
+    /// Photos with `verdict = 'keep'`.
+    pub keepers: u64,
+    /// Of those, how many are actually RAW. `finish` develops nothing else.
+    pub raw_keepers: u64,
+    /// Resolved output directory — config-derived, not user-entered.
+    pub out_dir: String,
+    pub renderer_available: bool,
+    pub renderer_version: Option<String>,
+    /// False means the run produces baseline JPEGs. Normal, not an error: the
+    /// look's weights are research-use only and often simply absent.
+    pub look_available: bool,
+}
+
+/// Where `finish` would write for the active library, resolved exactly as
+/// `cmd_finish` does. There is no `--out` equivalent in the UI by design.
+fn resolve_finish_out_dir(state: &AppState, lib: &ActiveLibrary) -> PathBuf {
+    expand_tilde(&pipeline::substitute_library(
+        &state.cfg.develop.finished_dir,
+        &lib.folder,
+    ))
+}
+
+pub async fn get_finish_estimate(
+    State(state): State<AppState>,
+) -> Result<Json<FinishEstimate>, StatusCode> {
+    let lib = state.active()?;
+    let out_dir = resolve_finish_out_dir(&state, &lib);
+    let cfg = state.cfg.clone();
+
+    tokio::task::spawn_blocking(move || -> anyhow::Result<FinishEstimate> {
+        let work = lib.catalog.keepers_to_develop()?;
+        let raw_keepers = work
+            .iter()
+            .filter(|w| {
+                pipeline::ingest::FileFormat::from_ext(&w.file_format).is_some_and(|f| f.is_raw())
+            })
+            .count() as u64;
+
+        // One subprocess spawn per estimate, which is one per click on the
+        // rail — not per photo, which is what the probe inside `finish_folder`
+        // already avoids.
+        let probe = pipeline::develop::render::Pp3Renderer::new(&cfg.develop).probe();
+        Ok(FinishEstimate {
+            keepers: work.len() as u64,
+            raw_keepers,
+            out_dir: out_dir.to_string_lossy().into_owned(),
+            renderer_available: probe.is_ok(),
+            renderer_version: probe.ok(),
+            look_available: cfg.develop.look.enable
+                && pipeline::models::look_weights_present(&cfg.models),
+        })
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map(Json)
+    .map_err(|e| {
+        tracing::warn!(error = %e, "finish estimate failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
 // ── Folder browser, libraries, open, active ──────────────────────────────────
 
 #[derive(Serialize)]

@@ -3,6 +3,7 @@ pub mod embedder;
 pub mod iqa;
 pub mod lut_predictor;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -66,6 +67,26 @@ pub trait LookPredictor: Send + Sync {
 }
 
 // ── ModelHub ──────────────────────────────────────────────────────────────────
+
+/// Where the look predictor's two weight files live, as `(onnx, basis)`.
+fn look_weight_paths(cfg: &crate::config::ModelsConfig) -> (PathBuf, PathBuf) {
+    (
+        cfg.model_dir.join("lut3d_predictor.onnx"),
+        cfg.model_dir.join("lut3d_basis.npy"),
+    )
+}
+
+/// True when the look predictor's weights are on disk, *without* loading them.
+///
+/// The Develop screen needs to say up front whether a run will produce looked
+/// or baseline JPEGs, and building a whole [`ModelHub`] to answer that would
+/// mean an ONNX session init on a plain `GET`. Absent weights are the normal
+/// case, not an error: they are FiveK-derived and research-use only, so a
+/// checkout without them is expected.
+pub fn look_weights_present(cfg: &crate::config::ModelsConfig) -> bool {
+    let (onnx, basis) = look_weight_paths(cfg);
+    onnx.exists() && basis.exists()
+}
 
 pub struct ModelHub {
     pub embedder: Option<Arc<dyn Embedder>>,
@@ -157,9 +178,8 @@ impl ModelHub {
         };
 
         let look: Option<Arc<dyn LookPredictor>> = {
-            let onnx = cfg.model_dir.join("lut3d_predictor.onnx");
-            let basis = cfg.model_dir.join("lut3d_basis.npy");
-            if onnx.exists() && basis.exists() {
+            let (onnx, basis) = look_weight_paths(cfg);
+            if look_weights_present(cfg) {
                 match lut_predictor::Lut3dPredictor::load(&onnx, &basis) {
                     Ok(p) => {
                         tracing::info!("loaded look: {} v{}", p.name(), p.version());
