@@ -243,11 +243,25 @@ function stepIndex(s) {
   return lastStepIdx;
 }
 
-// True for a run that produced photos but could not develop every one. That is
-// an ordinary outcome — one unreadable file among 500 — not a failed run, and
-// the screen must not paint it red.
+// A finished run has three outcomes, not two.
+//
+// `isPartial` — some developed, some did not. An ordinary result: one
+// unreadable file among 500 is not a failed run, and the screen must not paint
+// it red.
+//
+// `allFailed` — photos were attempted and *none* came through. `finish_folder`
+// still returns Ok, because per-file failures are isolated by design, so the
+// job never reaches stage "failed" and without this the screen announced
+// "Developing complete" over a column of zeros. Nothing was produced; say so.
+//
+// Neither covers rendered === 0 with errored === 0, which is the everyday
+// "everything was already up to date" run — a success.
 function isPartial(sum) {
   return !!sum && sum.errored > 0 && sum.rendered > 0;
+}
+
+function allFailed(sum) {
+  return !!sum && sum.errored > 0 && sum.rendered === 0;
 }
 
 function summaryHtml(sum) {
@@ -263,13 +277,21 @@ function summaryHtml(sum) {
       <div class="dv-stats">${cells.map(([n, label]) => `
         <div class="stat"><div class="stat-n">${n.toLocaleString()}</div>
           <div class="stat-label">${label}</div></div>`).join('')}</div>
+      ${allFailed(sum)
+        ? `<div class="exp-note">All ${sum.errored.toLocaleString()}
+             attempted photo${sum.errored === 1 ? '' : 's'} failed, so nothing was written.
+             When every one fails the cause is usually shared — RawTherapee missing or
+             misconfigured, or the originals no longer where the catalog expects them.
+             The reason for each is in the terminal running
+             <code>photopipe serve</code>.</div>`
+        : ''}
       ${isPartial(sum)
         ? `<div class="exp-note">${sum.errored.toLocaleString()} photo${sum.errored === 1 ? '' : 's'}
              could not be developed and ${sum.errored === 1 ? 'was' : 'were'} skipped; the rest
              came through. The reason for each is in the terminal running
              <code>photopipe serve</code>.</div>`
         : ''}
-      ${!runInfo.look_available
+      ${!runInfo.look_available && !allFailed(sum)
         ? '<div class="exp-note">No look model is installed, so these are baseline JPEGs: ' +
           'exposure, white balance and sharpening only.</div>'
         : ''}
@@ -287,11 +309,13 @@ function render(s) {
   const folder = state.activeFolder || '';
 
   const title = failed ? 'Developing failed'
-    : done ? (isPartial(sum) ? 'Developed with some skipped' : 'Developing complete')
+    : done ? (allFailed(sum) ? 'No photo could be developed'
+      : isPartial(sum) ? 'Developed with some skipped'
+      : 'Developing complete')
     : counted ? `Developing ${s.files_total.toLocaleString()} photo${s.files_total === 1 ? '' : 's'}`
     : 'Starting…';
 
-  const pill = failed ? '<span class="pill pill-reject">Failed</span>'
+  const pill = failed || allFailed(sum) ? '<span class="pill pill-reject">Failed</span>'
     : done ? `<span class="pill ${isPartial(sum) ? 'pill-warn' : 'pill-done'}">${
         isPartial(sum) ? 'Partly done' : 'Done'}</span>`
     : '<span class="pill pill-run">Developing</span>';
@@ -388,7 +412,14 @@ function poll() {
         // The output path is deliberately not in the body: it is an absolute
         // path, it is already on the card behind this toast, and a long
         // unbroken one overflows the toast rather than wrapping.
-        window.pp.toast(isPartial(sum)
+        window.pp.toast(allFailed(sum)
+          ? {
+              kind: 'error',
+              title: `No photo could be developed`,
+              body: 'All ' + sum.errored.toLocaleString() + ' failed. The reason for each is ' +
+                    'in the terminal running photopipe serve.',
+            }
+          : isPartial(sum)
           ? {
               kind: 'warn',
               title: `${sum.rendered.toLocaleString()} developed, ${sum.errored.toLocaleString()} skipped`,
