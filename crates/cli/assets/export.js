@@ -14,7 +14,24 @@ export function closeExport() {
   if (c) c();
 }
 
+// An in-flight mount, so a second entry — a double-click, or the router
+// draining a queued /export navigation — joins it instead of building a
+// second modal. The exposed window is the estimate fetch below: nothing is
+// on screen yet, so every Export entry point is still clickable.
+let pending = null;
+
 export async function openExport() {
+  if (closeFn) return true; // already mounted
+  if (pending) return pending; // mount in flight — both callers get one answer
+  pending = openExportModal();
+  try {
+    return await pending;
+  } finally {
+    pending = null;
+  }
+}
+
+async function openExportModal() {
   let est;
   try {
     est = await api('GET', '/api/export/estimate');
@@ -41,7 +58,9 @@ export async function openExport() {
       // Only navigate when this close came from the user. When the router
       // tore the modal down on its way somewhere else, it had already moved
       // the current route off /export, and this is a no-op.
-      if (window.pp.routerPath() === '/export') window.pp.back('/review');
+      if (window.pp.routerPath() === '/export') {
+        window.pp.back(window.pp.parentOf('/export') || '/review');
+      }
     },
     body: `
       <div class="exp-body">
