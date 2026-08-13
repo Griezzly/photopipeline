@@ -13,7 +13,7 @@ let applying = false;   // re-entrancy guard
 // Routes that layer over a screen rather than replacing it. Dismissing one
 // must leave the whole run it belongs to — stepping pushes an entry per
 // photo, so a single back() would only reach the previous frame.
-const OVERLAY_ROUTES = new Set(['photo', 'compare', 'export']);
+const OVERLAY_ROUTES = new Set(['photo', 'compare', 'export', 'develop']);
 
 // ── Path parsing ─────────────────────────────────────────────────────────
 
@@ -34,6 +34,15 @@ export function parsePath(path) {
   if (s.length === 1 && s[0] === 'libraries') return { name: 'libraries' };
   if (s.length === 1 && s[0] === 'analyze') return { name: 'analyze' };
   if (s.length === 1 && s[0] === 'export') return { name: 'export' };
+  if (s[0] === 'develop') {
+    // /develop is the pre-flight confirm modal, /develop/run the checklist
+    // screen it starts. Two routes because they sit at different layers: the
+    // modal is an overlay over review or duplicates, the run is a screen of
+    // its own.
+    if (s.length === 1) return { name: 'develop' };
+    if (s.length === 2 && s[1] === 'run') return { name: 'developRun' };
+    return null;
+  }
   if (s[0] === 'review') {
     if (s.length === 1) return { name: 'review' };
     if (s[1] === 'photo' && int(s[2]) !== null) {
@@ -70,6 +79,13 @@ export function parentPath(r) {
       return '/duplicates';
     case 'export':
       return window.pp.state.view === 'duplicates' ? '/duplicates' : '/review';
+    // Same reasoning as export: the confirm modal is reachable from the rail
+    // over whichever screen is up. The run screen is entered from that modal
+    // and returns to review, not to libraries — a develop run only exists for
+    // a library you already have open.
+    case 'develop':
+      return window.pp.state.view === 'duplicates' ? '/duplicates' : '/review';
+    case 'developRun': return '/review';
     default: return '/libraries';
   }
 }
@@ -206,6 +222,25 @@ async function ensureLibrary() {
   return null;
 }
 
+/** The job slot's current state, or null when it cannot be read. Asked of the
+ *  server rather than of this page: a run outlives any one screen, so a
+ *  reload — or a second tab — has to see it too. */
+async function finishStatus() {
+  try {
+    return await window.pp.api('GET', '/api/finish/status');
+  } catch (e) {
+    return null;
+  }
+}
+
+/** True while a develop run holds the job slot. One predicate, because both
+ *  develop appliers ask the same question and a drifting copy would strand
+ *  the screen on a run that had already finished. */
+function isFinishRunning(s) {
+  return !!s && s.kind === 'finish'
+    && s.stage !== 'idle' && s.stage !== 'done' && s.stage !== 'failed';
+}
+
 /** Tear down every mounted overlay except `keep`. Top of the stack first:
  *  compare mounts above detail when opened from it with `c`. Each of these
  *  is a no-op when that overlay is closed, and `?.` covers the load order
@@ -214,6 +249,7 @@ function closeOverlays(keep) {
   if (keep !== 'compare') window.pp.closeCompare?.();
   if (keep !== 'detail') window.pp.closeDetail?.();
   if (keep !== 'export') window.pp.closeExport?.();
+  if (keep !== 'develop') window.pp.closeDevelop?.();
 }
 
 const ROUTES = {
@@ -339,6 +375,39 @@ const ROUTES = {
     // openCompare then falls back to the group's first two members.
     const ok = await window.pp.openCompare(r.groupId, payload && payload.fileIds);
     if (!ok) return parentPath(r);
+  },
+
+  async develop(r) {
+    closeOverlays('develop');
+    const folder = await ensureLibrary();
+    if (!folder) return '/libraries';
+    // A run already in flight owns the screen. Offering the confirm modal
+    // would only offer to start a second one, which POST /api/finish answers
+    // with a 409 — so send the user to the run they already have.
+    if (isFinishRunning(await finishStatus())) return '/develop/run';
+    // Reachable from the rail over review or duplicates, exactly like export.
+    // A cold reload of #/develop has neither, and gets review.
+    if (window.pp.state.view !== 'review' && window.pp.state.view !== 'duplicates') {
+      await window.pp.openReview(folder);
+    }
+    const ok = await window.pp.openDevelop();
+    // parentPath reads state.view, so it must run after the screen is up.
+    if (!ok) return parentPath(r);
+  },
+
+  async developRun() {
+    closeOverlays(null);
+    const folder = await ensureLibrary();
+    if (!folder) return '/libraries';
+    // Only worth restoring when the server still has this run: either in
+    // flight, or finished with a summary the screen can show. Unlike analyze
+    // (amendment A2), a *finished* develop run is worth returning to — the
+    // counts and the output path are the point of the screen, and JobState
+    // keeps them until the next job replaces it.
+    const s = await finishStatus();
+    const finished = s && s.kind === 'finish' && (s.summary || s.error);
+    if (!isFinishRunning(s) && !finished) return '/review';
+    await window.pp.openDevelopRun();
   },
 
   async export(r) {

@@ -38,7 +38,8 @@ Four decisions were settled during brainstorming:
 
 1. **Scope: screens plus overlays.** The four screens (libraries, analyze,
    review, duplicates) and the three overlay layers (photo detail, compare,
-   export) get routes. Filters, sort, and cursor do not.
+   export) get routes. Filters, sort, and cursor do not. The Develop screen
+   landed after this was written and adds one of each — see A4.
 2. **Hash routing**, not `pushState` paths. The server's `/:file` static-asset
    route would otherwise swallow `/review`, and a hash can never 404 on reload.
    This is a localhost single-user tool; pretty URLs buy nothing here.
@@ -78,6 +79,8 @@ separate path→function mapping for restores; two mappings will drift.
 | `#/review/compare/:groupId` | `openReview` + `openCompare(groupId)` |
 | `#/review/photo/:photoId/compare/:groupId` | `openReview` + `openDetail` + `openCompare(groupId)` |
 | `#/export` | parent screen + `openExport()` modal |
+| `#/develop` | parent screen + `openDevelop()` confirm modal; redirects to `#/develop/run` when a run is already in flight |
+| `#/develop/run` | `openDevelopRun()` — the checklist screen; see A4 |
 | empty or unknown | `replace()` to `#/review` if a library is active, else `#/libraries` |
 
 `:id` is a `file_id`; `:groupId` is a duplicate cluster's `group_id`. Both are
@@ -257,3 +260,44 @@ an auto-repeating key (`event.repeat`) into a single `replace()` rather than
 one `go()` per frame, so a held key is treated as one gesture rather than as
 many deliberate visits — which also keeps ordinary browsing well under the
 limit that degradation exists to catch.
+
+### A4 — the Develop screen, added after this spec was approved
+
+Recorded 2026-08-13. The Develop screen (`photopipe finish` in the UI) shipped
+between this spec's approval and this branch merging, so it is not in the
+"Scope" decision above. It gets two routes rather than one, because it is two
+things at two different layers:
+
+- **`#/develop` — the pre-flight confirm modal.** An overlay, parented on
+  review or duplicates exactly as `#/export` is, and reached the same way: a
+  rail cell calling `go('/develop')`. Same mount discipline as export, for the
+  same reasons — a `closeDevelop()` the router can call, an `onClose` that only
+  navigates when the current route is still `/develop`, and a `pending` guard so
+  a double entry joins the in-flight mount instead of stacking a second modal.
+- **`#/develop/run` — the checklist screen.** A screen route. Its parent is
+  `/review`, not the default `/libraries`: a develop run only exists for a
+  library that is already open.
+
+Confirming the modal **replaces** rather than pushes, so the modal's entry
+becomes the run screen. Back from a run therefore lands on the screen the rail
+was clicked from and never re-opens a confirm dialog for a run already going —
+the same push-on-entry / replace-on-exit shape A2 settled for analyze.
+
+Two behaviours differ from the analyze precedent, both because a develop run is
+long (roughly an hour for 500 photos) and its result is the point of the screen:
+
+- **A finished run is worth returning to.** A2 redirects away from `#/analyze`
+  once its job is done; `#/develop/run` restores whenever the job slot still
+  holds a finish run that is either in flight **or** carries a summary. The
+  counts and the output path are what the user came for, and `JobState` keeps
+  them until the next job replaces them.
+- **`#/develop` yields to a run in progress.** Entering the confirm modal while
+  a run is in flight would only offer to start a second one, which
+  `POST /api/finish` answers with a 409 — the single job slot again. The applier
+  checks `GET /api/finish/status` first and redirects to `#/develop/run`.
+
+`openDevelopRun()` re-fetches `GET /api/finish/estimate` when it is restored
+cold, because a reload has no confirm modal behind it to have supplied the
+resolved output path or whether a look is active. Without it the screen would
+name the library instead of the output folder, and would claim baseline JPEGs
+whether or not a look model is installed.

@@ -275,14 +275,13 @@ photopipe serve --port 8808         # same, on a different port
 Screens and overlays are addressable, e.g. `#/libraries`, `#/analyze`,
 `#/review`, `#/review/photo/<file_id>`, `#/duplicates`,
 `#/duplicates/compare/<group_id>`, `#/review/photo/<file_id>/compare/<group_id>`,
-and `#/export`. The browser's Back button steps back through screens and
+`#/export`, `#/develop` and `#/develop/run`. The browser's Back button steps back through screens and
 closes overlays rather than leaving the app, and reloading returns you to the
 screen you were on.
 
 The app is a single-page UI with a navigation rail down the left edge:
-**Libraries → Review → Duplicates → Export → Develop**. Review, Duplicates, and
-Export are disabled until a library is active. **Develop** (RAW → JPEG output)
-is a placeholder — it renders disabled with a dot marker and does nothing yet.
+**Libraries → Review → Duplicates → Export → Develop**. All four of Review,
+Duplicates, Export and Develop are disabled until a library is active.
 A theme toggle switches between dark (the default) and light; the choice
 persists across reloads via `localStorage`.
 
@@ -377,9 +376,21 @@ for zoom and pan; `a` / `d` make the left or right frame the keeper directly.
 
 **Export.** The **Export** rail entry opens a dialog estimating how many kept
 files and how many bytes will be copied to `_keepers/` (relative to where
-`photopipe serve` was started); confirming copies the RAW originals as-is.
-Nothing is developed or converted yet — that's the Develop placeholder's job in
-a future version.
+`photopipe serve` was started); confirming copies the RAW originals as-is —
+Export hands you the RAWs untouched, while turning them into JPEGs is the
+Develop screen's job.
+
+**Develop.** The **Develop** rail entry is `photopipe finish` with a screen on
+it. It opens a dialog reporting how many of your keepers are RAW (only those
+are developed), the output folder resolved from `[develop] finished_dir`,
+whether the adaptive look is active, and a **Rebuild every photo from scratch**
+toggle. Confirming starts the run and hands over to a checklist that reports
+each photo through `measuring → rendering → applying look → encoding`, with a
+running count of photos done. A run is serial by design — `rawtherapee-cli`
+already uses every core — so budget roughly an hour per 500 photos; leaving the
+screen does not stop it, and returning to `#/develop/run` rejoins it. Re-running
+develops only what has changed. Some photos failing is reported as a partial
+success, not a failed run.
 
 ### Review tree (file-manager browsing)
 

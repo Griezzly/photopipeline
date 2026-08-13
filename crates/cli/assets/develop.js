@@ -29,21 +29,42 @@ let lastStepIdx = 0;
 
 // What the estimate said when this run was started: the resolved output path
 // and whether a look is active. Kept so the running screen and the summary can
-// state both without re-asking the server mid-run.
+// state both without re-asking the server mid-run. Refilled on a cold restore
+// of `/develop/run`, where there was no modal to populate it.
 let runInfo = { out_dir: '', look_available: false };
 
-export async function openDevelop() {
-  // Attach to a develop run already in flight rather than starting a second
-  // one — the rail is clickable again the moment the screen is left.
-  let status = null;
-  try { status = await api('GET', '/api/finish/status'); } catch (e) { /* treat as idle */ }
-  if (status && status.kind === 'finish' && isRunning(status.stage)) {
-    if (!runInfo.out_dir) runInfo.out_dir = status.folder;
-    enter();
-    poll();
-    return;
-  }
+// The live confirm modal's close function, or null — the router needs to tear
+// this down when it applies a different route. Same shape as export.js.
+let closeFn = null;
 
+/** Pure unmount, for the router's overlay teardown. Never navigates: the
+ *  onClose hook below checks the current route precisely so a teardown the
+ *  router initiated does not bounce it somewhere else. */
+export function closeDevelop() {
+  const c = closeFn;
+  closeFn = null;
+  if (c) c();
+}
+
+// An in-flight mount, so a second entry — a double-click, or the router
+// draining a queued /develop navigation — joins it rather than stacking a
+// second modal. The exposed window is the estimate fetch, during which nothing
+// is on screen yet and every entry point is still clickable.
+let pending = null;
+
+/** Route `/develop`: the pre-flight confirm modal, over whichever screen is up. */
+export async function openDevelop() {
+  if (closeFn) return true; // already mounted
+  if (pending) return pending; // mount in flight — both callers get one answer
+  pending = openDevelopModal();
+  try {
+    return await pending;
+  } finally {
+    pending = null;
+  }
+}
+
+async function openDevelopModal() {
   let est;
   try {
     est = await api('GET', '/api/finish/estimate');
@@ -53,7 +74,7 @@ export async function openDevelop() {
       title: 'Could not size the develop run',
       body: e.status === 409 ? 'No library is open.' : e.message,
     });
-    return;
+    return false;
   }
 
   if (!est.renderer_available) {
@@ -63,7 +84,7 @@ export async function openDevelop() {
       body: 'photopipe develops RAW files through rawtherapee-cli. Install RawTherapee, ' +
             'set [develop] rawtherapee_path in your config, then run `photopipe doctor`.',
     });
-    return;
+    return false;
   }
 
   if (!est.raw_keepers) {
@@ -75,14 +96,10 @@ export async function openDevelop() {
           'not RAW files, and photopipe only develops RAWs.'
         : 'Keep some photos in Review first — developing works from your keepers.',
     });
-    return;
+    return false;
   }
 
-  confirmAndStart(est);
-}
-
-function isRunning(stage) {
-  return stage !== 'idle' && stage !== 'done' && stage !== 'failed';
+  return confirmAndStart(est);
 }
 
 function confirmAndStart(est) {
@@ -93,6 +110,16 @@ function confirmAndStart(est) {
     title: `Develop ${n.toLocaleString()} photo${n === 1 ? '' : 's'}`,
     subtitle: 'Originals are never touched. Finished JPEGs are written alongside them.',
     width: 540,
+    onClose: () => {
+      closeFn = null;
+      // Only navigate when the user closed this. When the router tore the
+      // modal down on its way elsewhere — including the confirm path below,
+      // which navigates first and lets the router unmount — the current route
+      // has already moved off /develop and this is a no-op.
+      if (window.pp.routerPath() === '/develop') {
+        window.pp.back(window.pp.parentOf('/develop') || '/review');
+      }
+    },
     body: `
       <div class="exp-body">
         <div>
@@ -136,6 +163,8 @@ function confirmAndStart(est) {
       </div>`,
   });
 
+  closeFn = m.close;
+
   m.el.querySelector('#dv-cancel').onclick = () => m.close();
 
   const go = m.el.querySelector('#dv-go');
@@ -162,21 +191,45 @@ function confirmAndStart(est) {
           });
       return;
     }
-    m.close();
+    // Navigate first and let the router unmount the modal: closing it here
+    // would fire onClose while the route is still /develop, which would send
+    // us back to review instead of on to the run.
+    //
+    // `replace`, not `go` — the modal's entry is a step on the way to the run
+    // screen, not a place to return to. Back from the run then lands on the
+    // screen the rail was clicked from, and never re-opens a confirm dialog
+    // for a run that is already going. Same push-on-entry / replace-on-exit
+    // shape the analyze screen uses (spec A2).
     runInfo = { out_dir: est.out_dir, look_available: est.look_available };
-    enter();
-    poll();
+    window.pp.replace('/develop/run');
   };
   go.onclick = run;
   m.el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !go.disabled) { e.preventDefault(); run(); }
   });
+  return true;
 }
 
-function enter() {
+/** Route `/develop/run`: the checklist screen, and the summary it ends on.
+ *
+ *  Reached by confirming the modal, and by a reload or a Back into a run that
+ *  is still going — the router only applies this route once it has confirmed
+ *  with the server that there is a run worth showing. */
+export async function openDevelopRun() {
+  // A cold restore has no modal behind it to have filled these in. Without
+  // the estimate the screen would name the library instead of the output
+  // folder, and the summary would claim baseline JPEGs whether or not a look
+  // model is installed.
+  if (!runInfo.out_dir) {
+    try {
+      const est = await api('GET', '/api/finish/estimate');
+      runInfo = { out_dir: est.out_dir, look_available: est.look_available };
+    } catch (e) { /* the summary still carries out_dir; the look line waits */ }
+  }
   lastStepIdx = 0;
   show('develop');
   render(null);
+  poll();
 }
 
 function stepIndex(s) {
@@ -306,7 +359,10 @@ function render(s) {
 
   el.querySelector('#dv-back').onclick = () => {
     stopPolling();
-    window.pp.openReview(state.activeFolder);
+    // `replace`, matching the analyze screen: a finished — or still running —
+    // job screen is not somewhere Back should re-enter. The run itself is
+    // unaffected either way; it lives on the server, not on this screen.
+    window.pp.replace('/review');
   };
 }
 
@@ -364,4 +420,4 @@ function poll() {
   tick();
 }
 
-Object.assign(window.pp, { openDevelop });
+Object.assign(window.pp, { openDevelop, openDevelopRun, closeDevelop });
