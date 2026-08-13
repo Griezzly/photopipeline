@@ -555,13 +555,18 @@ function onKey(e) {
  * behind it can never disagree; this is what keeps that true across compare.
  */
 /** Keep the URL pointed at the frame actually on screen — but only when the
- *  router is still on a photo route. detailRefresh can run while a dismissal
+ *  router is on a bare photo route. detailRefresh can run while a dismissal
  *  is queued but not yet landed (compare.js's setKeeper does exactly that),
- *  and setPath would then replace the *compare* entry, sending the pending
- *  history.back() one entry too far and leaving compare mounted forever. */
+ *  and setPath would then replace whichever entry is current. If that is the
+ *  *compare* entry, the pending history.back() travels one entry too far and
+ *  onPop finds nothing to apply — compare stays mounted forever with the URL
+ *  naming the photo underneath. The anchored match is the whole point: a
+ *  prefix test would also accept /review/photo/482/compare/17.
+ */
 function syncDetailPath(fileId) {
-  const cur = window.pp.routerPath();
-  if (cur && cur.startsWith('/review/photo/')) window.pp.setPath(`/review/photo/${fileId}`);
+  if (/^\/review\/photo\/\d+$/.test(window.pp.routerPath() || '')) {
+    window.pp.setPath(`/review/photo/${fileId}`);
+  }
 }
 
 export function detailRefresh() {
