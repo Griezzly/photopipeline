@@ -507,7 +507,7 @@ function renderGrid() {
         <button class="btn btn-primary" id="rv-analyze">${icon('spark', 14, 2)}Analyze folder</button>
       </div>`;
     el('rv-analyze').onclick = () => {
-      if (state.activeFolder) window.pp.startAnalyze(state.activeFolder);
+      if (state.activeFolder) window.pp.go('/analyze', { folder: state.activeFolder });
       else window.pp.openPicker(null);
     };
     return;
@@ -912,7 +912,7 @@ export async function openReview(folder, opts = {}) {
       kind: 'warn',
       title: `${plural(opts.pendingNew, 'new photo')} in this folder`,
       body: 'They are not in the catalog yet, so they do not appear in the grid or the counts.',
-      actions: [{ label: 'Re-analyze', onClick: () => window.pp.startAnalyze(folder) }],
+      actions: [{ label: 'Re-analyze', onClick: () => window.pp.go('/analyze', { folder }) }],
     });
   }
 

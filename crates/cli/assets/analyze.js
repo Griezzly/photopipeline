@@ -30,7 +30,7 @@ export async function startAnalyze(folder, opts = {}) {
     } catch (e) {
       if (e.status !== 409) {
         window.pp.toast({ kind: 'error', title: 'Could not start the analysis', body: e.message });
-        window.pp.openLibraries();
+        window.pp.replace('/libraries');
         return;
       }
       // 409 means a job is already in flight — fall through and attach to it.
@@ -115,9 +115,9 @@ function render(folder, s) {
       </div>
     </div>`;
 
-  el.querySelector('#an-back').onclick = () => { stopPolling(); window.pp.openLibraries(); };
+  el.querySelector('#an-back').onclick = () => { stopPolling(); window.pp.back('/libraries'); };
   const rv = el.querySelector('#an-review');
-  if (rv) rv.onclick = () => { stopPolling(); window.pp.openReview(folder); };
+  if (rv) rv.onclick = () => { stopPolling(); window.pp.replace('/review'); };
 }
 
 function stopPolling() { if (timer) { clearTimeout(timer); timer = null; } }
@@ -144,7 +144,8 @@ function poll(folder) {
                 'Tiles show a dash instead of a score.',
         });
       }
-      window.pp.openReview(s.folder || folder);
+      state.activeFolder = s.folder || folder;
+      window.pp.replace('/review');
       return;
     }
     if (s.stage === 'failed') {

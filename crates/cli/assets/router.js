@@ -139,6 +139,26 @@ const ROUTES = {
     await window.pp.openLibraries();
   },
 
+  async analyze(r, payload) {
+    closeOverlays(null);
+    if (payload && payload.folder) {
+      await window.pp.startAnalyze(payload.folder, { resume: !!payload.resume });
+      return;
+    }
+    // No payload means this route was restored — a reload, or Back into it.
+    // Only meaningful while a job is genuinely in flight; a finished one is
+    // not a screen worth returning to (spec amendment A2).
+    let s = null;
+    try { s = await window.pp.api('GET', '/api/analyze/status'); } catch (e) { /* below */ }
+    const running = s && s.folder
+      && s.stage !== 'idle' && s.stage !== 'done' && s.stage !== 'failed';
+    if (running) {
+      await window.pp.startAnalyze(s.folder, { resume: true });
+      return;
+    }
+    return (await ensureLibrary()) ? '/review' : '/libraries';
+  },
+
   async review(r, payload) {
     closeOverlays(null);
     const folder = await ensureLibrary();

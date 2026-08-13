@@ -114,7 +114,7 @@ async function openLibrary(folder) {
   try {
     res = await api('POST', '/api/open', { folder });
   } catch (e) {
-    if (e.status === 409) { window.pp.startAnalyze(folder, { resume: true }); return; }
+    if (e.status === 409) { window.pp.go('/analyze', { folder, resume: true }); return; }
     window.pp.toast({ kind: 'error', title: 'Could not open that library', body: e.message });
     return;
   }
