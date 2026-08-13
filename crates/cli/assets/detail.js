@@ -554,6 +554,16 @@ function onKey(e) {
  * The header comment on this module claims the decision bar here and the tile
  * behind it can never disagree; this is what keeps that true across compare.
  */
+/** Keep the URL pointed at the frame actually on screen — but only when the
+ *  router is still on a photo route. detailRefresh can run while a dismissal
+ *  is queued but not yet landed (compare.js's setKeeper does exactly that),
+ *  and setPath would then replace the *compare* entry, sending the pending
+ *  history.back() one entry too far and leaving compare mounted forever. */
+function syncDetailPath(fileId) {
+  const cur = window.pp.routerPath();
+  if (cur && cur.startsWith('/review/photo/')) window.pp.setPath(`/review/photo/${fileId}`);
+}
+
 export function detailRefresh() {
   if (!root) return;
   const list = window.pp.reviewPhotos();
@@ -566,7 +576,7 @@ export function detailRefresh() {
   if (i >= 0) {
     idx = i;
     window.pp.reviewSetIndex(idx);
-    window.pp.setPath(`/review/photo/${list[idx].file_id}`);
+    syncDetailPath(list[idx].file_id);
     render(); // same photo, same dump — only the decision changed
     return;
   }
@@ -574,7 +584,7 @@ export function detailRefresh() {
   // now, but refetch the dump so the side panel is never another photo's.
   idx = Math.max(0, Math.min(list.length - 1, idx));
   window.pp.reviewSetIndex(idx);
-  window.pp.setPath(`/review/photo/${list[idx].file_id}`);
+  syncDetailPath(list[idx].file_id);
   loadDump();
 }
 

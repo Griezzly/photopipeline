@@ -32,6 +32,7 @@ let frames = []; // [{ item: ReviewListItem, exif: string|null, exifLoaded: bool
 let zoom = 'fit'; // 'fit' | 1
 let syncing = false; // guards the scroll-mirror feedback loop
 let deciding = false; // one keeper write in flight at a time
+let leaving = false;   // dismissal queued; the overlay is still mounted but must not act
 
 const el = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s)
@@ -254,6 +255,7 @@ function onResize() { applyAllZoomStyles(); }
  *  screen is behind" using the old folder's identity. */
 async function setKeeper(fileId) {
   if (deciding) return;
+  if (leaving) return;
   if (state.activeFolder !== openedFolder) { dismissCompare(); return; }
   deciding = true;
   try {
@@ -324,6 +326,7 @@ function onKey(e) {
   // faith about the layer stack.
   const host = el('modal-host');
   if (host && root && host.lastElementChild !== root) return;
+  if (leaving) return;
   if (e.target && e.target.closest
       && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
   // stopPropagation so one Escape closes one layer: detail.js sits underneath
@@ -358,13 +361,19 @@ export function closeCompare() {
   groupId = null;
   totalMembers = 0;
   openedFolder = null;
+  leaving = false;
 }
 
 /** The user-facing close: Escape, the ✕ button, and the post-decision exit.
  *  The unmount happens in closeCompare() when the router applies the parent
  *  route, so Escape and Back do the same thing. */
 function dismissCompare() {
-  window.pp.back('/duplicates');
+  if (leaving) return;
+  leaving = true;
+  // The parent differs per route (amendment A1), and on a cold deep link
+  // there is no entry behind us to step to — so ask the router which screen
+  // this compare route sits over rather than assuming duplicates.
+  window.pp.back(window.pp.parentOf(window.pp.routerPath()) || '/duplicates');
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────
@@ -425,6 +434,7 @@ export async function openCompare(targetGroupId, fileIds) {
   totalMembers = c.members.length;
   zoom = 'fit';
   syncing = false;
+  leaving = false;
   frames = chosen.map((m) => ({ item: m, exif: null, exifLoaded: false }));
 
   mount();

@@ -74,6 +74,13 @@ export function parentPath(r) {
   }
 }
 
+/** The parent of an arbitrary path string, for callers outside this module
+ *  that know their own route only as a URL. Null for a path we do not serve. */
+export function parentOf(path) {
+  const r = parsePath(path);
+  return r ? parentPath(r) : null;
+}
+
 /** The screen `appliedPath` sits over: itself for a screen route, its parent
  *  for an overlay route. Two overlay entries belong to the same run when this
  *  agrees, which is what lets arrowing inherit the run's base. */
@@ -299,7 +306,10 @@ const ROUTES = {
         title: 'That cluster belongs to a different library',
         body: 'Its id means nothing in the library you have open now.',
       });
-      return parentPath(r);
+      // Not parentPath(r): for over:'photo' that path carries the stale
+      // file_id, which replace() would re-stamp with the current folder and
+      // ROUTES.photo would then look up against the wrong catalog.
+      return r.over === 'duplicates' ? '/duplicates' : '/review';
     }
     // Restore the layer this route names as sitting underneath, so Back out
     // of compare lands where the user opened it from (amendment A1).
@@ -381,4 +391,6 @@ export function startRouter() {
 
 // ensureLibrary, closeOverlays, parentPath and ROUTES stay module-private —
 // Tasks 3-6 add their appliers inside this file, not from the outside.
-Object.assign(window.pp, { go, replace, back, exitOverlay, setPath, routerPath, startRouter });
+Object.assign(window.pp, {
+  go, replace, back, exitOverlay, setPath, routerPath, parentOf, startRouter,
+});
