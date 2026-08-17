@@ -84,7 +84,7 @@ export async function openPicker(startPath) {
     const go = m.el.querySelector('#pk-go');
     go.disabled = !cur;
     go.textContent = cur ? 'Analyze this folder' : 'Analyze';
-    go.onclick = () => { m.close(); window.pp.startAnalyze(cur); };
+    go.onclick = () => { m.close(); window.pp.go('/analyze', { folder: cur }); };
 
     list.innerHTML = '';
     if (!listing.entries.length) {

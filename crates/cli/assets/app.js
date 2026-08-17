@@ -51,20 +51,16 @@ export const theme = {
 window.pp = { api, humanBytes, show, state, theme, renderRail() {} };
 
 async function boot() {
-  // Later tasks register their entry points on window.pp before boot runs.
-  try {
-    const active = await api('GET', '/api/active');
-    if (active && active.folder) {
-      state.activeFolder = active.folder;
-      if (window.pp.openReview) { await window.pp.openReview(active.folder); return; }
-    }
-  } catch (e) { /* fall through to the libraries screen */ }
-  if (window.pp.openLibraries) await window.pp.openLibraries();
+  // The router resolves location.hash — including the empty one, which it
+  // turns into /review or /libraries depending on whether the server has an
+  // active library. This is what the old GET /api/active dance did.
+  window.pp.startRouter();
 }
 
 // Every screen module, imported in one place so index.html never changes
 // again. icons.js is pulled in transitively by whichever of these import it.
 Promise.all([
+  import('/router.js'),
   import('/rail.js'),
   import('/toast.js'),
   import('/libraries.js'),

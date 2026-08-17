@@ -274,7 +274,7 @@ function render() {
 function wireListHandlers(host) {
   host.onclick = (e) => {
     const compareBtn = e.target.closest('[data-compare]');
-    if (compareBtn) { window.pp.openCompare(Number(compareBtn.dataset.compare)); return; }
+    if (compareBtn) { window.pp.go(`/duplicates/compare/${Number(compareBtn.dataset.compare)}`); return; }
 
     const skipBtn = e.target.closest('[data-skip]');
     if (skipBtn) { skipped.add(Number(skipBtn.dataset.skip)); render(); return; }
@@ -541,7 +541,7 @@ function onKey(e) {
       window.pp.toast({ kind: 'info', title: 'No undecided clusters', body: 'Every cluster already has a keeper.' });
       return;
     }
-    window.pp.openCompare(first.group_id);
+    window.pp.go(`/duplicates/compare/${first.group_id}`);
     return;
   }
   if (e.key === 'u' || e.key === 'U') {

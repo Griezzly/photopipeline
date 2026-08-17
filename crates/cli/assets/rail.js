@@ -2,11 +2,11 @@ import { state, show } from '/app.js';
 import { icon } from '/icons.js';
 
 const ITEMS = [
-  { id: 'libraries',  label: 'Libraries',  ico: 'folder',   go: () => window.pp.openLibraries() },
-  { id: 'review',     label: 'Review',     ico: 'grid',     needsLib: true, go: () => window.pp.openReview(state.activeFolder) },
-  { id: 'duplicates', label: 'Duplicates', ico: 'layers',   needsLib: true, go: () => window.pp.openDuplicates(state.activeFolder) },
-  { id: 'export',     label: 'Export',     ico: 'download', needsLib: true, go: () => window.pp.openExport() },
-  { id: 'develop',    label: 'Develop',    ico: 'develop',  needsLib: true, go: () => window.pp.openDevelop() },
+  { id: 'libraries',  label: 'Libraries',  ico: 'folder',   go: () => window.pp.go('/libraries') },
+  { id: 'review',     label: 'Review',     ico: 'grid',     needsLib: true, go: () => window.pp.go('/review') },
+  { id: 'duplicates', label: 'Duplicates', ico: 'layers',   needsLib: true, go: () => window.pp.go('/duplicates') },
+  { id: 'export',     label: 'Export',     ico: 'download', needsLib: true, go: () => window.pp.go('/export') },
+  { id: 'develop',    label: 'Develop',    ico: 'develop',  needsLib: true, go: () => window.pp.go('/develop') },
 ];
 
 function renderRail() {

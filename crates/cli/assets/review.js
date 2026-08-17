@@ -507,7 +507,7 @@ function renderGrid() {
         <button class="btn btn-primary" id="rv-analyze">${icon('spark', 14, 2)}Analyze folder</button>
       </div>`;
     el('rv-analyze').onclick = () => {
-      if (state.activeFolder) window.pp.startAnalyze(state.activeFolder);
+      if (state.activeFolder) window.pp.go('/analyze', { folder: state.activeFolder });
       else window.pp.openPicker(null);
     };
     return;
@@ -560,15 +560,15 @@ function renderGrid() {
 
   if (complete) {
     el('rv-keepers').onclick = () => { ui.keepersOnly = true; refresh(); };
-    el('rv-export-2').onclick = () => window.pp.openExport();
+    el('rv-export-2').onclick = () => window.pp.go('/export');
   }
   el('rv-tiles').onclick = (e) => {
     const t = e.target.closest('.tile');
     if (!t) return;
     const i = Number(t.dataset.i);
-    if (!Number.isNaN(i)) {
+    if (!Number.isNaN(i) && photos[i]) {
       cursor = i;
-      window.pp.openDetail(cursor);
+      window.pp.go(`/review/photo/${photos[i].file_id}`);
     }
   };
   scrollCursorIntoView();
@@ -775,7 +775,7 @@ function compareCursor() {
     });
     return;
   }
-  window.pp.openCompare(p.group_id);
+  window.pp.go(`/review/compare/${p.group_id}`);
 }
 
 // ── Keyboard (spec's keyboard model) ────────────────────────────────────────
@@ -827,7 +827,7 @@ function onKey(e) {
   if (k === 'u' || k === 'U') { decide(p, 'undecide', e.shiftKey); return; }
   // Shift is inherently held for Shift+K, so the keeper never advances.
   if (k === 'K') { decide(p, 'keeper', true); return; }
-  if (k === 'f' || k === 'F') { window.pp.openDetail(cursor); return; }
+  if (k === 'f' || k === 'F') { if (p) window.pp.go(`/review/photo/${p.file_id}`); return; }
   if (k === 'c' || k === 'C') { compareCursor(); }
 }
 
@@ -869,7 +869,7 @@ function paintChrome(folder) {
   };
   paintTheme();
   themeBtn.onclick = () => { window.pp.theme.toggle(); paintTheme(); };
-  el('rv-export').onclick = () => window.pp.openExport();
+  el('rv-export').onclick = () => window.pp.go('/export');
 }
 
 export async function openReview(folder, opts = {}) {
@@ -912,7 +912,7 @@ export async function openReview(folder, opts = {}) {
       kind: 'warn',
       title: `${plural(opts.pendingNew, 'new photo')} in this folder`,
       body: 'They are not in the catalog yet, so they do not appear in the grid or the counts.',
-      actions: [{ label: 'Re-analyze', onClick: () => window.pp.startAnalyze(folder) }],
+      actions: [{ label: 'Re-analyze', onClick: () => window.pp.go('/analyze', { folder }) }],
     });
   }
 

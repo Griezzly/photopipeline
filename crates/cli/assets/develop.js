@@ -29,21 +29,42 @@ let lastStepIdx = 0;
 
 // What the estimate said when this run was started: the resolved output path
 // and whether a look is active. Kept so the running screen and the summary can
-// state both without re-asking the server mid-run.
+// state both without re-asking the server mid-run. Refilled on a cold restore
+// of `/develop/run`, where there was no modal to populate it.
 let runInfo = { out_dir: '', look_available: false };
 
-export async function openDevelop() {
-  // Attach to a develop run already in flight rather than starting a second
-  // one — the rail is clickable again the moment the screen is left.
-  let status = null;
-  try { status = await api('GET', '/api/finish/status'); } catch (e) { /* treat as idle */ }
-  if (status && status.kind === 'finish' && isRunning(status.stage)) {
-    if (!runInfo.out_dir) runInfo.out_dir = status.folder;
-    enter();
-    poll();
-    return;
-  }
+// The live confirm modal's close function, or null — the router needs to tear
+// this down when it applies a different route. Same shape as export.js.
+let closeFn = null;
 
+/** Pure unmount, for the router's overlay teardown. Never navigates: the
+ *  onClose hook below checks the current route precisely so a teardown the
+ *  router initiated does not bounce it somewhere else. */
+export function closeDevelop() {
+  const c = closeFn;
+  closeFn = null;
+  if (c) c();
+}
+
+// An in-flight mount, so a second entry — a double-click, or the router
+// draining a queued /develop navigation — joins it rather than stacking a
+// second modal. The exposed window is the estimate fetch, during which nothing
+// is on screen yet and every entry point is still clickable.
+let pending = null;
+
+/** Route `/develop`: the pre-flight confirm modal, over whichever screen is up. */
+export async function openDevelop() {
+  if (closeFn) return true; // already mounted
+  if (pending) return pending; // mount in flight — both callers get one answer
+  pending = openDevelopModal();
+  try {
+    return await pending;
+  } finally {
+    pending = null;
+  }
+}
+
+async function openDevelopModal() {
   let est;
   try {
     est = await api('GET', '/api/finish/estimate');
@@ -53,7 +74,7 @@ export async function openDevelop() {
       title: 'Could not size the develop run',
       body: e.status === 409 ? 'No library is open.' : e.message,
     });
-    return;
+    return false;
   }
 
   if (!est.renderer_available) {
@@ -63,7 +84,7 @@ export async function openDevelop() {
       body: 'photopipe develops RAW files through rawtherapee-cli. Install RawTherapee, ' +
             'set [develop] rawtherapee_path in your config, then run `photopipe doctor`.',
     });
-    return;
+    return false;
   }
 
   if (!est.raw_keepers) {
@@ -75,14 +96,10 @@ export async function openDevelop() {
           'not RAW files, and photopipe only develops RAWs.'
         : 'Keep some photos in Review first — developing works from your keepers.',
     });
-    return;
+    return false;
   }
 
-  confirmAndStart(est);
-}
-
-function isRunning(stage) {
-  return stage !== 'idle' && stage !== 'done' && stage !== 'failed';
+  return confirmAndStart(est);
 }
 
 function confirmAndStart(est) {
@@ -93,6 +110,16 @@ function confirmAndStart(est) {
     title: `Develop ${n.toLocaleString()} photo${n === 1 ? '' : 's'}`,
     subtitle: 'Originals are never touched. Finished JPEGs are written alongside them.',
     width: 540,
+    onClose: () => {
+      closeFn = null;
+      // Only navigate when the user closed this. When the router tore the
+      // modal down on its way elsewhere — including the confirm path below,
+      // which navigates first and lets the router unmount — the current route
+      // has already moved off /develop and this is a no-op.
+      if (window.pp.routerPath() === '/develop') {
+        window.pp.back(window.pp.parentOf('/develop') || '/review');
+      }
+    },
     body: `
       <div class="exp-body">
         <div>
@@ -136,6 +163,8 @@ function confirmAndStart(est) {
       </div>`,
   });
 
+  closeFn = m.close;
+
   m.el.querySelector('#dv-cancel').onclick = () => m.close();
 
   const go = m.el.querySelector('#dv-go');
@@ -162,21 +191,45 @@ function confirmAndStart(est) {
           });
       return;
     }
-    m.close();
+    // Navigate first and let the router unmount the modal: closing it here
+    // would fire onClose while the route is still /develop, which would send
+    // us back to review instead of on to the run.
+    //
+    // `replace`, not `go` — the modal's entry is a step on the way to the run
+    // screen, not a place to return to. Back from the run then lands on the
+    // screen the rail was clicked from, and never re-opens a confirm dialog
+    // for a run that is already going. Same push-on-entry / replace-on-exit
+    // shape the analyze screen uses (spec A2).
     runInfo = { out_dir: est.out_dir, look_available: est.look_available };
-    enter();
-    poll();
+    window.pp.replace('/develop/run');
   };
   go.onclick = run;
   m.el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !go.disabled) { e.preventDefault(); run(); }
   });
+  return true;
 }
 
-function enter() {
+/** Route `/develop/run`: the checklist screen, and the summary it ends on.
+ *
+ *  Reached by confirming the modal, and by a reload or a Back into a run that
+ *  is still going — the router only applies this route once it has confirmed
+ *  with the server that there is a run worth showing. */
+export async function openDevelopRun() {
+  // A cold restore has no modal behind it to have filled these in. Without
+  // the estimate the screen would name the library instead of the output
+  // folder, and the summary would claim baseline JPEGs whether or not a look
+  // model is installed.
+  if (!runInfo.out_dir) {
+    try {
+      const est = await api('GET', '/api/finish/estimate');
+      runInfo = { out_dir: est.out_dir, look_available: est.look_available };
+    } catch (e) { /* the summary still carries out_dir; the look line waits */ }
+  }
   lastStepIdx = 0;
   show('develop');
   render(null);
+  poll();
 }
 
 function stepIndex(s) {
@@ -190,11 +243,25 @@ function stepIndex(s) {
   return lastStepIdx;
 }
 
-// True for a run that produced photos but could not develop every one. That is
-// an ordinary outcome — one unreadable file among 500 — not a failed run, and
-// the screen must not paint it red.
+// A finished run has three outcomes, not two.
+//
+// `isPartial` — some developed, some did not. An ordinary result: one
+// unreadable file among 500 is not a failed run, and the screen must not paint
+// it red.
+//
+// `allFailed` — photos were attempted and *none* came through. `finish_folder`
+// still returns Ok, because per-file failures are isolated by design, so the
+// job never reaches stage "failed" and without this the screen announced
+// "Developing complete" over a column of zeros. Nothing was produced; say so.
+//
+// Neither covers rendered === 0 with errored === 0, which is the everyday
+// "everything was already up to date" run — a success.
 function isPartial(sum) {
   return !!sum && sum.errored > 0 && sum.rendered > 0;
+}
+
+function allFailed(sum) {
+  return !!sum && sum.errored > 0 && sum.rendered === 0;
 }
 
 function summaryHtml(sum) {
@@ -210,13 +277,21 @@ function summaryHtml(sum) {
       <div class="dv-stats">${cells.map(([n, label]) => `
         <div class="stat"><div class="stat-n">${n.toLocaleString()}</div>
           <div class="stat-label">${label}</div></div>`).join('')}</div>
+      ${allFailed(sum)
+        ? `<div class="exp-note">All ${sum.errored.toLocaleString()}
+             attempted photo${sum.errored === 1 ? '' : 's'} failed, so nothing was written.
+             When every one fails the cause is usually shared — RawTherapee missing or
+             misconfigured, or the originals no longer where the catalog expects them.
+             The reason for each is in the terminal running
+             <code>photopipe serve</code>.</div>`
+        : ''}
       ${isPartial(sum)
         ? `<div class="exp-note">${sum.errored.toLocaleString()} photo${sum.errored === 1 ? '' : 's'}
              could not be developed and ${sum.errored === 1 ? 'was' : 'were'} skipped; the rest
              came through. The reason for each is in the terminal running
              <code>photopipe serve</code>.</div>`
         : ''}
-      ${!runInfo.look_available
+      ${!runInfo.look_available && !allFailed(sum)
         ? '<div class="exp-note">No look model is installed, so these are baseline JPEGs: ' +
           'exposure, white balance and sharpening only.</div>'
         : ''}
@@ -234,11 +309,13 @@ function render(s) {
   const folder = state.activeFolder || '';
 
   const title = failed ? 'Developing failed'
-    : done ? (isPartial(sum) ? 'Developed with some skipped' : 'Developing complete')
+    : done ? (allFailed(sum) ? 'No photo could be developed'
+      : isPartial(sum) ? 'Developed with some skipped'
+      : 'Developing complete')
     : counted ? `Developing ${s.files_total.toLocaleString()} photo${s.files_total === 1 ? '' : 's'}`
     : 'Starting…';
 
-  const pill = failed ? '<span class="pill pill-reject">Failed</span>'
+  const pill = failed || allFailed(sum) ? '<span class="pill pill-reject">Failed</span>'
     : done ? `<span class="pill ${isPartial(sum) ? 'pill-warn' : 'pill-done'}">${
         isPartial(sum) ? 'Partly done' : 'Done'}</span>`
     : '<span class="pill pill-run">Developing</span>';
@@ -306,7 +383,10 @@ function render(s) {
 
   el.querySelector('#dv-back').onclick = () => {
     stopPolling();
-    window.pp.openReview(state.activeFolder);
+    // `replace`, matching the analyze screen: a finished — or still running —
+    // job screen is not somewhere Back should re-enter. The run itself is
+    // unaffected either way; it lives on the server, not on this screen.
+    window.pp.replace('/review');
   };
 }
 
@@ -332,7 +412,14 @@ function poll() {
         // The output path is deliberately not in the body: it is an absolute
         // path, it is already on the card behind this toast, and a long
         // unbroken one overflows the toast rather than wrapping.
-        window.pp.toast(isPartial(sum)
+        window.pp.toast(allFailed(sum)
+          ? {
+              kind: 'error',
+              title: `No photo could be developed`,
+              body: 'All ' + sum.errored.toLocaleString() + ' failed. The reason for each is ' +
+                    'in the terminal running photopipe serve.',
+            }
+          : isPartial(sum)
           ? {
               kind: 'warn',
               title: `${sum.rendered.toLocaleString()} developed, ${sum.errored.toLocaleString()} skipped`,
@@ -364,4 +451,4 @@ function poll() {
   tick();
 }
 
-Object.assign(window.pp, { openDevelop });
+Object.assign(window.pp, { openDevelop, openDevelopRun, closeDevelop });
