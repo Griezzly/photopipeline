@@ -15,9 +15,46 @@ Phase 1). Everything the review-UI redesign left behind was fixed on
 From Phase 1 of automatic RAW development (`feat/auto-develop`). All were
 reproduced, none is a regression of existing behaviour, and each was left because
 it sits outside that phase's scope. KI-11 and KI-12 were found later, during the
-CHECKPOINT review on 2026-08-13.
+CHECKPOINT review on 2026-08-13. KI-14 came later still, from browser
+verification of the hash-routing branch on 2026-08-18, and is unrelated to
+develop.
 
 ### Affects photos, not just internals
+
+**KI-14 — picking a keeper aborts the whole server process.** `POST
+/api/decisions` with `action: "keeper"` terminates the process:
+`libc++abi: terminating due to uncaught exception of type
+duckdb::FatalException`, exit 134. It is not an error response — the server is
+gone, so every open browser tab loses its session and the next request fails to
+connect. Reproducible in two calls against a real library, with no UI involved:
+
+```
+curl -X POST localhost:PORT/api/open      -d '{"folder":"/path/to/library"}'
+curl -X POST localhost:PORT/api/decisions -d '{"file_id":N,"action":"keeper"}'
+```
+
+`keep`, `reject` and `undecide` all return 200 normally; only the keeper path
+(`Catalog::pick_keeper`, `crates/pipeline/src/catalog/mod.rs`) dies. The
+distinguishing feature of that path is that it wraps an `INSERT … ON CONFLICT
+(file_id) DO UPDATE` plus a sibling-reject loop in an explicit
+`BEGIN TRANSACTION`.
+
+Nothing is lost: the abort happens before the transaction commits. The
+catalog file was checksummed before and after several reproductions and stayed
+byte-identical, with no WAL left behind.
+
+Catalog state is implicated rather than the SQL alone —
+`crates/pipeline/tests/decisions.rs` covers `pick_keeper` and passes, so it
+works against a freshly built catalog. It is not KI-12: that duplicates rows in
+`files`, while `decisions` is keyed one row per `file_id`. A `FatalException` is
+DuckDB signalling an internal invariant failure rather than a query error, so
+the next step is probably dumping that library's `decisions` and
+`duplicate_members` rows and, failing an obvious cause, checking the DuckDB
+version's `ON CONFLICT`-inside-a-transaction behaviour.
+
+This was found while browser-testing hash routing, which is why it surfaced
+now and not earlier: it is on the one UI path that writes a keeper, and the
+crash presents as the review UI going dead rather than as a failed request.
 
 **KI-11 — `photopipe scan --reprocess` is accepted and ignored.** The flag is
 declared in the CLI, documented as "force re-analysis of already-processed
